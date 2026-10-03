@@ -78,8 +78,17 @@ export function renderGitList(parentEl, opts) {
   let scroll = findDirectChild(parentEl, "sfe-git-scroll");
   if (!scroll) {
     scroll = el("div", "sfe-git-scroll");
+    // 空白区右键：文件行自身处理并阻止冒泡，其余区域在此兜底弹出仓库级菜单。
+    // 监听器只绑一次（scroll 复用），通过节点上的最新 opts 避免闭包过期。
+    scroll.addEventListener("contextmenu", (event) => {
+      if (event.target?.closest?.(".sfe-git-row")) return;
+      event.preventDefault();
+      const latest = scroll.__sfeGitListOpts;
+      if (latest) openGitPaneContextMenu(scroll.parentElement, event.clientX, event.clientY, latest);
+    });
     parentEl.appendChild(scroll);
   }
+  scroll.__sfeGitListOpts = opts;
   scroll.replaceChildren();
 
   if (!gitStatus) {
@@ -708,12 +717,13 @@ export function closeGitContextMenu(parentEl) {
 }
 
 /**
- * 构建宿主 Git 文件行菜单：保持宿主项目顺序和分隔线，但明确不提供终端入口。
+ * 创建 Git 右键菜单骨架：统一清理、定位与菜单项构建，供文件行菜单与空白区菜单复用。
+ * @param {HTMLElement} parentEl 菜单挂载容器（同时作为清理句柄的宿主）
+ * @param {number} x 视口坐标 X
+ * @param {number} y 视口坐标 Y
+ * @returns {{addItem: Function, open: Function}} addItem 追加菜单项；open 挂载并定位
  */
-function openGitContextMenu(parentEl, x, y, file, section, opts) {
-  if (!parentEl) return;
-  closeGitContextMenu(parentEl);
-
+function createGitMenu(parentEl, x, y) {
   const menu = el("div", "sfe-context-menu sfe-git-context-menu");
   menu.setAttribute("role", "menu");
   let closed = false;
@@ -752,15 +762,39 @@ function openGitContextMenu(parentEl, x, y, file, section, opts) {
     });
     menu.appendChild(item);
   };
+  const open = () => {
+    menu[GIT_CONTEXT_MENU_CLEANUP] = cleanup;
+    parentEl[GIT_CONTEXT_MENU_CLEANUP] = cleanup;
+    parentEl.appendChild(menu);
+    document.addEventListener("click", handleOutsideClick, true);
+    document.addEventListener("keydown", handleEscape, true);
+    const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
+    const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+    const rect = menu.getBoundingClientRect();
+    const left = Math.max(4, Math.min(x, viewportWidth ? viewportWidth - rect.width - 4 : x));
+    const top = Math.max(4, Math.min(y, viewportHeight ? viewportHeight - rect.height - 4 : y));
+    menu.style.left = `${left}px`;
+    menu.style.top = `${top}px`;
+  };
+  return { addItem, open };
+}
 
+/**
+ * 构建宿主 Git 文件行菜单：保持宿主项目顺序和分隔线，但明确不提供终端入口。
+ */
+function openGitContextMenu(parentEl, x, y, file, section, opts) {
+  if (!parentEl) return;
+  closeGitContextMenu(parentEl);
+
+  const menu = createGitMenu(parentEl, x, y);
   const isDeleted = file.status === "D";
-  addItem("open", opts.t("git.openFile", "打开文件"), "fileText", () => {
+  menu.addItem("open", opts.t("git.openFile", "打开文件"), "fileText", () => {
     if (typeof opts.onOpenFile === "function") opts.onOpenFile(file, section);
   }, { disabled: isDeleted });
-  addItem("reveal", opts.t("git.revealInExplorer", "在资源管理器中打开"), "folderOpen", () => {
+  menu.addItem("reveal", opts.t("git.revealInExplorer", "在资源管理器中打开"), "folderOpen", () => {
     if (typeof opts.onRevealFile === "function") opts.onRevealFile(file);
   }, { disabled: isDeleted });
-  addItem(
+  menu.addItem(
     "stage-toggle",
     section === "staged" ? opts.t("git.unstageFile", "取消暂存") : opts.t("git.stageFile", "暂存"),
     section === "staged" ? "minus" : "plus",
@@ -770,30 +804,53 @@ function openGitContextMenu(parentEl, x, y, file, section, opts) {
     { separator: true },
   );
   if (section !== "staged" && typeof opts.onDiscard === "function") {
-    addItem("discard", opts.t("git.discardFile", "丢弃更改"), "undo", () => opts.onDiscard([file]), {
+    menu.addItem("discard", opts.t("git.discardFile", "丢弃更改"), "undo", () => opts.onDiscard([file]), {
       danger: true,
     });
   }
-  addItem("copy-relative", opts.t("git.copyRelativePath", "复制相对路径"), "copy", () => {
+  menu.addItem("copy-relative", opts.t("git.copyRelativePath", "复制相对路径"), "copy", () => {
     if (typeof opts.onCopyRelativePath === "function") opts.onCopyRelativePath(file);
   }, { separator: true });
-  addItem("copy-absolute", opts.t("git.copyAbsolutePath", "复制绝对路径"), "copy", () => {
+  menu.addItem("copy-absolute", opts.t("git.copyAbsolutePath", "复制绝对路径"), "copy", () => {
     if (typeof opts.onCopyAbsolutePath === "function") opts.onCopyAbsolutePath(file);
   });
+  // 刷新：重新拉取文件树与 Git 状态（与文件树右键菜单保持一致）
+  menu.addItem("refresh", opts.t("action.refresh", "刷新"), "refresh", () => {
+    if (typeof opts.onRefresh === "function") opts.onRefresh();
+  }, { separator: true });
+  menu.open();
+}
 
-  menu[GIT_CONTEXT_MENU_CLEANUP] = cleanup;
-  parentEl[GIT_CONTEXT_MENU_CLEANUP] = cleanup;
-  parentEl.appendChild(menu);
-  document.addEventListener("click", handleOutsideClick, true);
-  document.addEventListener("keydown", handleEscape, true);
+/**
+ * 构建 Git 空白区（非文件行）菜单：仓库级操作（刷新 / 全部暂存 / 全部取消暂存）。
+ * @description 复用文件行菜单的清理约定，使 closeGitContextMenu 与列表重建能统一回收。
+ */
+function openGitPaneContextMenu(parentEl, x, y, opts) {
+  if (!parentEl) return;
+  closeGitContextMenu(parentEl);
 
-  const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
-  const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
-  const rect = menu.getBoundingClientRect();
-  const left = Math.max(4, Math.min(x, viewportWidth ? viewportWidth - rect.width - 4 : x));
-  const top = Math.max(4, Math.min(y, viewportHeight ? viewportHeight - rect.height - 4 : y));
-  menu.style.left = `${left}px`;
-  menu.style.top = `${top}px`;
+  const menu = createGitMenu(parentEl, x, y);
+  const busy = opts.busy !== null && opts.busy !== undefined;
+  const isRepo = !!(opts.gitStatus && opts.gitStatus.isRepo);
+  const { staged, unstaged } = isRepo
+    ? partitionGitFiles(opts.gitStatus.files)
+    : { staged: [], unstaged: [] };
+
+  menu.addItem("refresh", opts.t("action.refresh", "刷新"), "refresh", () => {
+    if (typeof opts.onRefresh === "function") opts.onRefresh();
+  });
+  // 仅当对应分区存在文件时才提供批量操作，避免空白区出现无效菜单项
+  if (unstaged.length) {
+    menu.addItem("stage-all", opts.t("git.stageAll", "全部暂存"), "plus", () => {
+      if (typeof opts.onStageAll === "function") opts.onStageAll();
+    }, { separator: true, disabled: busy });
+  }
+  if (staged.length) {
+    menu.addItem("unstage-all", opts.t("git.unstageAll", "全部取消暂存"), "minus", () => {
+      if (typeof opts.onUnstageAll === "function") opts.onUnstageAll();
+    }, { separator: unstaged.length === 0, disabled: busy });
+  }
+  menu.open();
 }
 
 /**

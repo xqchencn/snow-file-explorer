@@ -519,6 +519,57 @@ test('预览区右键菜单: 普通文件显示资源管理器、绝对路径和
   assert.deepEqual(calls, ['reveal', 'copy-path', 'copy-relative-path']);
 });
 
+test('预览区右键菜单: 只读态提供刷新，编辑态不提供', async () => {
+  const calls = [];
+  const host = document.createElement('div');
+  renderCodeViewer(host, {
+    preview: {
+      kind: 'text',
+      name: 'example.js',
+      path: 'D:/repo/example.js',
+      text: 'const value = 1;',
+      highlightedHtml: '<span>const value = 1;</span>',
+      isMarkdown: false,
+    },
+    copied: false,
+    onCopy: () => {},
+    onRefresh: () => calls.push('refresh'),
+    t,
+  });
+
+  // 只读态：右键菜单含刷新项，点击触发 onRefresh
+  dispatchContextMenu(host.querySelector('.sfe-file-viewer-code-content'));
+  const menu = document.querySelector('.sfe-viewer-context-menu');
+  const refreshItem = menu.querySelector('[data-menu-id="refresh"]');
+  assert.ok(refreshItem, '只读态应提供刷新菜单项');
+  refreshItem.click();
+  assert.deepEqual(calls, ['refresh'], '刷新项应触发 onRefresh');
+
+  // 编辑态：不提供刷新项（重新读取会丢弃未保存修改）
+  const editHost = document.createElement('div');
+  renderCodeViewer(editHost, {
+    preview: {
+      kind: 'text',
+      name: 'example.js',
+      path: 'D:/repo/example.js',
+      text: 'const value = 1;',
+      highlightedHtml: '<span>const value = 1;</span>',
+      isMarkdown: false,
+    },
+    copied: false,
+    onCopy: () => {},
+    onRefresh: () => calls.push('refresh-edit'),
+    editable: true,
+    onEditInput: () => {},
+    t,
+  });
+  dispatchContextMenu(editHost.querySelector('textarea'));
+  const editMenu = document.querySelector('.sfe-viewer-context-menu');
+  assert.ok(editMenu, '编辑态右键仍应出现菜单（粘贴等）');
+  assert.equal(editMenu.querySelector('[data-menu-id="refresh"]'), null, '编辑态不得提供刷新项');
+  assert.deepEqual(calls, ['refresh'], '编辑态刷新未被触发');
+});
+
 test('预览区右键菜单: 只读选中文本只能复制，不能剪切或粘贴', async () => {
   let copiedText = null;
   setClipboard({ writeText: async (text) => { copiedText = text; } });

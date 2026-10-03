@@ -596,13 +596,17 @@ export function mount(container, api, _options = {}) {
     };
     renderGitPreview();
 
+    await loadGitPreviewDiff({ key, relPath, absPath, isStaged });
+  }
+
+  // 拉取并解析指定文件的 Git 差异（含工作区完整内容），供打开与右键刷新复用。
+  // 过期结果（切换了文件 / 已卸载）在内部丢弃，调用方无需重复校验。
+  async function loadGitPreviewDiff({ key, relPath, absPath, isStaged }) {
     const [diffRes, fileRes] = await Promise.all([
       gitFileDiff(state.rootPath, relPath, isStaged),
       readFileContent(absPath),
     ]);
-    if (disposed) return;
-    // 异步期间用户可能已切换文件，丢弃过期结果
-    if (!state.gitPreview || state.gitPreview.key !== key) return;
+    if (disposed || !state.gitPreview || state.gitPreview.key !== key) return;
 
     // 工作区完整文件文本（供 VS Code 风格全文件差异比较及未修改行补充）
     const fullContent = typeof fileRes?.content === "string" ? fileRes.content : null;
@@ -622,6 +626,15 @@ export function mount(container, api, _options = {}) {
       file: buildFilePreview({ name: basename(relPath), path: absPath }, fileRes),
     };
     renderGitPreview();
+  }
+
+  // Git 差异查看器右键「刷新」：重新拉取差异与工作区完整内容（该视图天然只读）。
+  async function handleGitPreviewRefresh() {
+    const gp = state.gitPreview;
+    if (!gp || !gp.absPath) return;
+    state.gitPreview = { ...gp, diff: { loading: true, result: null, error: "" } };
+    renderGitPreview();
+    await loadGitPreviewDiff(gp);
   }
 
   // 切换右侧文件查看器的「差异 / 内容」子视图
@@ -1025,6 +1038,21 @@ export function mount(container, api, _options = {}) {
     void copyPathText(value);
   }
 
+  // 只读态右键「刷新」：重新从磁盘读取当前文件（编辑态不显示该项，避免丢弃未保存修改）。
+  async function handlePreviewRefresh() {
+    const current = state.preview;
+    if (!current || !current.path) return;
+    const filePath = current.path;
+    const name = current.name;
+    // 先回到加载态给即时反馈，再用最新磁盘内容重建预览
+    state.preview = { kind: "loading", name, path: filePath };
+    renderPreview();
+    const result = await readFileContent(filePath);
+    if (disposed || !state.preview || pathKey(state.preview.path) !== pathKey(filePath)) return;
+    state.preview = buildFilePreview({ name, path: filePath }, result);
+    renderPreview();
+  }
+
   /**
    * 删除工作区文件或目录。
    * @description 删除是破坏性操作，必须先确认；成功后刷新文件树和 Git 状态。
@@ -1296,6 +1324,20 @@ export function mount(container, api, _options = {}) {
           input.select();
         }
       }, 0);
+    } else if (!entry) {
+      // 空白区右键：无具体条目，仅提供工作区级操作（刷新 / 打开工作区 / 复制工作区路径）
+      addItem(t("action.refresh", "刷新"), () => handleRefresh(), disabled);
+      separator();
+      addItem(
+        t("action.revealInExplorer", "在资源管理器中打开"),
+        () => handleRevealInExplorer({ path: state.rootPath }),
+        disabled || !state.rootPath,
+      );
+      addItem(
+        t("action.copyPath", "复制路径"),
+        () => copyPathText(state.rootPath),
+        disabled || !state.rootPath,
+      );
     } else {
       addItem(
         entry.isDirectory
@@ -1319,6 +1361,8 @@ export function mount(container, api, _options = {}) {
       separator();
       addItem(t("action.rename", "重命名"), () => beginRename(entry), disabled);
       addItem(t("action.delete", "删除"), () => handleDelete(entry), disabled);
+      separator();
+      addItem(t("action.refresh", "刷新"), () => handleRefresh(), disabled);
     }
 
     root.appendChild(menu);
@@ -1337,6 +1381,20 @@ export function mount(container, api, _options = {}) {
     renderToolbar();
     state.contextMenu = { entry, x, y };
     renderContextMenu();
+  }
+
+  /** 刷新文件树与 Git 状态（工具栏刷新按钮与右键菜单「刷新」共用同一入口）。 */
+  function handleRefresh() {
+    closeContextMenu();
+    refreshAll();
+  }
+
+  // 文件树空白区右键：命中具体条目时由行自身处理并 stopPropagation（见 tree-view.js），
+  // 只有落在空白处才冒泡到这里，弹出工作区级菜单（刷新 / 打开工作区 / 复制工作区路径）。
+  function handleTreePaneContextMenu(event) {
+    if (event.target?.closest?.(".sfe-file-item")) return;
+    event.preventDefault();
+    handleContextMenu(null, event.clientX, event.clientY);
   }
 
   // 5.1.1 右键菜单动作实现结束：所有实体变更都经过宿主 filesystem 写动作。
@@ -1802,6 +1860,8 @@ export function mount(container, api, _options = {}) {
   // 构建文件树视图骨架（左树 + 右预览）
   function buildFileView(mainView) {
     const treePane = el("div", "sfe-tree-pane");
+    // 空白区右键：行内条目自行处理并阻止冒泡，其余区域在此兜底弹出工作区级菜单
+    treePane.addEventListener("contextmenu", handleTreePaneContextMenu);
     mainView.appendChild(treePane);
     layoutEls.treePane = treePane;
 
@@ -1876,6 +1936,7 @@ export function mount(container, api, _options = {}) {
       onRevealFile: handlePreviewRevealFile,
       onCopyPath: handlePreviewCopyPath,
       onCopyRelativePath: handlePreviewCopyRelativePath,
+      onRefresh: handlePreviewRefresh,
       editable: state.preview.editable === true,
       saving: state.preview.saveState === "saving",
       t,
@@ -1930,6 +1991,8 @@ export function mount(container, api, _options = {}) {
        onRevealFile: handleGitRevealFile,
        onCopyRelativePath: handleGitCopyRelativePath,
        onCopyAbsolutePath: handleGitCopyAbsolutePath,
+       // 右键菜单「刷新」：与文件树刷新共用同一入口
+       onRefresh: handleRefresh,
        // 底部同步栏：左侧分支切换 + Git 同步（点击执行 pull / push），右侧 ↓/↑ 计数（0 灰、>0 彩色，点击分别拉取/推送）
       syncBusy: state.gitSyncBusy,
       branchBusy: state.gitBranchBusy,
@@ -1972,6 +2035,7 @@ export function mount(container, api, _options = {}) {
       onCopy: handleCopyCode,
       onSetMode: setPreviewMode,
       onSetDiffMode: setDiffMode,
+      onRefresh: handleGitPreviewRefresh,
       t,
     });
     // 「差异 / 内容」切换位于工具栏，需随查看器同步（打开/切换文件、切换子视图）

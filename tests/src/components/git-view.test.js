@@ -218,10 +218,10 @@ test('Git 变更列表: 文件右键菜单复刻宿主顺序并排除终端入�
   assert.ok(menu, '右键文件行应显示 Git 菜单');
   assert.deepEqual(
     [...menu.querySelectorAll('button')].map((item) => item.dataset.menuId),
-    ['open', 'reveal', 'stage-toggle', 'discard', 'copy-relative', 'copy-absolute'],
-    '菜单项顺序必须与宿主文件菜单一致（去除终端项）',
+    ['open', 'reveal', 'stage-toggle', 'discard', 'copy-relative', 'copy-absolute', 'refresh'],
+    '菜单项顺序必须与宿主文件菜单一致（去除终端项，末尾追加刷新）',
   );
-  assert.equal(menu.querySelectorAll('.sfe-context-menu-separator').length, 2, '应保留宿主两条分隔线');
+  assert.equal(menu.querySelectorAll('.sfe-context-menu-separator').length, 3, '应保留宿主两条分隔线并新增刷新前的分隔线');
   assert.doesNotMatch(menu.textContent, /终端|Terminal/i, '菜单不得包含在终端打开');
 
   menu.querySelector('[data-menu-id="stage-toggle"]').click();
@@ -265,6 +265,53 @@ test('Git 变更列表: 删除文件禁用打开和资源管理器菜单，但�
   assert.equal(pane.querySelector('[data-menu-id="reveal"]').disabled, true);
   assert.equal(pane.querySelector('[data-menu-id="stage-toggle"]').disabled, false);
   assert.equal(pane.querySelector('[data-menu-id="copy-relative"]').disabled, false);
+  document.body.removeChild(pane);
+});
+
+test('Git 变更列表: 空白区右键菜单提供仓库级操作，且与文件行菜单互斥', () => {
+  const pane = document.createElement('div');
+  document.body.appendChild(pane);
+  const calls = [];
+  renderGitList(pane, makeOpts({
+    gitStatus: {
+      isRepo: true,
+      files: [
+        { path: 'src/a.js', status: 'M', indexStatus: ' ', workdirStatus: 'M' },
+        { path: 'src/b.js', status: 'M', indexStatus: 'M', workdirStatus: ' ' },
+      ],
+    },
+    onRefresh: () => calls.push('refresh'),
+    onStageAll: () => calls.push('stage-all'),
+    onUnstageAll: () => calls.push('unstage-all'),
+  }));
+
+  // 空白区（滚动容器本身，非文件行）右键 → 仓库级菜单
+  const scroll = pane.querySelector('.sfe-git-scroll');
+  scroll.dispatchEvent(new window.MouseEvent('contextmenu', {
+    bubbles: true,
+    cancelable: true,
+    clientX: 20,
+    clientY: 20,
+  }));
+  const menu = pane.querySelector('.sfe-git-context-menu');
+  assert.ok(menu, '空白区右键应显示仓库级菜单');
+  assert.deepEqual(
+    [...menu.querySelectorAll('button')].map((item) => item.dataset.menuId),
+    ['refresh', 'stage-all', 'unstage-all'],
+    '空白区菜单只提供仓库级操作',
+  );
+
+  menu.querySelector('[data-menu-id="refresh"]').click();
+  assert.deepEqual(calls, ['refresh'], '刷新项应触发 onRefresh');
+
+  // 文件行右键 → 只出现文件级菜单，且行内 stopPropagation 不触发空白菜单
+  const row = pane.querySelector('.sfe-git-row:not(.sfe-git-folder-row)');
+  row.dispatchEvent(new window.MouseEvent('contextmenu', { bubbles: true, clientX: 24, clientY: 32 }));
+  const menus = pane.querySelectorAll('.sfe-git-context-menu');
+  assert.equal(menus.length, 1, '同一时刻只应存在一个 Git 菜单');
+  assert.ok(menus[0].querySelector('[data-menu-id="open"]'), '文件行菜单应含文件级项');
+  assert.equal(menus[0].querySelector('[data-menu-id="stage-all"]'), null, '文件行菜单不应含仓库级项');
+
   document.body.removeChild(pane);
 });
 

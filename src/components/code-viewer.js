@@ -109,14 +109,16 @@ function replaceViewerSelection(selection, text) {
 /** 构建预览区菜单；粘贴项只有剪贴板确实有文本时才启用。 */
 function openViewerContextMenu(bodyEl, x, y, target, opts) {
   clearViewerContextMenu(bodyEl);
-  const { editable, onRevealFile, onCopyPath, onCopyRelativePath, t } = opts;
+  const { editable, onRefresh, onRevealFile, onCopyPath, onCopyRelativePath, t } = opts;
   const selection = getViewerSelection(target);
   const hasFileActions =
     typeof onRevealFile === "function" ||
     typeof onCopyPath === "function" ||
     typeof onCopyRelativePath === "function";
   const isEditableText = editable === true && !!selection.target;
-  if (!selection.text && !hasFileActions && !isEditableText) return;
+  // 刷新：重新从磁盘读取当前文件，仅只读态提供（编辑态会丢弃未保存修改，必须禁用）。
+  const canRefresh = editable !== true && typeof onRefresh === "function";
+  if (!selection.text && !hasFileActions && !isEditableText && !canRefresh) return;
 
   const doc = bodyEl.ownerDocument;
   const menu = el("div", "sfe-context-menu sfe-viewer-context-menu");
@@ -192,6 +194,11 @@ function openViewerContextMenu(bodyEl, x, y, target, opts) {
   if (typeof onCopyRelativePath === "function") {
     addItem("copy-relative-path", t("action.copyRelativePath", "复制相对路径"), "copy", onCopyRelativePath);
   }
+  // 刷新置于文件操作之后：只读态重新读取磁盘内容（编辑态 canRefresh 为 false，不显示）
+  if (canRefresh) {
+    addSeparator();
+    addItem("refresh", t("action.refresh", "刷新"), "refresh", onRefresh);
+  }
 
   if (!menu.childElementCount) return;
   bodyEl[VIEWER_CONTEXT_MENU_CLEANUP] = cleanup;
@@ -221,6 +228,7 @@ function openViewerContextMenu(bodyEl, x, y, target, opts) {
  * @param {Function} [options.onRevealFile] 在资源管理器中打开当前文件回调
  * @param {Function} [options.onCopyPath] 复制当前文件绝对路径回调
  * @param {Function} [options.onCopyRelativePath] 复制当前文件相对路径回调
+ * @param {Function} [options.onRefresh] 重新读取当前文件回调（仅只读态显示，编辑态不显示）
  * @param {boolean} [options.editable=false] 当前是否处于编辑状态
  * @param {boolean} [options.saving=false] 是否正在保存
  * @param {Function} options.t 本地化翻译函数
@@ -239,6 +247,7 @@ export function renderCodeViewer(
     onRevealFile,
     onCopyPath,
     onCopyRelativePath,
+    onRefresh,
     editable = false,
     saving = false,
     t,
@@ -255,6 +264,7 @@ export function renderCodeViewer(
     preview,
     editable,
     onEditInput,
+    onRefresh,
     onRevealFile,
     onCopyPath,
     onCopyRelativePath,
