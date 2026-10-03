@@ -67,5 +67,16 @@
   "preview.error": "无法读取：",
   "preview.editUnavailable": "当前宿主未提供文件写入能力",
   "error.readRoot": "无法读取根目录",
-  "error.noApi": "当前版本未开放本地文件接口。"
-}
+  "error.noApi": "当前版本未开放本地文件接口。",
+  "action.openFile": "打开文件",
+  "action.openFolder": "展开文件夹",
+  "action.revealInExplorer": "在资源管理器中打开",
+  "action.copyPath": "复制路径",
+  "action.copyRelativePath": "复制相对路径",
+  "action.rename": "重命名",
+  "action.delete": "删除",
+  "action.cancel": "取消",
+  "action.renamePrompt": "请输入新名称",
+  "action.deleteConfirm": "确定删除“{{name}}”吗？此操作不可撤销。",
+  "action.operationFailed": "操作失败",
+  "action.operationSuccess": "操作成功"}

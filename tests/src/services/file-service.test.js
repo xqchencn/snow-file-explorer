@@ -7,6 +7,9 @@ import {
   resolveActiveDirectoryPath,
   detectJavaProjectFromEntries,
   writeFileContent,
+  relativePath,
+  renameFileSystemEntry,
+  deleteFileSystemEntry,
 } from '../../../src/services/file-service.js';
 
 test('文件服务: basename 与 extname', () => {
@@ -18,6 +21,14 @@ test('文件服务: basename 与 extname', () => {
   assert.equal(extname('archive.tar.gz'), 'gz');
   assert.equal(extname('.gitignore'), 'gitignore');
   assert.equal(extname('no_ext'), '');
+});
+
+test('文件服务: Windows 相对路径规范化且拒绝越界', () => {
+  assert.equal(relativePath('D:/repo', 'D:/repo/src/index.js'), 'src/index.js');
+  assert.equal(relativePath('D:\\repo', 'D:/repo\\src\\index.js'), 'src/index.js');
+  assert.equal(relativePath('D:/repo', 'D:/repo'), '.');
+  assert.equal(relativePath('D:/repo', 'D:/repo2/a.js'), null);
+  assert.equal(relativePath('D:/repo', 'D:/other/a.js'), null);
 });
 
 test('文件服务: sortEntries 文件夹优先与字母序', () => {
@@ -118,16 +129,37 @@ test('文件服务: 写入调用使用真实路径和完整文本，并透传成
   const calls = [];
   const api = {
     write: {
-      filesystem: {
-        writeFile: async (params) => {
-          calls.push(params);
-          return { ok: true, data: { bytes: 8 } };
-        },
+      run: async (action, params) => {
+        assert.equal(action, 'filesystem.writeFile');
+        calls.push(params);
+        return { ok: true, data: { bytes: 8 } };
       },
     },
   };
   const result = await writeFileContent(api, 'D:/repo/a.txt', '完整文本');
   assert.equal(result.ok, true);
   assert.deepEqual(calls, [{ filePath: 'D:/repo/a.txt', content: '完整文本' }]);
+});
+
+test('文件服务: 删除宿主未提供能力时明确失败', async () => {
+  const result = await deleteFileSystemEntry({}, 'D:/repo', 'D:/repo/a.txt');
+  assert.equal(result.ok, false);
+  assert.match(result.error, /未提供文件删除能力/);
+});
+
+test('文件服务: 删除调用使用真实工作区和条目路径，并透传成功结果', async () => {
+  const calls = [];
+  const api = {
+    write: {
+      run: async (action, params) => {
+        assert.equal(action, 'filesystem.delete');
+        calls.push(params);
+        return { ok: true, data: { deleted: true } };
+      },
+    },
+  };
+  const result = await deleteFileSystemEntry(api, 'D:/repo', 'D:/repo/a.txt');
+  assert.equal(result.ok, true);
+  assert.deepEqual(calls, [{ rootPath: 'D:/repo', entryPath: 'D:/repo/a.txt' }]);
 });
 

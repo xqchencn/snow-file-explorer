@@ -67,5 +67,16 @@
   "preview.error": "無法讀取：",
   "preview.editUnavailable": "目前宿主未提供檔案寫入能力",
   "error.readRoot": "無法讀取根目錄",
-  "error.noApi": "目前版本未開放本機檔案介面。"
-}
+  "error.noApi": "目前版本未開放本機檔案介面。",
+  "action.openFile": "開啟檔案",
+  "action.openFolder": "展開資料夾",
+  "action.revealInExplorer": "在檔案總管中開啟",
+  "action.copyPath": "複製路徑",
+  "action.copyRelativePath": "複製相對路徑",
+  "action.rename": "重新命名",
+  "action.delete": "刪除",
+  "action.cancel": "取消",
+  "action.renamePrompt": "請輸入新名稱",
+  "action.deleteConfirm": "確定要刪除「{{name}}」嗎？此操作無法復原。",
+  "action.operationFailed": "操作失敗",
+  "action.operationSuccess": "操作成功"}

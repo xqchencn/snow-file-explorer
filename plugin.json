@@ -35,6 +35,6 @@
   "styles": ["index.css"],
   "privacy": {
     "scopes": ["filesystem"],
-    "note": "允许在用户明确进入编辑模式并点击保存后写回当前文本文件。"
+    "note": "允许在用户明确操作后通过 filesystem scope 编辑和保存文件、重命名以及删除文件和目录。"
   }
 }

@@ -45,6 +45,7 @@ export function flattenTree(nodes, depth, expanded, out) {
  * @param {boolean} options.canRead 是否拥有文件读取权限
  * @param {Function} options.onToggleDir 切换目录展开/折叠回调
  * @param {Function} options.onSelectFile 选中文件回调
+ * @param {Function} options.onContextMenu 文件/目录右键回调
  * @param {Function} options.t 国际化翻译函数
  */
 export function renderTreeView(parentEl, options) {
@@ -58,6 +59,7 @@ export function renderTreeView(parentEl, options) {
     canRead = true,
     onToggleDir,
     onSelectFile,
+    onContextMenu,
     t,
   } = options;
 
@@ -160,6 +162,14 @@ export function renderTreeView(parentEl, options) {
         if (typeof onToggleDir === "function") onToggleDir(entry);
       } else {
         if (typeof onSelectFile === "function") onSelectFile(entry);
+      }
+    });
+
+    item.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (typeof onContextMenu === "function") {
+        onContextMenu(entry, e.clientX, e.clientY);
       }
     });
 

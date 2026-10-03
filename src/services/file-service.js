@@ -75,30 +75,114 @@ export async function readFileContent(filePath) {
 }
 
 /**
+ * 执行插件文件系统写动作，并把宿主的失败响应统一转换为 ok:false。
+ * @param {Object|null} api Snow App 插件运行时 API
+ * @param {string} actionId filesystem 写动作名称
+ * @param {Object} params 动作参数
+ * @param {string} unavailableMessage 宿主未提供动作时的错误文案
+ * @returns {Promise<{ok: boolean, data?: unknown, denied?: Object, error?: string}>}
+ */
+export async function runWriteAction(
+  api,
+  actionId,
+  params,
+  unavailableMessage = "当前宿主未提供文件操作能力"
+) {
+  const run = api && api.write && api.write.run;
+  if (typeof run !== "function") {
+    return { ok: false, error: unavailableMessage };
+  }
+  try {
+    const result = await run(`filesystem.${actionId}`, params);
+    if (result && result.ok === true) return result;
+    return {
+      ...(result && typeof result === "object" ? result : {}),
+      ok: false,
+      error: result && result.error ? String(result.error) : "文件操作失败",
+    };
+  } catch (err) {
+    return { ok: false, error: err && err.message ? err.message : String(err) };
+  }
+}
+
+/**
+ * 重命名工作区文件或目录。
+ * @param {Object|null} api Snow App 插件运行时 API
+ * @param {string} rootPath 工作区根目录
+ * @param {string} entryPath 条目路径
+ * @param {string} newName 新名称
+ * @returns {Promise<{ok: boolean, data?: unknown, error?: string}>}
+ */
+export function renameFileSystemEntry(api, rootPath, entryPath, newName) {
+  return runWriteAction(
+    api,
+    "rename",
+    { rootPath, entryPath, newName },
+    "当前宿主未提供文件重命名能力"
+  );
+}
+
+/**
+ * 删除工作区文件或目录。
+ * @param {Object|null} api Snow App 插件运行时 API
+ * @param {string} rootPath 工作区根目录
+ * @param {string} entryPath 要删除的条目路径
+ * @returns {Promise<{ok: boolean, data?: unknown, error?: string}>}
+ */
+export function deleteFileSystemEntry(api, rootPath, entryPath) {
+  return runWriteAction(
+    api,
+    "delete",
+    { rootPath, entryPath },
+    "当前宿主未提供文件删除能力"
+  );
+}
+
+/**
+ * 计算工作区内路径的相对路径。
+ * @description 使用 Windows 分隔符做大小写不敏感的边界比较，避免把 `repo2` 误判为 `repo` 子路径。
+ * @param {string} fromRoot 工作区根路径
+ * @param {string} targetPath 目标路径
+ * @returns {string|null} 统一使用 `/` 的相对路径；越界或路径无效时返回 null
+ */
+export function relativePath(fromRoot, targetPath) {
+  const normalize = (value) => {
+    const text = String(value || "").trim().replace(/\//g, "\\");
+    if (!text || !/^(?:[A-Za-z]:\\|\\\\|\\)/.test(text)) return null;
+    const isDriveRoot = /^[A-Za-z]:\\$/.test(text);
+    return text.length > 1 && !isDriveRoot ? text.replace(/\\+$/, "") : text;
+  };
+  const root = normalize(fromRoot);
+  const target = normalize(targetPath);
+  if (!root || !target) return null;
+
+  const rootKey = root.toLowerCase();
+  const targetKey = target.toLowerCase();
+  if (targetKey === rootKey) return ".";
+  const prefix = root.endsWith("\\") ? root : root + "\\";
+  if (!targetKey.startsWith(prefix.toLowerCase())) return null;
+
+  const relative = target.slice(prefix.length).replace(/\\+/g, "/");
+  if (!relative || relative.split("/").some((segment) => segment === "..")) return null;
+  return relative;
+}
+
+/**
  * 写入文本文件内容
- * @description 插件 ESM 运行时通过 api.write.filesystem.writeFile 执行真实写入，宿主参数名为 filePath。
+ * @description 插件 ESM 运行时通过 api.write.run("filesystem.writeFile", params) 执行真实写入，宿主参数名为 filePath。
  *   宿主未提供能力或动作失败时统一返回 ok:false，调用方不得伪造保存成功。
  * @param {Object|null} api Snow App 插件运行时 API
  * @param {string} filePath 文件绝对路径
  * @param {string} content 要写入的完整文本
  * @returns {Promise<{ok: boolean, data?: unknown, denied?: Object, error?: string}>}
  */
-export async function writeFileContent(api, filePath, content) {
-  const writeFile = api && api.write && api.write.filesystem && api.write.filesystem.writeFile;
-  if (typeof writeFile !== "function" || !filePath) {
-    return { ok: false, error: "当前宿主未提供文件写入能力" };
-  }
-  try {
-    const result = await writeFile({ filePath, content: String(content ?? "") });
-    if (result && result.ok === true) return result;
-    return {
-      ...(result && typeof result === "object" ? result : {}),
-      ok: false,
-      error: result && result.error ? String(result.error) : "文件写入失败",
-    };
-  } catch (err) {
-    return { ok: false, error: err && err.message ? err.message : String(err) };
-  }
+export function writeFileContent(api, filePath, content) {
+  return runWriteAction(
+    api,
+    "writeFile",
+    { filePath, content: String(content ?? "") },
+    "当前宿主未提供文件写入能力"
+  );
 }
 
 /* Java 项目检测服务定义如下。 */

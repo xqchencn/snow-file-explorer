@@ -12,6 +12,9 @@ import {
   readDirectoryEntries,
   readFileContent,
   writeFileContent,
+  renameFileSystemEntry,
+  deleteFileSystemEntry,
+  relativePath,
   resolveActiveDirectoryPath,
   detectJavaProject,
 } from "./services/file-service.js";
@@ -103,6 +106,40 @@ function isRightPanelFullscreen() {
 }
 
 /**
+ * 等待浏览器完成下一帧渲染。
+ * @returns {Promise<void>}
+ */
+function waitForNextFrame() {
+  return new Promise((resolve) => {
+    if (
+      typeof window !== "undefined" &&
+      typeof window.requestAnimationFrame === "function"
+    ) {
+      window.requestAnimationFrame(resolve);
+    } else {
+      setTimeout(resolve, 0);
+    }
+  });
+}
+
+/**
+ * 确保宿主右侧面板进入全屏。
+ * @description 宿主全屏状态由 React 异步更新，点击按钮后必须等待 DOM class 更新并确认结果。
+ * @returns {Promise<boolean>} 是否已进入全屏
+ */
+async function ensureRightPanelFullscreen() {
+  if (isRightPanelFullscreen()) return true;
+  if (!requestRightPanelFullscreen()) return false;
+
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    await waitForNextFrame();
+    if (isRightPanelFullscreen()) return true;
+  }
+
+  return false;
+}
+
+/**
  * 插件主挂载入口
  * @param {HTMLElement} container 挂载目标容器
  * @param {Object} api Snow App 注入的插件运行时 API
@@ -112,6 +149,7 @@ function isRightPanelFullscreen() {
 export function mount(container, api, _options = {}) {
   let disposed = false;
   let copiedTimer = null;
+  let operationTimer = null;
   let gitDebounceTimer = null;
   let previewRequestId = 0;
   let saveRequestId = 0;
@@ -142,6 +180,9 @@ export function mount(container, api, _options = {}) {
     },
     gitignoreRules: [],
     menuOpen: false,
+    contextMenu: null,
+    confirmDialog: null,
+    operationBusy: false,
     // Git 变更视图状态
     gitStatus: null,
     gitCommitMessage: "",
@@ -203,6 +244,9 @@ export function mount(container, api, _options = {}) {
     state.javaProject = null;
     state.expanded = Object.create(null);
     state.selected = null;
+    state.contextMenu = null;
+    state.confirmDialog = null;
+    state.operationBusy = false;
     state.gitStatus = null;
     state.gitStatusMap = Object.create(null);
     state.gitignoreRules = [];
@@ -819,12 +863,427 @@ export function mount(container, api, _options = {}) {
     renderTree();
   }
 
+  // 目录打开只负责展开，不把已经展开的目录误切换回收起状态。
+  async function openDirectory(entry) {
+    if (!entry || !entry.isDirectory || state.operationBusy) return;
+    if (!state.expanded[entry.path]) {
+      state.expanded[entry.path] = true;
+      if (!Array.isArray(entry.children)) {
+        try {
+          await loadDirectoryChildren(entry);
+        } catch {
+          entry.children = [];
+        }
+      }
+      renderTree();
+    }
+    closeContextMenu();
+  }
+
+  function parentDirectoryPath(filePath) {
+    const normalized = String(filePath || "").replace(/[\\/]+$/, "");
+    const index = Math.max(normalized.lastIndexOf("/"), normalized.lastIndexOf("\\"));
+    if (index < 0) return "";
+    if (index === 2 && /^[A-Za-z]:/.test(normalized)) return normalized.slice(0, 3);
+    return normalized.slice(0, index) || normalized.slice(0, 1);
+  }
+
+  function findTreeEntry(nodes, targetPath) {
+    if (!Array.isArray(nodes)) return null;
+    for (const entry of nodes) {
+      if (entry && pathKey(entry.path) === pathKey(targetPath)) return entry;
+      const nested = entry && findTreeEntry(entry.children, targetPath);
+      if (nested) return nested;
+    }
+    return null;
+  }
+
+  async function refreshFileTreeAfterMutation() {
+    const expandedPaths = Object.keys(state.expanded).filter((path) => state.expanded[path]);
+    await loadRoot();
+    for (const path of expandedPaths) {
+      const entry = findTreeEntry(state.rootNodes, path);
+      if (!entry || !entry.isDirectory) {
+        delete state.expanded[path];
+        continue;
+      }
+      try {
+        await loadDirectoryChildren(entry);
+      } catch {
+        entry.children = [];
+      }
+    }
+    renderTree();
+  }
+
+  function remapPath(path, oldPath, newPath) {
+    if (!path) return path;
+    const currentKey = pathKey(path);
+    const oldKey = pathKey(oldPath);
+    if (currentKey === oldKey) return newPath;
+    const normalizedPath = normalizePath(path);
+    const normalizedOld = normalizePath(oldPath).replace(/[/\\]+$/, "");
+    if (!normalizedPath.toLowerCase().startsWith(oldKey + "/")) return path;
+    return newPath + normalizedPath.slice(normalizedOld.length);
+  }
+
+  function remapStatePaths(oldPath, newPath) {
+    const expanded = Object.create(null);
+    for (const path of Object.keys(state.expanded)) {
+      expanded[remapPath(path, oldPath, newPath)] = state.expanded[path];
+    }
+    state.expanded = expanded;
+    state.selected = remapPath(state.selected, oldPath, newPath);
+    if (state.preview && state.preview.path) {
+      state.preview.path = remapPath(state.preview.path, oldPath, newPath);
+      state.preview.name = basename(state.preview.path);
+    }
+  }
+
+  function setOperationStatus(ok, error = "") {
+    state.status = ok
+      ? t("action.operationSuccess", "操作成功")
+      : `${t("action.operationFailed", "操作失败")}: ${error || t("action.operationFailed", "操作失败")}`;
+    renderToolbar();
+    if (operationTimer) clearTimeout(operationTimer);
+    operationTimer = setTimeout(() => {
+      if (disposed) return;
+      state.status = "";
+      operationTimer = null;
+      renderToolbar();
+    }, 3200);
+  }
+
+  async function runSystemWriteAction(actionId, params) {
+    const run = api && api.write && api.write.run;
+    if (typeof run !== "function") {
+      return { ok: false, error: "当前宿主未提供系统操作能力" };
+    }
+    try {
+      const result = await run(`system.${actionId}`, params);
+      if (result && result.ok === true) return result;
+      return { ok: false, error: result && result.error ? String(result.error) : "系统操作失败" };
+    } catch (err) {
+      return { ok: false, error: err && err.message ? err.message : String(err) };
+    }
+  }
+
+  async function copyPathText(text) {
+    closeContextMenu();
+    const result = await runSystemWriteAction("writeClipboardText", { text });
+    if (result.ok === true) return true;
+    const fallbackOk = await copyToClipboard(text);
+    if (fallbackOk) return true;
+    setOperationStatus(false, result.error);
+    return false;
+  }
+
+  async function handleRevealInExplorer(entry) {
+    if (!entry || state.operationBusy) return;
+    closeContextMenu();
+    const result = await runSystemWriteAction("showItemInFolder", { path: entry.path });
+    if (result.ok !== true) setOperationStatus(false, result.error);
+  }
+
   /**
-   * 由宿主文件读取结果构造预览状态对象
-   * @description 从 previewFile 抽出，供 Git 变更视图的「内容」模式复用（DRY）。
-   * @param {{name: string, path: string}} entry 文件条目
-   * @param {Object|null} result 宿主 readFileContent 返回的 FileContentResult
-   * @returns {Object} code-viewer 使用的 preview 状态对象
+   * 删除工作区文件或目录。
+   * @description 删除是破坏性操作，必须先确认；成功后刷新文件树和 Git 状态。
+   * @param {Object} entry 要删除的文件或目录条目
+   */
+  function handleDelete(entry) {
+    if (!entry || state.operationBusy || state.confirmDialog) return;
+
+    // 菜单先同步移除，再显示插件内的异步确认弹窗，避免阻塞宿主渲染线程。
+    closeContextMenu();
+    state.confirmDialog = { entry };
+    renderDeleteConfirmDialog();
+  }
+
+  function closeDeleteConfirm() {
+    if (!state.confirmDialog) return;
+    state.confirmDialog = null;
+    renderDeleteConfirmDialog();
+  }
+
+  async function confirmDelete() {
+    const dialog = state.confirmDialog;
+    if (!dialog || state.operationBusy) return;
+
+    const entry = dialog.entry;
+    state.confirmDialog = null;
+    renderDeleteConfirmDialog();
+    state.operationBusy = true;
+    renderToolbar();
+    renderTree();
+
+    try {
+      const result = await deleteFileSystemEntry(api, state.rootPath, entry.path);
+      if (disposed) return;
+
+      if (result.ok !== true) {
+        setOperationStatus(false, result.error);
+        return;
+      }
+
+      const selectedPath = pathKey(state.selected);
+      const deletedPath = pathKey(entry.path);
+      if (selectedPath && (selectedPath === deletedPath || selectedPath.startsWith(`${deletedPath}/`))) {
+        // 删除当前预览文件或其父目录时，不能继续显示已经不存在的内容。
+        state.selected = null;
+        state.preview = {
+          kind: "empty",
+          name: "",
+          path: "",
+          text: "",
+          highlightedHtml: "",
+          truncated: false,
+          isMarkdown: false,
+          mode: "preview",
+          html: "",
+          editable: false,
+          saveState: "idle",
+          saveMessage: "",
+        };
+        renderPreview();
+      }
+
+      await refreshFileTreeAfterMutation();
+      await refreshGitAll();
+      setOperationStatus(true);
+    } catch (err) {
+      if (!disposed) {
+        setOperationStatus(false, err && err.message ? err.message : String(err));
+      }
+    } finally {
+      if (!disposed) {
+        state.operationBusy = false;
+        renderToolbar();
+        renderTree();
+      }
+    }
+  }
+
+  function renderDeleteConfirmDialog() {
+    const root = layoutEls && layoutEls.root;
+    if (!root) return;
+
+    const oldOverlay = root.querySelector(".sfe-confirm-overlay");
+    if (oldOverlay) oldOverlay.remove();
+
+    const confirmState = state.confirmDialog;
+    if (!confirmState) return;
+
+    const entry = confirmState.entry;
+    const overlay = el("div", "sfe-confirm-overlay");
+    overlay.setAttribute("role", "presentation");
+    overlay.addEventListener("click", (event) => {
+      if (event.target === overlay) closeDeleteConfirm();
+    });
+
+    const dialog = el("div", "sfe-confirm-dialog");
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+    dialog.setAttribute("aria-label", t("action.delete", "删除"));
+    dialog.tabIndex = -1;
+    dialog.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeDeleteConfirm();
+      } else if (event.key === "Enter" && event.target === dialog) {
+        event.preventDefault();
+        void confirmDelete();
+      }
+    });
+
+    const title = el("h2", "sfe-confirm-title", t("action.delete", "删除"));
+    const message = el(
+      "p",
+      "sfe-confirm-message",
+      t("action.deleteConfirm", "确定删除“{{name}}”吗？此操作不可撤销。", {
+        name: entry.name || entry.path,
+      })
+    );
+    const actions = el("div", "sfe-confirm-actions");
+    const cancelButton = el("button", "sfe-confirm-button", t("action.cancel", "取消"));
+    cancelButton.type = "button";
+    cancelButton.addEventListener("click", closeDeleteConfirm);
+    const deleteButton = el("button", "sfe-confirm-button danger", t("action.delete", "删除"));
+    deleteButton.type = "button";
+    deleteButton.addEventListener("click", () => void confirmDelete());
+
+    actions.appendChild(cancelButton);
+    actions.appendChild(deleteButton);
+    dialog.appendChild(title);
+    dialog.appendChild(message);
+    dialog.appendChild(actions);
+    overlay.appendChild(dialog);
+    root.appendChild(overlay);
+
+    setTimeout(() => {
+      if (!disposed && dialog.isConnected) {
+        dialog.focus();
+      }
+    }, 0);
+  }
+
+  async function submitRename(newName) {
+    const context = state.contextMenu;
+    if (!context || state.operationBusy) return;
+    const entry = context.entry;
+    const trimmed = String(newName || "").trim();
+    if (!trimmed || trimmed === "." || trimmed === ".." || /[\\/]/.test(trimmed)) {
+      setOperationStatus(false, "名称不能为空，且不能包含路径分隔符");
+      return;
+    }
+    if (trimmed.toLowerCase() === String(entry.name || "").toLowerCase()) {
+      setOperationStatus(false, "新名称与原名称相同");
+      return;
+    }
+
+    const oldPath = entry.path;
+    const newPath = joinPath(parentDirectoryPath(oldPath), trimmed);
+    state.operationBusy = true;
+    renderContextMenu();
+    const result = await renameFileSystemEntry(api, state.rootPath, oldPath, trimmed);
+    if (disposed) return;
+    if (result.ok !== true) {
+      state.operationBusy = false;
+      renderContextMenu();
+      setOperationStatus(false, result.error);
+      return;
+    }
+
+    remapStatePaths(oldPath, newPath);
+    state.operationBusy = false;
+    closeContextMenu();
+    await refreshFileTreeAfterMutation();
+    await refreshGitAll();
+    setOperationStatus(true);
+  }
+
+  function closeContextMenu() {
+    if (!state.contextMenu) return;
+    state.contextMenu = null;
+    renderContextMenu();
+  }
+
+  async function handleContextOpen(entry) {
+    if (!entry || state.operationBusy) return;
+
+    closeContextMenu();
+
+    if (entry.isDirectory) {
+      await openDirectory(entry);
+      return;
+    }
+
+    await previewFile(entry);
+  }
+
+  function beginRename(entry) {
+    if (!entry || state.operationBusy) return;
+    state.contextMenu = { ...state.contextMenu, entry, renaming: true };
+    renderContextMenu();
+  }
+
+  function renderContextMenu() {
+    const root = layoutEls && layoutEls.root;
+    if (!root) return;
+    const oldMenu = root.querySelector(".sfe-context-menu");
+    if (oldMenu) oldMenu.remove();
+    const context = state.contextMenu;
+    if (!context) return;
+
+    const menu = el("div", "sfe-context-menu");
+    menu.setAttribute("role", "menu");
+    menu.style.left = `${Math.max(4, context.x)}px`;
+    menu.style.top = `${Math.max(4, context.y)}px`;
+    menu.addEventListener("click", (event) => event.stopPropagation());
+    const entry = context.entry;
+    const disabled = state.operationBusy;
+
+    const addItem = (label, action, isDisabled = false) => {
+      const item = el("button", "sfe-context-menu-item" + (isDisabled ? " disabled" : ""), label);
+      item.type = "button";
+      item.disabled = isDisabled;
+      item.setAttribute("role", "menuitem");
+      item.addEventListener("click", () => {
+        if (!isDisabled && !state.operationBusy) action();
+      });
+      menu.appendChild(item);
+    };
+    const separator = () => menu.appendChild(el("div", "sfe-context-menu-separator"));
+
+    if (context.renaming) {
+      const input = el("input", "sfe-context-menu-input");
+      input.type = "text";
+      input.value = entry.name || "";
+      input.setAttribute("aria-label", t("action.renamePrompt", "请输入新名称"));
+      input.disabled = disabled;
+      input.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          submitRename(input.value);
+        } else if (event.key === "Escape") {
+          event.preventDefault();
+          closeContextMenu();
+        }
+      });
+      menu.appendChild(input);
+      setTimeout(() => {
+        if (!disposed && input.isConnected) {
+          input.focus();
+          input.select();
+        }
+      }, 0);
+    } else {
+      addItem(
+        entry.isDirectory
+          ? t("action.openFolder", "展开文件夹")
+          : t("action.openFile", "打开文件"),
+        () => handleContextOpen(entry),
+        disabled,
+      );
+      separator();
+      addItem(t("action.revealInExplorer", "在资源管理器中打开"), () => handleRevealInExplorer(entry), disabled);
+      addItem(t("action.copyPath", "复制路径"), () => copyPathText(entry.path), disabled);
+      addItem(
+        t("action.copyRelativePath", "复制相对路径"),
+        () => {
+          const value = relativePath(state.rootPath, entry.path);
+          if (value == null) setOperationStatus(false, "目标路径不在当前工作区内");
+          else copyPathText(value);
+        },
+        disabled,
+      );
+      separator();
+      addItem(t("action.rename", "重命名"), () => beginRename(entry), disabled);
+      addItem(t("action.delete", "删除"), () => handleDelete(entry), disabled);
+    }
+
+    root.appendChild(menu);
+    const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
+    const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+    const rect = menu.getBoundingClientRect();
+    const left = Math.max(4, Math.min(context.x, viewportWidth ? viewportWidth - rect.width - 4 : context.x));
+    const top = Math.max(4, Math.min(context.y, viewportHeight ? viewportHeight - rect.height - 4 : context.y));
+    menu.style.left = `${left}px`;
+    menu.style.top = `${top}px`;
+  }
+
+  function handleContextMenu(entry, x, y) {
+    if (state.operationBusy || state.confirmDialog) return;
+    state.menuOpen = false;
+    renderToolbar();
+    state.contextMenu = { entry, x, y };
+    renderContextMenu();
+  }
+
+  // 5.1.1 右键菜单动作实现结束：所有实体变更都经过宿主 filesystem 写动作。
+
+  /**
+   * 由宿主文件读取结果构造预览状态对象。
+   * @description 同时供 Git 变更视图的内容模式复用，避免重复构造预览状态。
    */
   function buildFilePreview(entry, result) {
     // 宿主接口不可用（返回 null）
@@ -889,7 +1348,10 @@ export function mount(container, api, _options = {}) {
 
     // 智能联动全屏：非全屏模式下点击具体文件自动全屏展开代码大视野
     if (!isRightPanelFullscreen()) {
-      requestRightPanelFullscreen();
+      const fullscreenReady = await ensureRightPanelFullscreen();
+      if (!fullscreenReady) {
+        setOperationStatus(false, "无法进入右侧面板全屏");
+      }
     }
 
     state.preview = {
@@ -1230,6 +1692,7 @@ export function mount(container, api, _options = {}) {
     if (disposed) return;
     ensureLayout();
     renderToolbar();
+    renderDeleteConfirmDialog();
     const { mainView } = layoutEls;
     mainView.replaceChildren();
     // 视图切换会清空 mainView；旧底栏虽挂在 layout 上未丢失，但其中可能残留
@@ -1289,9 +1752,10 @@ export function mount(container, api, _options = {}) {
       gitStatusMap: state.gitStatusMap,
       canList: true,
       canRead: true,
-      onToggleDir: toggleDir,
-      onSelectFile: previewFile,
-      t,
+       onToggleDir: toggleDir,
+       onSelectFile: previewFile,
+       onContextMenu: handleContextMenu,
+       t,
     });
     pane.scrollTop = scroll;
   }
@@ -1426,6 +1890,12 @@ export function mount(container, api, _options = {}) {
         return;
       }
     }
+    if (state.contextMenu) {
+      const contextMenu = container.querySelector(".sfe-context-menu");
+      if (contextMenu && !contextMenu.contains(e.target)) {
+        closeContextMenu();
+      }
+    }
     if (!state.menuOpen) return;
     const wrap = container.querySelector(".sfe-menu-wrap");
     if (wrap && !wrap.contains(e.target)) {
@@ -1434,6 +1904,13 @@ export function mount(container, api, _options = {}) {
     }
   };
   document.addEventListener("click", closeMenuOnOutside, true);
+
+  const closeContextMenuOnEscape = (e) => {
+    if (e.key !== "Escape" || !state.contextMenu) return;
+    e.preventDefault();
+    closeContextMenu();
+  };
+  document.addEventListener("keydown", closeContextMenuOnEscape, true);
 
   // 宿主全屏态变化（用户点全屏按钮）时同步工具栏「差异 / 内容」切换的显隐。
   // MutationObserver / document.body 在真实宿主必然存在；此处做防御以兼容极简测试环境。
@@ -1547,6 +2024,7 @@ export function mount(container, api, _options = {}) {
   return () => {
     disposed = true;
     if (copiedTimer) clearTimeout(copiedTimer);
+    if (operationTimer) clearTimeout(operationTimer);
     if (gitDebounceTimer) clearTimeout(gitDebounceTimer);
     if (typeof unsubGit === "function") unsubGit();
     if (typeof unsubProjects === "function") unsubProjects();
@@ -1557,7 +2035,10 @@ export function mount(container, api, _options = {}) {
     }
     if (typeof document !== "undefined" && typeof document.removeEventListener === "function") {
       document.removeEventListener("click", closeMenuOnOutside, true);
+      document.removeEventListener("keydown", closeContextMenuOnEscape, true);
     }
+    state.contextMenu = null;
+    state.operationBusy = false;
     container.replaceChildren();
   };
 }
