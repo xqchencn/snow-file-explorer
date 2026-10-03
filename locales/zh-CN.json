@@ -15,6 +15,7 @@
   "settings.excludeMeta": "隐藏 .git 等元数据项",
   "settings.respectGitignore": "按 .gitignore 过滤",
   "settings.onlyGitChanges": "只显示 Git 变更",
+  "settings.javaPackageView": "Java 包结构视图",
   "git.notARepo": "当前目录不是 Git 仓库",
   "git.stagedChanges": "已暂存的变更",
   "git.changes": "变更",

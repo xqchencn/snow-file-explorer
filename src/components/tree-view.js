@@ -90,6 +90,7 @@ export function renderTreeView(parentEl, options) {
   for (const row of rows) {
     const entry = row.entry;
     const isDir = !!entry.isDirectory;
+    const displayName = entry.displayName || entry.name;
     const isExpanded = expanded[entry.path] === true;
     const isSelected = !isDir && selected === entry.path;
 
@@ -100,9 +101,14 @@ export function renderTreeView(parentEl, options) {
 
     const item = el(
       "div",
-      "sfe-file-item" + (isDir ? " sfe-folder-row" : "") + (isSelected ? " selected" : "")
+      "sfe-file-item" +
+        (isDir ? " sfe-folder-row" : "") +
+        (entry.isVirtualPackage ? " sfe-java-package-row" : "") +
+        (entry.isJavaSourceRoot ? " sfe-java-source-root-row" : "") +
+        (isSelected ? " selected" : "")
     );
     item.style.paddingLeft = 12 + row.depth * 14 + "px";
+    if (entry.packageName) item.title = entry.packageName;
 
     // 1. 展开/折叠三角（仅目录显示）
     const chevronWrap = el("span", "sfe-tree-chevron" + (isExpanded ? " expanded" : ""));
@@ -119,7 +125,7 @@ export function renderTreeView(parentEl, options) {
 
     // 3. 文件名称与 Git 染色
     const nameWrap = el("span", "sfe-file-name");
-    const nameText = el("span", "sfe-file-name-text", entry.name);
+    const nameText = el("span", "sfe-file-name-text", displayName);
     if (gitStatus) {
       applyGitNameStyle(nameText, gitStatus);
     }

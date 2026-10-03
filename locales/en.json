@@ -15,6 +15,7 @@
   "settings.excludeMeta": "Hide metadata (.git, etc.)",
   "settings.respectGitignore": "Filter by .gitignore",
   "settings.onlyGitChanges": "Only Git changes",
+  "settings.javaPackageView": "Java package view",
   "git.notARepo": "Not a Git repository",
   "git.stagedChanges": "Staged Changes",
   "git.changes": "Changes",

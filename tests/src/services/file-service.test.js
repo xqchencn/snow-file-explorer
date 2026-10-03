@@ -1,6 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { basename, extname, sortEntries, resolveActiveDirectoryPath } from '../../../src/services/file-service.js';
+import {
+  basename,
+  extname,
+  sortEntries,
+  resolveActiveDirectoryPath,
+  detectJavaProjectFromEntries,
+} from '../../../src/services/file-service.js';
 
 test('文件服务: basename 与 extname', () => {
   assert.equal(basename('/foo/bar/baz.js'), 'baz.js');
@@ -49,4 +55,66 @@ test('元数据契约: resolveActiveDirectoryPath 从包裹响应提取激活项
   assert.equal(resolveActiveDirectoryPath({ path: 'D:/wrong', directoryPath: 'D:/wrong' }), '');
   assert.equal(resolveActiveDirectoryPath({ domains: {} }), '');
   assert.equal(resolveActiveDirectoryPath(null), '');
+});
+
+test('Java 项目检测: Maven/Gradle 构建文件是强信号', () => {
+  const result = detectJavaProjectFromEntries([
+    { name: 'pom.xml', isDirectory: false },
+    { name: 'build.gradle', isDirectory: false },
+  ]);
+
+  assert.equal(result.isJavaProject, true);
+  assert.equal(result.confidence, 'strong');
+  assert.equal(result.buildSystem, 'mixed');
+  assert.deepEqual(result.buildFiles, ['pom.xml', 'build.gradle']);
+  assert.deepEqual(result.evidence, ['build-file']);
+});
+
+test('Java 项目检测: 标准源码根目录是强信号', () => {
+  const result = detectJavaProjectFromEntries(
+    [{ name: 'src', isDirectory: true }],
+    ['D:/repo/src/main/java', 'D:/repo/src/test/java', 'D:/repo/src/main/java']
+  );
+
+  assert.equal(result.isJavaProject, true);
+  assert.equal(result.confidence, 'strong');
+  assert.deepEqual(result.sourceRoots, ['D:/repo/src/main/java', 'D:/repo/src/test/java']);
+  assert.deepEqual(result.evidence, ['standard-source-root']);
+});
+
+test('Java 项目检测: 单个 Java 文件不足以把普通目录判成项目', () => {
+  const result = detectJavaProjectFromEntries([
+    { name: 'Example.java', isDirectory: false },
+    { name: 'README.md', isDirectory: false },
+  ]);
+
+  assert.equal(result.isJavaProject, false);
+  assert.equal(result.confidence, 'none');
+  assert.equal(result.javaFileCount, 1);
+  assert.deepEqual(result.evidence, []);
+});
+
+test('Java 项目检测: 多个根目录 Java 文件作为弱信号', () => {
+  const result = detectJavaProjectFromEntries([
+    { name: 'Main.java', isDirectory: false },
+    { name: 'Utils.java', isDirectory: false },
+  ]);
+
+  assert.equal(result.isJavaProject, true);
+  assert.equal(result.confidence, 'weak');
+  assert.equal(result.javaFileCount, 2);
+  assert.deepEqual(result.evidence, ['multiple-java-files']);
+});
+
+test('Java 项目检测: 忽略无效条目和大小写差异', () => {
+  const result = detectJavaProjectFromEntries([
+    null,
+    { name: 'POM.XML', isDirectory: false },
+    { name: '.java', isDirectory: false },
+    { name: 'notes.txt', isDirectory: false },
+  ]);
+
+  assert.equal(result.isJavaProject, true);
+  assert.deepEqual(result.buildFiles, ['POM.XML']);
+  assert.equal(result.javaFileCount, 0);
 });

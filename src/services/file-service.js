@@ -74,12 +74,154 @@ export async function readFileContent(filePath) {
   return await snow.readFileContent(filePath);
 }
 
+/* Java 项目检测服务定义如下。 */
+
+/**
+ * Java 项目根目录中可作为构建系统证据的文件名。
+ * @description 这些文件只说明项目属于 Java/JVM 生态；真正的包视图仍只对
+ *   `sourceRoots` 下的 Java 文件生效，避免把 Kotlin-only Gradle 项目当成 Java 源码树。
+ * @type {ReadonlyMap<string, string>}
+ */
+export const JAVA_BUILD_FILES = Object.freeze(
+  new Map([
+    ["pom.xml", "maven"],
+    ["build.gradle", "gradle"],
+    ["build.gradle.kts", "gradle"],
+    ["settings.gradle", "gradle"],
+    ["settings.gradle.kts", "gradle"],
+    ["gradlew", "gradle"],
+    ["gradlew.bat", "gradle"],
+  ])
+);
+
+/**
+ * 读取条目名称，忽略宿主 API 可能返回的脏数据。
+ * @param {Array} entries 目录直接子条目
+ * @returns {Array<{name: string, isDirectory: boolean}>}
+ */
+function normalizeProjectEntries(entries) {
+  if (!Array.isArray(entries)) return [];
+  return entries.filter((entry) => entry && typeof entry.name === "string");
+}
+
+/**
+ * 从已读取的目录信息判断其是否具备 Java/JVM 项目证据。
+ * @param {Array} entries 项目根目录直接子条目
+ * @param {Array<string>} sourceRoots 已发现的标准 Java 源码根目录
+ * @returns {{isJavaProject: boolean, confidence: "strong"|"weak"|"none", buildSystem: string|null, buildFiles: string[], sourceRoots: string[], javaFileCount: number, evidence: string[]}}
+ */
+export function detectJavaProjectFromEntries(entries, sourceRoots = []) {
+  const items = normalizeProjectEntries(entries);
+  const buildFiles = [];
+  const buildSystems = new Set();
+  let javaFileCount = 0;
+
+  for (const entry of items) {
+    const name = entry.name.toLowerCase();
+    const buildSystem = JAVA_BUILD_FILES.get(name);
+    if (buildSystem) {
+      buildFiles.push(entry.name);
+      buildSystems.add(buildSystem);
+    }
+    if (!entry.isDirectory && entry.name !== ".java" && /\.java$/i.test(entry.name)) {
+      javaFileCount++;
+    }
+  }
+
+  const roots = Array.isArray(sourceRoots) ? [...new Set(sourceRoots.filter(Boolean))] : [];
+  const evidence = [];
+  if (buildFiles.length) evidence.push("build-file");
+  if (roots.length) evidence.push("standard-source-root");
+  if (javaFileCount >= 2) evidence.push("multiple-java-files");
+
+  // 构建文件或标准源码根目录是强信号；单个 .java 文件不足以判定项目类型。
+  const isJavaProject = buildFiles.length > 0 || roots.length > 0 || javaFileCount >= 2;
+  return {
+    isJavaProject,
+    confidence: buildFiles.length || roots.length ? "strong" : javaFileCount >= 2 ? "weak" : "none",
+    buildSystem: buildSystems.size === 1 ? [...buildSystems][0] : buildSystems.size > 1 ? "mixed" : null,
+    buildFiles,
+    sourceRoots: roots,
+    javaFileCount,
+    evidence,
+  };
+}
+
+/**
+ * 在有限范围内检测 Java 项目，避免递归扫描整个工作区。
+ * @description 只读取根目录、根目录下的标准 `src/.../java`，以及一级模块的同名路径。
+ *   因此能覆盖 Maven/Gradle 多模块项目，又不会因为 node_modules 或构建产物导致卡顿。
+ * @param {string} rootPath 项目根目录绝对路径
+ * @returns {Promise<ReturnType<typeof detectJavaProjectFromEntries>>}
+ */
+export async function detectJavaProject(rootPath) {
+  const empty = detectJavaProjectFromEntries([]);
+  if (!rootPath) return empty;
+
+  let rootEntries;
+  try {
+    rootEntries = await readDirectoryEntries(rootPath);
+  } catch {
+    return empty;
+  }
+
+  const roots = [];
+  const seenPaths = new Set();
+  const rootItems = normalizeProjectEntries(rootEntries);
+
+  async function addSourceRoot(basePath, baseEntries, segments) {
+    const sourcePath = await findDirectoryFromEntries(basePath, baseEntries, segments);
+    if (sourcePath && !seenPaths.has(sourcePath)) {
+      seenPaths.add(sourcePath);
+      roots.push(sourcePath);
+    }
+  }
+
+  async function findDirectoryFromEntries(basePath, baseEntries, segments) {
+    let currentPath = basePath;
+    let entries = baseEntries;
+    for (const segment of segments) {
+      const match = entries.find((entry) => entry.isDirectory && entry.name === segment);
+      if (!match || !match.path) return null;
+      currentPath = match.path;
+      try {
+        entries = normalizeProjectEntries(await readDirectoryEntries(currentPath));
+      } catch {
+        return null;
+      }
+    }
+    return currentPath;
+  }
+
+  // 根模块与一级子模块均检查标准源码根目录，不递归探测任意深度目录。
+  const moduleBases = [{ path: rootPath, entries: rootItems }];
+  for (const entry of rootItems) {
+    if (
+      !entry.isDirectory ||
+      entry.name.startsWith(".") ||
+      ["node_modules", "target", "build", "out", "dist"].includes(entry.name)
+    ) continue;
+    let entries;
+    try {
+      entries = normalizeProjectEntries(await readDirectoryEntries(entry.path));
+    } catch {
+      continue;
+    }
+    moduleBases.push({ path: entry.path, entries });
+  }
+  for (const module of moduleBases) {
+    await addSourceRoot(module.path, module.entries, ["src", "main", "java"]);
+    await addSourceRoot(module.path, module.entries, ["src", "test", "java"]);
+  }
+
+  return detectJavaProjectFromEntries(rootItems, roots);
+}
+
 /**
  * 从 api.metadata.get 的响应中解析当前激活项目目录
  * @description 宿主契约：api.metadata.get(domain | domain[]) 返回包裹对象
  *   { generatedAt, domains, denied, withheld, unknown }，数据位于 response.domains[domainId]。
- *   domains.projects.active 即激活项目记录（{ directoryId, name, path, kind, isActive, pathState, ... }），
- *   与 domains.runtime.activeDirectory 等价；两者均可能为 null。
+ *   domains.projects.active 即激活项目记录；与 domains.runtime.activeDirectory 等价。
  * @param {Object|null} response api.metadata.get 的返回对象
  * @returns {string} 激活项目绝对路径；未找到时返回空字符串
  */

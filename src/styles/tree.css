@@ -119,6 +119,20 @@ html:has(.app-shell.right-panel-fullscreen) .sfe-tree-pane {
   font-family: var(--font-mono);
 }
 
+/* Java 虚拟包节点：颜色略偏主题强调色，保留普通文件夹行为 */
+.sfe-java-package-row .sfe-file-name {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.sfe-java-package-row .sfe-file-name-text {
+  letter-spacing: -0.01em;
+}
+
+.sfe-java-source-root-row .sfe-file-name {
+  color: var(--accent-color, var(--text-primary));
+}
+
 /* --------------------------------------------------------------------------
    Git 状态与文件着色（100% 纯粹继承 Snow App 官方主题强调色系统变量）
    -------------------------------------------------------------------------- */

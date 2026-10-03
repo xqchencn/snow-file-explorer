@@ -12,6 +12,7 @@ import {
   readDirectoryEntries,
   readFileContent,
   resolveActiveDirectoryPath,
+  detectJavaProject,
 } from "./services/file-service.js";
 import {
   fetchGitStatusMap,
@@ -24,6 +25,7 @@ import {
 import { highlightCodeHtml } from "./components/highlighter.js";
 import { renderMarkdownHtml } from "./components/markdown-renderer.js";
 import { renderTreeView } from "./components/tree-view.js";
+import { loadJavaPackageTree } from "./services/java-project.js";
 import { renderCodeViewer } from "./components/code-viewer.js";
 import { renderGitCommitBar, renderGitList, renderGitSyncBar, resetGitSyncBar } from "./components/git-view.js";
 import {
@@ -124,13 +126,19 @@ export function mount(container, api, _options = {}) {
   const state = {
     rootPath: "",
     rootNodes: null,
+    javaProject: null,
     expanded: Object.create(null),
     selected: null,
     status: "",
     copied: false,
     gitStatusMap: Object.create(null),
     // 视图开关（默认开启）与多层 .gitignore 规则
-    viewSettings: { excludeMeta: true, respectGitignore: true, onlyGitChanges: false },
+    viewSettings: {
+      excludeMeta: true,
+      respectGitignore: true,
+      onlyGitChanges: false,
+      javaPackageView: true,
+    },
     gitignoreRules: [],
     menuOpen: false,
     // Git 变更视图状态
@@ -189,6 +197,7 @@ export function mount(container, api, _options = {}) {
     if (!force && pathKey(next) === pathKey(state.rootPath)) return;
     state.rootPath = next;
     state.rootNodes = null;
+    state.javaProject = null;
     state.expanded = Object.create(null);
     state.selected = null;
     state.gitStatus = null;
@@ -217,14 +226,22 @@ export function mount(container, api, _options = {}) {
     await refreshAll();
   }
 
-  // 刷新当前面板全部数据（目录树 + Git 状态）
+  // 刷新 Java 项目识别结果：与目录树并行，避免阻塞 Git 状态刷新。
+  // 结果保存在状态中，后续 Java 包视图直接复用，不在渲染层重复扫描。
+  async function refreshJavaProject() {
+    if (disposed || !state.rootPath) return;
+    const projectPath = state.rootPath;
+    const detected = await detectJavaProject(projectPath);
+    // 异步检测期间可能已切换项目，过期结果不能写回当前状态。
+    if (disposed || pathKey(projectPath) !== pathKey(state.rootPath)) return;
+    state.javaProject = detected;
+  }
+
+  // 刷新当前面板全部数据：Java 项目识别必须先完成，源码根目录展开才有可靠的 sourceRoots。
   async function refreshAll() {
     if (disposed || !state.rootPath) return;
-    await Promise.all([
-      loadRoot(),
-      refreshGitStatus(),
-      refreshGitViewStatus(),
-    ]);
+    await refreshJavaProject();
+    await Promise.all([loadRoot(), refreshGitStatus(), refreshGitViewStatus()]);
   }
 
   // 2. 拉取 Git 状态
@@ -660,6 +677,30 @@ export function mount(container, api, _options = {}) {
   }
 
   /**
+   * 加载目录的直接子节点；Java 源码根目录只在用户展开时构造包树。
+   * @param {Object} entry 要展开的真实目录条目
+   * @returns {Promise<void>}
+   */
+  async function loadDirectoryChildren(entry) {
+    const filtered = (entries) =>
+      sortEntries(filterExcludedEntries(entries, state.rootPath, viewFilterOpts()));
+    const isJavaSourceRoot =
+      state.viewSettings.javaPackageView &&
+      state.javaProject &&
+      Array.isArray(state.javaProject.sourceRoots) &&
+      state.javaProject.sourceRoots.some((root) => pathKey(root) === pathKey(entry.path));
+
+    if (isJavaSourceRoot) {
+      entry.children = await loadJavaPackageTree(entry.path, filtered);
+      entry.isJavaSourceRoot = true;
+      return;
+    }
+
+    const sub = await readDirectoryEntries(entry.path);
+    entry.children = filtered(sub, entry.path);
+  }
+
+  /**
    * 递归收集仓库内所有 .gitignore 规则（浅层在前、深层在后，深层覆盖浅层）
    * @description 与 git 语义一致：每层目录的 .gitignore 相对于自身生效。
    *   扫描时对已被忽略 / 元数据目录剪枝，避免进入 node_modules 等海量目录。
@@ -715,6 +756,13 @@ export function mount(container, api, _options = {}) {
     state.viewSettings = { ...state.viewSettings, [key]: !state.viewSettings[key] };
     saveViewSettings(api, state.viewSettings);
     if (key === "respectGitignore") await reloadGitignore();
+    if (key === "javaPackageView") {
+      // 普通目录树与 Java 虚拟包树的 children 结构不同，必须从根重新加载。
+      state.expanded = Object.create(null);
+      state.menuOpen = false;
+      await loadRoot();
+      return;
+    }
     if (key === "onlyGitChanges") {
       // 关闭菜单，并重建主视图以在「文件树 / Git 变更」之间切换
       state.menuOpen = false;
@@ -763,9 +811,9 @@ export function mount(container, api, _options = {}) {
     state.expanded[entry.path] = next;
     if (next && !Array.isArray(entry.children)) {
       try {
-        const sub = await readDirectoryEntries(entry.path);
-        entry.children = sortEntries(filterExcludedEntries(sub, state.rootPath, viewFilterOpts()));
+        await loadDirectoryChildren(entry);
       } catch {
+        // Java 包树失败时保持普通目录可用，当前节点显示为空而不是冒泡到 UI。
         entry.children = [];
       }
     }
@@ -961,6 +1009,13 @@ export function mount(container, api, _options = {}) {
       menu.appendChild(item("excludeMeta", t("settings.excludeMeta", "隐藏 .git 等元数据项")));
       menu.appendChild(item("respectGitignore", t("settings.respectGitignore", "按 .gitignore 过滤")));
       menu.appendChild(item("onlyGitChanges", t("settings.onlyGitChanges", "只显示 Git 变更")));
+      if (
+        state.javaProject &&
+        Array.isArray(state.javaProject.sourceRoots) &&
+        state.javaProject.sourceRoots.length
+      ) {
+        menu.appendChild(item("javaPackageView", t("settings.javaPackageView", "Java 包结构视图")));
+      }
 
       wrap.appendChild(menu);
     }
@@ -1373,16 +1428,9 @@ export function mount(container, api, _options = {}) {
     if (disposed) return;
     await reloadGitignore();
     if (disposed) return;
-    // 视图设置加载完成后重建主视图：初始同步 render() 时还不知道 onlyGitChanges，
-    // 若用户上次停留在 Git 变更视图，此处必须切换到对应骨架，否则 renderGitPane 无目标
+    // 初始渲染只建立骨架；统一刷新会先完成 Java 项目识别，再加载根目录。
     render();
-    // 无条件拉取完整 Git 状态：底部同步栏（分支名 / ↑↓ 计数）在文件树视图下也要显示，
-    // 原先仅在 Git 变更视图下拉取，导致文件树视图底栏永远是「无分支 / 无计数」。
-    await Promise.all([
-      loadRoot(),
-      refreshGitStatus(),
-      refreshGitViewStatus(),
-    ]);
+    await refreshAll();
     if (disposed) return;
     // 跟随宿主项目切换：订阅 projects 域（live），activeDirectory 变化时全量切换到新项目。
     // 与宿主「打开文件夹」按钮天然一致，插件不自建多开与目录选择。

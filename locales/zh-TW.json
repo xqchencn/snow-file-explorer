@@ -15,6 +15,7 @@
   "settings.excludeMeta": "隱藏 .git 等中繼資料項",
   "settings.respectGitignore": "依 .gitignore 過濾",
   "settings.onlyGitChanges": "只顯示 Git 變更",
+  "settings.javaPackageView": "Java 套件結構檢視",
   "git.notARepo": "目前目錄不是 Git 倉庫",
   "git.stagedChanges": "已暫存的變更",
   "git.changes": "變更",
