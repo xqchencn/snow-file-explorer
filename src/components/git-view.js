@@ -67,10 +67,14 @@ export function renderGitCommitBar(parentEl, opts) {
  * @param {Function} opts.onDiscard 丢弃改动回调 (files)
  * @param {Function} opts.onToggleCollapse 折叠/展开目录回调 (section, path)
  * @param {Function} opts.onOpenFile 单击文件行打开差异回调 (file, section)
+ * @param {Function} opts.onRevealFile 在资源管理器中打开文件回调 (file)
+ * @param {Function} opts.onCopyRelativePath 复制相对路径回调 (file)
+ * @param {Function} opts.onCopyAbsolutePath 复制绝对路径回调 (file)
  * @param {Function} opts.t 国际化翻译函数
  */
 export function renderGitList(parentEl, opts) {
   const { gitStatus, t } = opts;
+  closeGitContextMenu(parentEl);
   let scroll = findDirectChild(parentEl, "sfe-git-scroll");
   if (!scroll) {
     scroll = el("div", "sfe-git-scroll");
@@ -468,6 +472,9 @@ function renderSection(opts) {
     onDiscard,
     onToggleCollapse,
     onOpenFile,
+    onRevealFile,
+    onCopyRelativePath,
+    onCopyAbsolutePath,
     t,
   } = opts;
 
@@ -523,6 +530,9 @@ function renderSection(opts) {
               onStageToggle,
               onDiscard,
               onOpenFile,
+              onRevealFile,
+              onCopyRelativePath,
+              onCopyAbsolutePath,
               t,
             })
       );
@@ -585,7 +595,21 @@ function renderFolderRow(opts) {
  * 渲染文件行
  */
 function renderFileRow(opts) {
-  const { file, depth, section, selected, busy, onSelectFile, onStageToggle, onDiscard, onOpenFile, t } = opts;
+  const {
+    file,
+    depth,
+    section,
+    selected,
+    busy,
+    onSelectFile,
+    onStageToggle,
+    onDiscard,
+    onOpenFile,
+    onRevealFile,
+    onCopyRelativePath,
+    onCopyAbsolutePath,
+    t,
+  } = opts;
   const isStaged = section === "staged";
   const key = `${section}:${file.path}`;
   const isSelected = selected === key;
@@ -618,6 +642,21 @@ function renderFileRow(opts) {
     if (typeof onOpenFile === "function") onOpenFile(file, section);
   });
 
+  row.addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    openGitContextMenu(row.closest(".sfe-git-pane") || row.parentElement, event.clientX, event.clientY, file, section, {
+      isStaged,
+      onOpenFile,
+      onRevealFile,
+      onStageToggle,
+      onDiscard,
+      onCopyRelativePath,
+      onCopyAbsolutePath,
+      t,
+    });
+  });
+
   const makeBtn = (cls, iconName, title, handler) => {
     const btn = el("button", "sfe-git-row-btn " + cls);
     btn.type = "button";
@@ -648,6 +687,113 @@ function renderFileRow(opts) {
   );
 
   return row;
+}
+
+const GIT_CONTEXT_MENU_CLEANUP = "__sfeGitContextMenuCleanup";
+
+/** 关闭 Git 文件行菜单，并移除其全局事件监听，避免列表刷新后残留监听器。 */
+export function closeGitContextMenu(parentEl) {
+  const cleanup = parentEl && parentEl[GIT_CONTEXT_MENU_CLEANUP];
+  if (typeof cleanup === "function") {
+    cleanup();
+    return;
+  }
+  const menu = parentEl && parentEl.querySelector(".sfe-git-context-menu");
+  const menuCleanup = menu && menu[GIT_CONTEXT_MENU_CLEANUP];
+  if (typeof menuCleanup === "function") {
+    menuCleanup();
+  } else if (menu) {
+    menu.remove();
+  }
+}
+
+/**
+ * 构建宿主 Git 文件行菜单：保持宿主项目顺序和分隔线，但明确不提供终端入口。
+ */
+function openGitContextMenu(parentEl, x, y, file, section, opts) {
+  if (!parentEl) return;
+  closeGitContextMenu(parentEl);
+
+  const menu = el("div", "sfe-context-menu sfe-git-context-menu");
+  menu.setAttribute("role", "menu");
+  let closed = false;
+  const cleanup = () => {
+    if (closed) return;
+    closed = true;
+    document.removeEventListener("click", handleOutsideClick, true);
+    document.removeEventListener("keydown", handleEscape, true);
+    menu.remove();
+    if (parentEl[GIT_CONTEXT_MENU_CLEANUP] === cleanup) {
+      delete parentEl[GIT_CONTEXT_MENU_CLEANUP];
+    }
+  };
+  const handleOutsideClick = (event) => {
+    if (!menu.contains(event.target)) cleanup();
+  };
+  const handleEscape = (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      cleanup();
+    }
+  };
+  const addItem = (id, label, iconName, action, { separator = false, disabled = false, danger = false } = {}) => {
+    if (separator) menu.appendChild(el("div", "sfe-context-menu-separator"));
+    const item = el("button", "sfe-context-menu-item sfe-git-context-menu-item" + (danger ? " danger" : ""));
+    item.type = "button";
+    item.disabled = disabled;
+    item.setAttribute("role", "menuitem");
+    item.dataset.menuId = id;
+    item.appendChild(createActionIcon(iconName, 13));
+    item.appendChild(el("span", "sfe-git-context-menu-label", label));
+    item.addEventListener("click", () => {
+      if (disabled) return;
+      cleanup();
+      action();
+    });
+    menu.appendChild(item);
+  };
+
+  const isDeleted = file.status === "D";
+  addItem("open", opts.t("git.openFile", "打开文件"), "fileText", () => {
+    if (typeof opts.onOpenFile === "function") opts.onOpenFile(file, section);
+  }, { disabled: isDeleted });
+  addItem("reveal", opts.t("git.revealInExplorer", "在资源管理器中打开"), "folderOpen", () => {
+    if (typeof opts.onRevealFile === "function") opts.onRevealFile(file);
+  }, { disabled: isDeleted });
+  addItem(
+    "stage-toggle",
+    section === "staged" ? opts.t("git.unstageFile", "取消暂存") : opts.t("git.stageFile", "暂存"),
+    section === "staged" ? "minus" : "plus",
+    () => {
+      if (typeof opts.onStageToggle === "function") opts.onStageToggle([file], section);
+    },
+    { separator: true },
+  );
+  if (section !== "staged" && typeof opts.onDiscard === "function") {
+    addItem("discard", opts.t("git.discardFile", "丢弃更改"), "undo", () => opts.onDiscard([file]), {
+      danger: true,
+    });
+  }
+  addItem("copy-relative", opts.t("git.copyRelativePath", "复制相对路径"), "copy", () => {
+    if (typeof opts.onCopyRelativePath === "function") opts.onCopyRelativePath(file);
+  }, { separator: true });
+  addItem("copy-absolute", opts.t("git.copyAbsolutePath", "复制绝对路径"), "copy", () => {
+    if (typeof opts.onCopyAbsolutePath === "function") opts.onCopyAbsolutePath(file);
+  });
+
+  menu[GIT_CONTEXT_MENU_CLEANUP] = cleanup;
+  parentEl[GIT_CONTEXT_MENU_CLEANUP] = cleanup;
+  parentEl.appendChild(menu);
+  document.addEventListener("click", handleOutsideClick, true);
+  document.addEventListener("keydown", handleEscape, true);
+
+  const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
+  const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+  const rect = menu.getBoundingClientRect();
+  const left = Math.max(4, Math.min(x, viewportWidth ? viewportWidth - rect.width - 4 : x));
+  const top = Math.max(4, Math.min(y, viewportHeight ? viewportHeight - rect.height - 4 : y));
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
 }
 
 /**

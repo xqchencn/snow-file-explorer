@@ -31,7 +31,7 @@ import { renderMarkdownHtml } from "./components/markdown-renderer.js";
 import { renderTreeView } from "./components/tree-view.js";
 import { loadJavaPackageTree } from "./services/java-project.js";
 import { renderCodeViewer } from "./components/code-viewer.js";
-import { renderGitCommitBar, renderGitList, renderGitSyncBar, resetGitSyncBar } from "./components/git-view.js";
+import { renderGitCommitBar, renderGitList, renderGitSyncBar, resetGitSyncBar, closeGitContextMenu } from "./components/git-view.js";
 import {
   isMarkdownPath,
   normalizePath,
@@ -988,6 +988,21 @@ export function mount(container, api, _options = {}) {
     if (result.ok !== true) setOperationStatus(false, result.error);
   }
 
+  async function handleGitRevealFile(file) {
+    if (!file || !state.rootPath) return;
+    await handleRevealInExplorer({ path: joinPath(state.rootPath, file.path) });
+  }
+
+  function handleGitCopyRelativePath(file) {
+    if (!file) return;
+    void copyPathText(file.path);
+  }
+
+  function handleGitCopyAbsolutePath(file) {
+    if (!file || !state.rootPath) return;
+    void copyPathText(joinPath(state.rootPath, file.path));
+  }
+
   /**
    * 删除工作区文件或目录。
    * @description 删除是破坏性操作，必须先确认；成功后刷新文件树和 Git 状态。
@@ -1843,9 +1858,13 @@ export function mount(container, api, _options = {}) {
       onCommitMessageInput: (value) => {
         state.gitCommitMessage = value;
       },
-      // 单击文件行：右侧加载该文件的 Git 差异
-      onOpenFile: openGitDiff,
-      // 底部同步栏：左侧分支切换 + Git 同步（点击执行 pull / push），右侧 ↓/↑ 计数（0 灰、>0 彩色，点击分别拉取/推送）
+       // 单击文件行：右侧加载该文件的 Git 差异
+       onOpenFile: openGitDiff,
+       // 右键菜单复用普通文件树已有系统能力，不新增复制/移动等文件 API。
+       onRevealFile: handleGitRevealFile,
+       onCopyRelativePath: handleGitCopyRelativePath,
+       onCopyAbsolutePath: handleGitCopyAbsolutePath,
+       // 底部同步栏：左侧分支切换 + Git 同步（点击执行 pull / push），右侧 ↓/↑ 计数（0 灰、>0 彩色，点击分别拉取/推送）
       syncBusy: state.gitSyncBusy,
       branchBusy: state.gitBranchBusy,
       onSync: handleSync,
@@ -2063,6 +2082,7 @@ export function mount(container, api, _options = {}) {
     }
     state.contextMenu = null;
     state.operationBusy = false;
+    closeGitContextMenu(layoutEls && layoutEls.gitPane);
     container.replaceChildren();
   };
 }

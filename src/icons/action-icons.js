@@ -28,6 +28,7 @@ import {
   ArrowDown,
   ArrowDownUp,
   GitBranch,
+  FolderOpen,
 } from 'lucide';
 
 const ICON_MAP = {
@@ -58,11 +59,12 @@ const ICON_MAP = {
   arrowDown: ArrowDown,
   // 当前分支（同步栏分支下拉触发器）
   branch: GitBranch,
+  folderOpen: FolderOpen,
 };
 
 /**
  * 创建动作图标 SVG 节点
- * @param {'chevronRight'|'chevronDown'|'refresh'|'sync'|'copy'|'check'|'eye'|'pencil'|'code'|'more'|'square'|'sparkles'|'gitCommit'|'minus'|'plus'|'undo'|'fileText'|'diff'|'unified'|'split'|'arrowUp'|'arrowDown'|'branch'} name 图标名称
+ * @param {'chevronRight'|'chevronDown'|'refresh'|'sync'|'copy'|'check'|'eye'|'pencil'|'code'|'more'|'square'|'sparkles'|'gitCommit'|'minus'|'plus'|'undo'|'fileText'|'diff'|'unified'|'split'|'arrowUp'|'arrowDown'|'branch'|'folderOpen'} name 图标名称
  * @param {number} [size=14] 图标大小
  * @returns {SVGSVGElement|HTMLElement}
  */

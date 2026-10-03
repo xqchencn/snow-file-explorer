@@ -192,6 +192,100 @@ test('Git 变更列表: 单击文件行即打开差异，行内按钮不误触�
   document.body.removeChild(pane);
 });
 
+test('Git 变更列表: 文件右键菜单复刻宿主顺序并排除终端入口', () => {
+  const pane = document.createElement('div');
+  document.body.appendChild(pane);
+  const calls = [];
+  const file = { path: 'src/a.js', status: 'M', indexStatus: ' ', workdirStatus: 'M' };
+  renderGitList(pane, makeOpts({
+    gitStatus: { isRepo: true, files: [file] },
+    onOpenFile: (entry, section) => calls.push(['open', entry.path, section]),
+    onRevealFile: (entry) => calls.push(['reveal', entry.path]),
+    onStageToggle: (entries, section) => calls.push(['stage', entries.map((entry) => entry.path), section]),
+    onDiscard: (entries) => calls.push(['discard', entries.map((entry) => entry.path)]),
+    onCopyRelativePath: (entry) => calls.push(['copy-relative', entry.path]),
+    onCopyAbsolutePath: (entry) => calls.push(['copy-absolute', entry.path]),
+  }));
+
+  const row = pane.querySelector('.sfe-git-row:not(.sfe-git-folder-row)');
+  row.dispatchEvent(new window.MouseEvent('contextmenu', {
+    bubbles: true,
+    cancelable: true,
+    clientX: 24,
+    clientY: 32,
+  }));
+  const menu = pane.querySelector('.sfe-git-context-menu');
+  assert.ok(menu, '右键文件行应显示 Git 菜单');
+  assert.deepEqual(
+    [...menu.querySelectorAll('button')].map((item) => item.dataset.menuId),
+    ['open', 'reveal', 'stage-toggle', 'discard', 'copy-relative', 'copy-absolute'],
+    '菜单项顺序必须与宿主文件菜单一致（去除终端项）',
+  );
+  assert.equal(menu.querySelectorAll('.sfe-context-menu-separator').length, 2, '应保留宿主两条分隔线');
+  assert.doesNotMatch(menu.textContent, /终端|Terminal/i, '菜单不得包含在终端打开');
+
+  menu.querySelector('[data-menu-id="stage-toggle"]').click();
+  assert.deepEqual(calls, [['stage', ['src/a.js'], 'unstaged']], '暂存项应传入当前文件和当前分区');
+
+  row.dispatchEvent(new window.MouseEvent('contextmenu', { bubbles: true, clientX: 24, clientY: 32 }));
+  pane.querySelector('[data-menu-id="discard"]').click();
+  assert.deepEqual(calls.at(-1), ['discard', ['src/a.js']], '丢弃项应传入当前文件');
+
+  row.dispatchEvent(new window.MouseEvent('contextmenu', { bubbles: true, clientX: 24, clientY: 32 }));
+  pane.querySelector('[data-menu-id="open"]').click();
+  assert.deepEqual(calls.at(-1), ['open', 'src/a.js', 'unstaged']);
+
+  row.dispatchEvent(new window.MouseEvent('contextmenu', { bubbles: true, clientX: 24, clientY: 32 }));
+  pane.querySelector('[data-menu-id="reveal"]').click();
+  assert.deepEqual(calls.at(-1), ['reveal', 'src/a.js']);
+
+  row.dispatchEvent(new window.MouseEvent('contextmenu', { bubbles: true, clientX: 24, clientY: 32 }));
+  pane.querySelector('[data-menu-id="copy-relative"]').click();
+  assert.deepEqual(calls.at(-1), ['copy-relative', 'src/a.js']);
+
+  row.dispatchEvent(new window.MouseEvent('contextmenu', { bubbles: true, clientX: 24, clientY: 32 }));
+  pane.querySelector('[data-menu-id="copy-absolute"]').click();
+  assert.deepEqual(calls.at(-1), ['copy-absolute', 'src/a.js']);
+  document.body.removeChild(pane);
+});
+
+test('Git 变更列表: 删除文件禁用打开和资源管理器菜单，但保留 Git 操作', () => {
+  const pane = document.createElement('div');
+  document.body.appendChild(pane);
+  const file = { path: 'deleted.js', status: 'D', indexStatus: ' ', workdirStatus: 'D' };
+  renderGitList(pane, makeOpts({
+    gitStatus: { isRepo: true, files: [file] },
+    onRevealFile: () => {},
+    onCopyRelativePath: () => {},
+    onCopyAbsolutePath: () => {},
+  }));
+  const row = pane.querySelector('.sfe-git-row');
+  row.dispatchEvent(new window.MouseEvent('contextmenu', { bubbles: true, clientX: 24, clientY: 32 }));
+  assert.equal(pane.querySelector('[data-menu-id="open"]').disabled, true);
+  assert.equal(pane.querySelector('[data-menu-id="reveal"]').disabled, true);
+  assert.equal(pane.querySelector('[data-menu-id="stage-toggle"]').disabled, false);
+  assert.equal(pane.querySelector('[data-menu-id="copy-relative"]').disabled, false);
+  document.body.removeChild(pane);
+});
+
+test('Git 变更列表: 文件菜单支持点击外部和 Escape 关闭', () => {
+  const pane = document.createElement('div');
+  document.body.appendChild(pane);
+  renderGitList(pane, makeOpts({
+    gitStatus: { isRepo: true, files: [{ path: 'a.js', status: 'M', indexStatus: ' ', workdirStatus: 'M' }] },
+  }));
+  const row = pane.querySelector('.sfe-git-row');
+  row.dispatchEvent(new window.MouseEvent('contextmenu', { bubbles: true, clientX: 24, clientY: 32 }));
+  assert.ok(pane.querySelector('.sfe-git-context-menu'));
+  document.body.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  assert.equal(pane.querySelector('.sfe-git-context-menu'), null, '点击菜单外部应关闭');
+
+  row.dispatchEvent(new window.MouseEvent('contextmenu', { bubbles: true, clientX: 24, clientY: 32 }));
+  document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  assert.equal(pane.querySelector('.sfe-git-context-menu'), null, 'Escape 应关闭菜单');
+  document.body.removeChild(pane);
+});
+
 // 选中常显的前提：列表即便被重建，也要按 state.gitSelected 恢复 .selected，
 // 否则 watcher 触发重建后行内按钮会退回「仅 hover 可见」。
 test('Git 变更列表: 重建后按 selected 恢复选中行与行内按钮', () => {

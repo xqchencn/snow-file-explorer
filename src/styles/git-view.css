@@ -253,9 +253,26 @@ html:has(.app-shell.right-panel-fullscreen) .sfe-git-preview-pane {
   white-space: nowrap;
 }
 
-/* --------------------------------------------------------------------------
-   变更列表
-   -------------------------------------------------------------------------- */
+/* Git 文件行右键菜单沿用普通文件树菜单容器，只补充图标和危险项样式。 */
+.sfe-git-context-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.sfe-git-context-menu-item svg {
+  flex-shrink: 0;
+}
+
+.sfe-git-context-menu-label {
+  white-space: nowrap;
+}
+
+.sfe-git-context-menu-item.danger {
+  color: var(--accent-red-text, var(--accent-red));
+}
+
+
 .sfe-git-scroll {
   flex: 1;
   min-height: 0;
