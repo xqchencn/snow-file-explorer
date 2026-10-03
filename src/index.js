@@ -487,40 +487,41 @@ export function mount(container, api, _options = {}) {
   // 切换分支（底部同步栏的分支下拉选中后触发）
   // 破坏性操作：先二次确认（切换分支会改变工作区内容，未提交改动可能受影响）。
   // 独立于 gitBusy：避免复用 runGitAction 的忙碌名导致按钮语义混乱；完成后统一刷新。
-  async function handleCheckoutBranch(branch) {
+  function handleCheckoutBranch(branch) {
     const name = branch && branch.name;
     if (!state.rootPath || !name || state.gitBranchBusy || state.gitBusy) return;
     const from = String((state.gitStatus && state.gitStatus.currentBranch) || "").trim();
-    const ok =
-      typeof window.confirm === "function"
-        ? window.confirm(
-            t("git.checkoutConfirm", "确定切换到分支「{{name}}」？未提交的改动可能受影响（当前：{{from}}）", {
-              name,
-              from: from || "-",
-            })
-          )
-        : true;
-    if (!ok) return;
-    state.gitBranchBusy = name;
-    renderGitPaneSync();
-    try {
-      const res = await gitCheckout(state.rootPath, name);
-      if (res && res.success === false) {
-        console.warn("[FileExplorer] 切换分支失败:", res.message);
-        return;
-      }
-      state.gitSelected = null;
-      state.gitPreview = null;
-      await refreshGitAll();
-      renderGitPreview();
-    } catch (err) {
-      console.warn("[FileExplorer] 切换分支异常:", err);
-    } finally {
-      if (!disposed) {
-        state.gitBranchBusy = null;
+    openConfirmDialog({
+      title: t("git.switchBranch", "切换分支"),
+      message: t("git.checkoutConfirm", "确定切换到分支「{{name}}」？未提交的改动可能受影响（当前：{{from}}）", {
+        name,
+        from: from || "-",
+      }),
+      confirmLabel: t("git.switchBranch", "切换分支"),
+      onConfirm: async () => {
+        if (state.gitBranchBusy || state.gitBusy) return;
+        state.gitBranchBusy = name;
         renderGitPaneSync();
-      }
-    }
+        try {
+          const res = await gitCheckout(state.rootPath, name);
+          if (res && res.success === false) {
+            console.warn("[FileExplorer] 切换分支失败:", res.message);
+            return;
+          }
+          state.gitSelected = null;
+          state.gitPreview = null;
+          await refreshGitAll();
+          renderGitPreview();
+        } catch (err) {
+          console.warn("[FileExplorer] 切换分支异常:", err);
+        } finally {
+          if (!disposed) {
+            state.gitBranchBusy = null;
+            renderGitPaneSync();
+          }
+        }
+      },
+    });
   }
 
   // 设置提交按钮模式（提交 / 提交并推送），并持久化
@@ -551,16 +552,18 @@ export function mount(container, api, _options = {}) {
       files.length === 1
         ? files[0].path
         : t("git.discardCount", "{{count}} 个文件", { count: files.length });
-    const ok =
-      typeof window.confirm === "function"
-        ? window.confirm(t("git.discardConfirm", "确定丢弃这些文件的更改？此操作不可撤销。\n{{label}}", { label }))
-        : true;
-    if (!ok) return;
-    const paths = files.map((f) => f.path);
-    runGitAction("discard", async () => {
-      await gitDiscardChanges(state.rootPath, paths);
-      state.gitSelected = null;
-      await refreshGitAll();
+    openConfirmDialog({
+      title: t("git.discardFile", "丢弃更改"),
+      message: t("git.discardConfirm", "确定丢弃这些文件的更改？此操作不可撤销。\n{{label}}", { label }),
+      confirmLabel: t("git.discardFile", "丢弃更改"),
+      onConfirm: async () => {
+        const paths = files.map((f) => f.path);
+        await runGitAction("discard", async () => {
+          await gitDiscardChanges(state.rootPath, paths);
+          state.gitSelected = null;
+          await refreshGitAll();
+        });
+      },
     });
   }
 
@@ -995,23 +998,45 @@ export function mount(container, api, _options = {}) {
 
     // 菜单先同步移除，再显示插件内的异步确认弹窗，避免阻塞宿主渲染线程。
     closeContextMenu();
-    state.confirmDialog = { entry };
-    renderDeleteConfirmDialog();
+    openConfirmDialog({
+      title: t("action.delete", "删除"),
+      message: t("action.deleteConfirm", "确定删除“{{name}}”吗？此操作不可撤销。", {
+        name: entry.name || entry.path,
+      }),
+      confirmLabel: t("action.delete", "删除"),
+      onConfirm: () => deleteEntry(entry),
+    });
   }
 
-  function closeDeleteConfirm() {
+  function openConfirmDialog({ title, message, confirmLabel, danger = true, onConfirm }) {
+    if (state.confirmDialog) return false;
+    state.confirmDialog = { title, message, confirmLabel, danger, onConfirm };
+    renderConfirmDialog();
+    return true;
+  }
+
+  function closeConfirmDialog() {
     if (!state.confirmDialog) return;
     state.confirmDialog = null;
-    renderDeleteConfirmDialog();
+    renderConfirmDialog();
   }
 
-  async function confirmDelete() {
+  async function confirmDialogAction() {
     const dialog = state.confirmDialog;
-    if (!dialog || state.operationBusy) return;
+    if (!dialog) return;
 
-    const entry = dialog.entry;
     state.confirmDialog = null;
-    renderDeleteConfirmDialog();
+    renderConfirmDialog();
+    try {
+      await dialog.onConfirm();
+    } catch (err) {
+      if (!disposed) setOperationStatus(false, err && err.message ? err.message : String(err));
+    }
+  }
+
+  async function deleteEntry(entry) {
+    if (!entry || state.operationBusy) return;
+
     state.operationBusy = true;
     renderToolbar();
     renderTree();
@@ -1063,7 +1088,7 @@ export function mount(container, api, _options = {}) {
     }
   }
 
-  function renderDeleteConfirmDialog() {
+  function renderConfirmDialog() {
     const root = layoutEls && layoutEls.root;
     if (!root) return;
 
@@ -1073,46 +1098,45 @@ export function mount(container, api, _options = {}) {
     const confirmState = state.confirmDialog;
     if (!confirmState) return;
 
-    const entry = confirmState.entry;
     const overlay = el("div", "sfe-confirm-overlay");
     overlay.setAttribute("role", "presentation");
     overlay.addEventListener("click", (event) => {
-      if (event.target === overlay) closeDeleteConfirm();
+      if (event.target === overlay) closeConfirmDialog();
     });
 
     const dialog = el("div", "sfe-confirm-dialog");
     dialog.setAttribute("role", "dialog");
     dialog.setAttribute("aria-modal", "true");
-    dialog.setAttribute("aria-label", t("action.delete", "删除"));
+    dialog.setAttribute("aria-label", confirmState.title);
     dialog.tabIndex = -1;
     dialog.addEventListener("keydown", (event) => {
       if (event.key === "Escape") {
         event.preventDefault();
-        closeDeleteConfirm();
+        closeConfirmDialog();
       } else if (event.key === "Enter" && event.target === dialog) {
         event.preventDefault();
-        void confirmDelete();
+        void confirmDialogAction();
       }
     });
 
-    const title = el("h2", "sfe-confirm-title", t("action.delete", "删除"));
-    const message = el(
-      "p",
-      "sfe-confirm-message",
-      t("action.deleteConfirm", "确定删除“{{name}}”吗？此操作不可撤销。", {
-        name: entry.name || entry.path,
-      })
-    );
+    const title = el("h2", "sfe-confirm-title", confirmState.title);
+    const message = el("p", "sfe-confirm-message", confirmState.message);
     const actions = el("div", "sfe-confirm-actions");
     const cancelButton = el("button", "sfe-confirm-button", t("action.cancel", "取消"));
     cancelButton.type = "button";
-    cancelButton.addEventListener("click", closeDeleteConfirm);
-    const deleteButton = el("button", "sfe-confirm-button danger", t("action.delete", "删除"));
-    deleteButton.type = "button";
-    deleteButton.addEventListener("click", () => void confirmDelete());
+    cancelButton.addEventListener("click", closeConfirmDialog);
+    const confirmButtonClass = confirmState.danger ? "sfe-confirm-button danger" : "sfe-confirm-button";
+    const confirmButton = el(
+      "button",
+      confirmButtonClass,
+      confirmState.confirmLabel || t("action.confirm", "确认")
+    );
+    confirmButton.type = "button";
+    confirmButton.addEventListener("click", () => void confirmDialogAction());
 
+    // 统一保持“取消 → 确认动作”的顺序，危险动作通过 danger 样式强调。
     actions.appendChild(cancelButton);
-    actions.appendChild(deleteButton);
+    actions.appendChild(confirmButton);
     dialog.appendChild(title);
     dialog.appendChild(message);
     dialog.appendChild(actions);
@@ -1692,7 +1716,7 @@ export function mount(container, api, _options = {}) {
     if (disposed) return;
     ensureLayout();
     renderToolbar();
-    renderDeleteConfirmDialog();
+    renderConfirmDialog();
     const { mainView } = layoutEls;
     mainView.replaceChildren();
     // 视图切换会清空 mainView；旧底栏虽挂在 layout 上未丢失，但其中可能残留
