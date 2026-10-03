@@ -11,10 +11,8 @@
 import { el } from "../utils/dom.js";
 import { createActionIcon } from "../icons/action-icons.js";
 import { buildSplitRows, buildFullFileDiff, buildFullSplitRows } from "../services/diff.js";
-import { highlightCodeHtml } from "./highlighter.js";
-
-/** 单次渲染的最大行数，防止超大 diff 阻塞界面 */
-const MAX_RENDER_LINES = 8000;
+import { highlightCodeHtml, MAX_HIGHLIGHT_LINES } from "./highlighter.js";
+import { createVirtualList } from "./virtual-list.js";
 
 /**
  * 渲染差异视图
@@ -39,6 +37,11 @@ export function renderDiffView(parentEl, {
   onSetMode,
   t,
 }) {
+  // 释放上一次差异视图可能残留的虚拟列表（滚动监听 / 内部节点）
+  if (parentEl.__sfeVList && typeof parentEl.__sfeVList.destroy === "function") {
+    parentEl.__sfeVList.destroy();
+    parentEl.__sfeVList = null;
+  }
   parentEl.replaceChildren();
 
   if (loading) {
@@ -63,38 +66,63 @@ export function renderDiffView(parentEl, {
   }
 
   const viewMode = mode === "split" ? "split" : "unified";
-  // 差异范围固定为完整文件；用户只需要选择统一或分栏布局。
-  const currentScope = "full";
   const wrap = el("div", "sfe-diff-view");
   const scroll = el("div", "sfe-diff-scroll" + (viewMode === "split" ? " split" : ""));
-  const hunkAnchors = [];
-  const hunkStartByLine = new Map();
 
-  // 完整文件模式复用 hunk 行对象引用，用对象身份建立稳定的跳转锚点。
-  result.hunks.forEach((hunk, index) => {
-    if (hunk && Array.isArray(hunk.lines) && hunk.lines[0]) {
-      hunkStartByLine.set(hunk.lines[0], index);
+  // 1. 把差异序列化为统一的「行项」数组：unified 直接是行对象，split 是 {left,right} 配对。
+  //    虚拟列表只渲染可视区的行项，DOM 数量与差异总行数解耦，因此无需再截断内容。
+  //    行项携带 hunkIndex（hunk 头或该 hunk 首行），供 hunk 跳转按索引定位。
+  const items = [];
+  const hunkStartRow = []; // hunkIndex -> 行项在 items 中的下标
+
+  const fullMode = typeof fullContent === "string" || result.hasHunks;
+  if (fullMode) {
+    const fullLines = buildFullFileDiff(result, fullContent);
+    const rows = viewMode === "split" ? buildFullSplitRows(fullLines) : fullLines;
+    const startByLine = new Map();
+    result.hunks.forEach((hunk, index) => {
+      if (hunk && Array.isArray(hunk.lines) && hunk.lines[0]) {
+        startByLine.set(hunk.lines[0], index);
+      }
+    });
+    for (const row of rows) {
+      const line = row && Object.prototype.hasOwnProperty.call(row, "left")
+        ? row.left || row.right
+        : row;
+      const hunkIndex = startByLine.has(line) ? startByLine.get(line) : undefined;
+      if (hunkIndex !== undefined && hunkStartRow[hunkIndex] === undefined) {
+        hunkStartRow[hunkIndex] = items.length;
+      }
+      items.push({ kind: "line", row, hunkIndex });
     }
+  } else {
+    for (const [index, hunk] of result.hunks.entries()) {
+      hunkStartRow[index] = items.length;
+      items.push({ kind: "head", header: hunk.header });
+      if (viewMode === "split") {
+        for (const row of buildSplitRows(hunk)) items.push({ kind: "line", row });
+      } else {
+        for (const line of hunk.lines) items.push({ kind: "line", row: line });
+      }
+    }
+  }
+
+  // 2. 高亮开关：逐行调用 Prism 成本 = 行数 × 分词，且单行文本永远够不到熔断阈值。
+  //    按差异总行数整体判定：小 diff 保留语法着色，大 diff 全部降级为纯文本。
+  const highlight = items.length <= MAX_HIGHLIGHT_LINES;
+
+  // 3. 虚拟列表（此时 scroll 尚未挂载，setItems 延后到挂载后调用，clientHeight 才可用）
+  const vlist = createVirtualList({
+    viewport: scroll,
+    renderRow: (item) =>
+      item.kind === "head"
+        ? el("div", "sfe-diff-hunk-head", item.header)
+        : viewMode === "split"
+          ? renderSplitRow(item.row, extension, highlight)
+          : renderDiffLine(item.row, extension, highlight),
   });
 
-  const appendHunkAnchor = (index) => {
-    if (hunkAnchors[index]) return;
-    const anchor = el("div", "sfe-diff-hunk-anchor");
-    anchor.dataset.hunkIndex = String(index);
-    anchor.setAttribute("aria-hidden", "true");
-    hunkAnchors[index] = anchor;
-    scroll.appendChild(anchor);
-  };
-
-  const appendFullHunkAnchor = (value) => {
-    const line = value && Object.prototype.hasOwnProperty.call(value, "left")
-      ? value.left || value.right
-      : value;
-    const index = hunkStartByLine.get(line);
-    if (index !== undefined) appendHunkAnchor(index);
-  };
-
-  // 顶部条：增删统计 + hunk 导航 + 展示模式切换（统一/分栏）
+  // 4. 顶部条：增删统计 + hunk 导航 + 展示模式切换
   const bar = el("div", "sfe-diff-bar");
   const stat = el("div", "sfe-diff-stat");
   stat.appendChild(el("span", "sfe-diff-stat-add", "+" + result.additions));
@@ -102,93 +130,30 @@ export function renderDiffView(parentEl, {
   bar.appendChild(stat);
 
   const controls = el("div", "sfe-diff-controls");
-  const hunkNavigator = renderHunkNavigator(scroll, hunkAnchors, result.hunks.length, t);
+  const hunkNavigator = renderHunkNavigator(hunkStartRow, (index) => vlist.scrollToIndex(index), t);
   controls.appendChild(hunkNavigator);
   controls.appendChild(renderModeSwitch(viewMode, t, onSetMode));
   bar.appendChild(controls);
   wrap.appendChild(bar);
-
-  let rendered = 0;
-  let truncated = false;
-
-  if (currentScope === "full" && (typeof fullContent === "string" || result.hasHunks)) {
-    // 全文件模式：合成完整文件所有行（未改动行 + hunk 增删改行）
-    const fullLines = buildFullFileDiff(result, fullContent);
-    if (viewMode === "split") {
-      for (const row of buildFullSplitRows(fullLines)) {
-        if (rendered >= MAX_RENDER_LINES) {
-          truncated = true;
-          break;
-        }
-        appendFullHunkAnchor(row);
-        scroll.appendChild(renderSplitRow(row, extension));
-        rendered++;
-      }
-    } else {
-      for (const line of fullLines) {
-        if (rendered >= MAX_RENDER_LINES) {
-          truncated = true;
-          break;
-        }
-        appendFullHunkAnchor(line);
-        scroll.appendChild(renderDiffLine(line, extension));
-        rendered++;
-      }
-    }
-  } else {
-    // 仅差异片段模式 (hunks)
-    for (const [index, hunk] of result.hunks.entries()) {
-      if (truncated) break;
-      appendHunkAnchor(index);
-      scroll.appendChild(el("div", "sfe-diff-hunk-head", hunk.header));
-      if (viewMode === "split") {
-        for (const row of buildSplitRows(hunk)) {
-          if (rendered >= MAX_RENDER_LINES) {
-            truncated = true;
-            break;
-          }
-          scroll.appendChild(renderSplitRow(row, extension));
-          rendered++;
-        }
-      } else {
-        for (const line of hunk.lines) {
-          if (rendered >= MAX_RENDER_LINES) {
-            truncated = true;
-            break;
-          }
-          scroll.appendChild(renderDiffLine(line, extension));
-          rendered++;
-        }
-      }
-    }
-  }
-
-  hunkNavigator.update();
   wrap.appendChild(scroll);
-  if (truncated) {
-    wrap.appendChild(
-      el(
-        "div",
-        "sfe-pv-note",
-        t("preview.diffTruncated", "差异过大，仅显示前 {{count}} 行。", { count: MAX_RENDER_LINES })
-      )
-    );
-  }
   parentEl.appendChild(wrap);
+
+  parentEl.__sfeVList = vlist;
+  vlist.setItems(items);
 }
 
 // 范围模式固定为完整文件，不渲染范围切换控件。
 
 /**
  * 渲染 hunk 上一个/下一个导航；按钮只在 Git 差异视图内部出现。
- * @param {HTMLElement} scroll 差异滚动容器
- * @param {Array<HTMLElement>} anchors 每个 hunk 的滚动锚点
- * @param {number} count hunk 总数
+ * @param {Array<number>} hunkStartRow 每个 hunk 在虚拟列表中的行下标
+ * @param {Function} onJump (rowIndex) => void 跳转到指定行下标（由虚拟列表滚动）
  * @param {Function} t 国际化翻译函数
  * @returns {HTMLElement}
  */
-function renderHunkNavigator(scroll, anchors, count, t) {
+function renderHunkNavigator(hunkStartRow, onJump, t) {
   const nav = el("div", "sfe-diff-hunk-nav");
+  const count = Array.isArray(hunkStartRow) ? hunkStartRow.length : 0;
   // -1 表示尚未定位到任何 hunk；即使只有一个 hunk，也必须允许首次点击下箭头跳过去。
   let current = -1;
   const previous = el("button", "sfe-diff-nav-btn sfe-diff-nav-previous");
@@ -206,21 +171,17 @@ function renderHunkNavigator(scroll, anchors, count, t) {
   const update = () => {
     const total = Math.max(0, count);
     position.textContent = total ? `${current < 0 ? 0 : current + 1}/${total}` : "0/0";
-    previous.disabled = current <= 0 || !anchors[current - 1];
-    next.disabled = !anchors[0] || (current >= 0 && current >= total - 1);
+    previous.disabled = current <= 0 || hunkStartRow[current - 1] === undefined;
+    next.disabled = hunkStartRow[0] === undefined || (current >= 0 && current >= total - 1);
   };
   const jump = (delta) => {
     const firstTargetIndex = current < 0 && delta > 0 ? 0 : current + delta;
     const targetIndex = Math.max(0, Math.min(Math.max(0, count - 1), firstTargetIndex));
-    const target = anchors[targetIndex];
-    if (!target) return;
+    const rowIndex = hunkStartRow[targetIndex];
+    if (rowIndex === undefined) return;
     current = targetIndex;
     update();
-    if (typeof target.scrollIntoView === "function") {
-      target.scrollIntoView({ block: "start" });
-    } else {
-      scroll.scrollTop = target.offsetTop;
-    }
+    onJump(rowIndex);
   };
 
   previous.addEventListener("click", () => jump(-1));
@@ -268,14 +229,14 @@ function renderModeSwitch(current, t, onSetMode) {
  * @param {string} [extension] 文件扩展名（不含点）
  * @returns {HTMLElement}
  */
-function renderDiffLine(line, extension) {
+function renderDiffLine(line, extension, highlight = true) {
   const row = el("div", "sfe-diff-line " + line.type);
   row.appendChild(el("span", "sfe-diff-no", line.oldNo == null ? "" : String(line.oldNo)));
   row.appendChild(el("span", "sfe-diff-no", line.newNo == null ? "" : String(line.newNo)));
   row.appendChild(el("span", "sfe-diff-sign", diffSign(line.type)));
   // 标记列与代码正文分离，Prism 只处理源码，避免把 +/- 当成语法内容。
   const text = el("span", "sfe-diff-text");
-  text.innerHTML = highlightDiffText(line.text, extension, line.type);
+  applyDiffText(text, line.text, extension, line.type, highlight);
   row.appendChild(text);
   return row;
 }
@@ -285,10 +246,10 @@ function renderDiffLine(line, extension) {
  * @param {{left: Object|null, right: Object|null}} row buildSplitRows 产出的分栏行
  * @returns {HTMLElement}
  */
-function renderSplitRow(row, extension) {
+function renderSplitRow(row, extension, highlight = true) {
   const line = el("div", "sfe-diff-split-row");
-  line.appendChild(renderSplitCell(row.left, "left", extension));
-  line.appendChild(renderSplitCell(row.right, "right", extension));
+  line.appendChild(renderSplitCell(row.left, "left", extension, highlight));
+  line.appendChild(renderSplitCell(row.right, "right", extension, highlight));
   return line;
 }
 
@@ -299,29 +260,36 @@ function renderSplitRow(row, extension) {
  * @param {string} [extension] 文件扩展名（不含点）
  * @returns {HTMLElement}
  */
-function renderSplitCell(cell, side, extension) {
+function renderSplitCell(cell, side, extension, highlight = true) {
   if (!cell) return el("div", "sfe-diff-split-cell empty " + side);
   const type = cell.type === "meta" ? "meta" : cell.type;
   const box = el("div", "sfe-diff-split-cell " + type + " " + side);
   box.appendChild(el("span", "sfe-diff-no", cell.oldNo == null ? "" : String(cell.oldNo)));
   box.appendChild(el("span", "sfe-diff-no", cell.newNo == null ? "" : String(cell.newNo)));
   box.appendChild(el("span", "sfe-diff-sign", diffSign(cell.type)));
-  // 与 unified 视图共用同一高亮入口，保证两种布局的颜色和安全策略一致。
+  // 与 unified 视图共用同一写入入口，保证两种布局的颜色和安全策略一致。
   const text = el("span", "sfe-diff-text");
-  text.innerHTML = highlightDiffText(cell.text, extension, cell.type);
+  applyDiffText(text, cell.text, extension, cell.type, highlight);
   box.appendChild(text);
   return box;
 }
 
 /**
- * 对差异正文做语法高亮；元信息行不属于源代码，强制走纯文本安全转义。
+ * 把差异行正文写入文本节点：高亮开启时走 Prism（元信息行不属于源码，强制纯文本安全转义）；
+ * 高亮关闭时（大 diff 熔断）直接写 textContent，不做任何分词与转义，成本最低。
+ * @param {HTMLElement} textEl 差异正文节点（.sfe-diff-text）
  * @param {string} text 差异行正文
  * @param {string} [extension] 文件扩展名（不含点）
  * @param {string} type 差异行类型
- * @returns {string} 可安全写入 innerHTML 的高亮 HTML
+ * @param {boolean} highlight 是否执行语法高亮
  */
-function highlightDiffText(text, extension, type) {
-  return highlightCodeHtml(text, type === "meta" ? "" : extension);
+function applyDiffText(textEl, text, extension, type, highlight) {
+  const source = String(text ?? "");
+  if (!highlight) {
+    textEl.textContent = source;
+    return;
+  }
+  textEl.innerHTML = highlightCodeHtml(source, type === "meta" ? "" : extension);
 }
 
 /**

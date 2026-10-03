@@ -65,8 +65,6 @@
   "preview.hint": "選取檔案即可預覽。",
   "preview.loading": "正在讀取…",
   "preview.binary": "二進位檔案（{{mime}}），不提供預覽。",
-  "preview.truncated": "內容過長，僅顯示前 20 萬字元。",
-  "preview.diffTruncated": "差異過大，僅顯示前 {{count}} 行。",
   "preview.error": "無法讀取：",
   "preview.editUnavailable": "目前宿主未提供檔案寫入能力",
   "error.readRoot": "無法讀取根目錄",

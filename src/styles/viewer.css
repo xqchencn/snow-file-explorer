@@ -281,3 +281,45 @@ html:has(.app-shell.right-panel-fullscreen) .sfe-preview-pane {
 .sfe-file-viewer-empty.error {
   color: var(--accent-red-text, var(--accent-red));
 }
+
+/* ==========================================================================
+   大文件窗口化虚拟列表（components/virtual-list.js）
+   仅在超过高亮熔断阈值的大文件下启用（code-viewer 添加 .sfe-file-viewer-code-scroll-virtual）。
+   容器滚动，内部只渲染「可视区 + 缓冲」的行，DOM 数量与总行数解耦，
+   因此无需截断内容即可打开超大文件。
+   ========================================================================== */
+.sfe-file-viewer-code-scroll-virtual {
+  position: relative;
+  line-height: 1.6;
+}
+
+/* 虚拟行：固定行高，与 .sfe-vlist-content 的 translateY 步长一致 */
+.sfe-file-viewer-line {
+  display: flex;
+  align-items: flex-start;
+  height: 1.6em;
+  overflow: hidden;
+}
+
+/* 行号：横向滚动时 sticky 在左侧，观感对齐整块高亮模式的行号槽 */
+.sfe-file-viewer-line-no {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  flex-shrink: 0;
+  width: 3.5em;
+  padding: 0 10px 0 14px;
+  text-align: right;
+  color: var(--text-muted);
+  user-select: none;
+  background: var(--bg-primary);
+  border-right: 1px solid var(--border-color);
+}
+
+.sfe-file-viewer-line-text {
+  flex: 1;
+  padding: 0 14px 0 10px;
+  white-space: pre;
+  user-select: text;
+  color: var(--text-primary);
+}

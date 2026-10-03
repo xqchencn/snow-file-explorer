@@ -6,7 +6,8 @@
  */
 
 import { el, escapeHtml, copyToClipboard } from "../utils/dom.js";
-import { highlightCodeHtml } from "./highlighter.js";
+import { highlightCodeHtml, shouldHighlight, isLargeText } from "./highlighter.js";
+import { createVirtualList } from "./virtual-list.js";
 import { createActionIcon } from "../icons/action-icons.js";
 import { resolveMarkdownAssetPath, resolveProxiedImageSrc } from "../services/markdown-asset.js";
 import { extname } from "../services/file-service.js";
@@ -209,7 +210,7 @@ function openViewerContextMenu(bodyEl, x, y, target, opts) {
  * 渲染代码/文件预览面板
  * @param {HTMLElement} bodyEl 承载预览内容的容器 DOM
  * @param {Object} options
- * @param {Object} options.preview 预览状态对象 { kind, text, highlightedHtml, url, name, mime, message, truncated, diff?, gitView? }
+ * @param {Object} options.preview 预览状态对象 { kind, text, highlightedHtml, url, name, mime, message, diff?, gitView? }
  * @param {boolean} options.copied 是否刚点击过复制按钮
  * @param {Function} options.onCopy 点击复制回调
  * @param {Function} options.onSetMode 切换预览/代码模式回调 (mode: 'preview' | 'code')
@@ -244,6 +245,11 @@ export function renderCodeViewer(
   }
 ) {
   closeViewerContextMenu(bodyEl);
+  // 释放上一次预览可能残留的虚拟列表（滚动监听 / 内部节点），避免重绘后泄漏
+  if (bodyEl.__sfeVList && typeof bodyEl.__sfeVList.destroy === "function") {
+    bodyEl.__sfeVList.destroy();
+    bodyEl.__sfeVList = null;
+  }
   bodyEl.replaceChildren();
   bindViewerContextMenu(bodyEl, {
     preview,
@@ -317,10 +323,9 @@ export function renderCodeViewer(
       viewerToolbar.appendChild(switcher);
     }
 
-    // 编辑能力只属于普通文本或 Markdown 代码模式；截断内容禁止编辑，避免覆盖原文件未读取部分。
+    // 编辑能力只属于普通文本或 Markdown 代码模式。
     const canEdit =
       preview.kind === "text" &&
-      !preview.truncated &&
       (!preview.isMarkdown || mode === "code") &&
       typeof onToggleEdit === "function";
 
@@ -378,9 +383,6 @@ export function renderCodeViewer(
       }
       scroll.appendChild(article);
       bodyEl.appendChild(scroll);
-      if (preview.truncated) {
-        bodyEl.appendChild(el("div", "sfe-pv-note", t("preview.truncated", "内容过长，仅显示前 20 万字符。")));
-      }
       return;
     }
 
@@ -392,8 +394,11 @@ export function renderCodeViewer(
       editHighlight.setAttribute("aria-hidden", "true");
       const updateEditHighlight = (value) => {
         const source = String(value ?? "");
-        editHighlight.innerHTML =
-          highlightCodeHtml(source, extname(preview.name)) || escapeHtml(source);
+        // 编辑态每次输入都会重建高亮层：超大文件逐次全量 Prism 会随按键持续阻塞主线程。
+        // 超过熔断阈值时编辑层退化为纯文本转义，真实输入仍由 textarea 承载。
+        editHighlight.innerHTML = shouldHighlight(source)
+          ? highlightCodeHtml(source, extname(preview.name)) || escapeHtml(source)
+          : escapeHtml(source);
         // 保留末尾空行的高度，避免输入换行后高亮层比 textarea 少一行。
         if (source.endsWith("\n")) editHighlight.appendChild(document.createTextNode(" "));
       };
@@ -415,28 +420,49 @@ export function renderCodeViewer(
       editScroll.appendChild(textarea);
       bodyEl.appendChild(editScroll);
     } else {
-      // 只读态继续使用经过转义/高亮的 HTML。
+      // 只读态：小文件整块高亮；大文件用窗口化虚拟列表，只渲染可视行。
       const scroll = el("div", "sfe-file-viewer-code-scroll");
-      const pre = el("pre", "sfe-file-viewer-code");
+      const rawText = String(preview.text || "");
+      const linesArray = rawText.split(/\r\n|\r|\n/);
 
-      // 行号槽
-      const gutter = el("div", "sfe-file-viewer-line-numbers");
-      const linesArray = String(preview.text || "").split(/\r\n|\r|\n/);
-      const total = linesArray.length;
-      let gutterText = "";
-      for (let i = 1; i <= total; i++) {
-        gutterText += i + (i < total ? NL : "");
+      // 大文件已被高亮熔断降级为纯文本，逐行渲染不会切坏跨行 token；
+      // 虚拟列表只渲染「可视区 + 缓冲」的行，DOM 数量与总行数解耦，因此无需截断内容。
+      // 小文件仍整块高亮，避免把多行注释 / 字符串的跨行 token 按行切碎。
+      if (isLargeText(rawText)) {
+        scroll.classList.add("sfe-file-viewer-code-scroll-virtual");
+        bodyEl.appendChild(scroll);
+        const list = createVirtualList({
+          viewport: scroll,
+          renderRow: (lineText, index) => {
+            const row = el("div", "sfe-file-viewer-line");
+            row.appendChild(el("span", "sfe-file-viewer-line-no", String(index + 1)));
+            row.appendChild(el("span", "sfe-file-viewer-line-text", lineText));
+            return row;
+          },
+        });
+        bodyEl.__sfeVList = list;
+        list.setItems(linesArray);
+      } else {
+        const pre = el("pre", "sfe-file-viewer-code");
+        const total = linesArray.length;
+
+        // 行号槽（整列 sticky 于横向滚动时为代码让位）
+        const gutter = el("div", "sfe-file-viewer-line-numbers");
+        let gutterText = "";
+        for (let i = 1; i <= total; i++) {
+          gutterText += i + (i < total ? NL : "");
+        }
+        gutter.textContent = gutterText;
+        pre.appendChild(gutter);
+
+        // 代码高亮内容
+        const content = el("div", "sfe-file-viewer-code-content");
+        content.innerHTML = preview.highlightedHtml || escapeHtml(rawText);
+        pre.appendChild(content);
+
+        scroll.appendChild(pre);
+        bodyEl.appendChild(scroll);
       }
-      gutter.textContent = gutterText;
-      pre.appendChild(gutter);
-
-      // 代码高亮内容
-      const content = el("div", "sfe-file-viewer-code-content");
-      content.innerHTML = preview.highlightedHtml || escapeHtml(preview.text || "");
-      pre.appendChild(content);
-
-      scroll.appendChild(pre);
-      bodyEl.appendChild(scroll);
     }
 
     if (preview.saveState && preview.saveState !== "idle") {
@@ -449,10 +475,6 @@ export function renderCodeViewer(
       bodyEl.appendChild(el("div", "sfe-pv-note", saveText));
     }
 
-    // 截断提示
-    if (preview.truncated) {
-      bodyEl.appendChild(el("div", "sfe-pv-note", t("preview.truncated", "内容过长，仅显示前 20 万字符。")));
-    }
     return;
   }
 

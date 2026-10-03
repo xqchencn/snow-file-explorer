@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { highlightCodeHtml } from '../../../src/components/highlighter.js';
+import { highlightCodeHtml, shouldHighlight, isLargeText } from '../../../src/components/highlighter.js';
 
 const CSS_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../src/styles/syntax.css');
 
@@ -93,4 +93,34 @@ test('语法高亮: 真实多语言样本产出的所有 token 类别均有 CSS 
 
   const missing = [...produced].filter((t) => !covered.has(t) && !isContainer(t)).sort();
   assert.deepEqual(missing, [], `以下 token 类别缺少 CSS 配色规则: ${missing.join(', ')}`);
+});
+
+test('语法高亮: shouldHighlight 熔断判定同时按字符数与行数', () => {
+  // 小文本：高亮
+  assert.equal(shouldHighlight('const a = 1;'), true);
+  assert.equal(shouldHighlight(''), false);
+  // 字符数超限：熔断
+  assert.equal(shouldHighlight('x'.repeat(250001)), false);
+  // 单行超长：压缩 JSON / minified 代码即便总字符数与行数都未超限，也必须熔断，
+  // 否则 Prism 会在单行上灾难性卡死（行数熔断挡不住它）。
+  assert.equal(shouldHighlight('x'.repeat(20001)), false, '单行超长应熔断');
+  assert.equal(shouldHighlight('x'.repeat(20000)), true, '单行未超阈值仍可高亮');
+  // 行数超限但字符数远未超限：这是本次修复的核心——大文件按行数熔断，
+  // 逐行高亮不再被单行短文本绕过。
+  assert.equal(shouldHighlight('a\n'.repeat(4000)), false, '4001 行应熔断');
+  // 行数边界：恰好 4000 行仍可高亮
+  assert.equal(shouldHighlight('a\n'.repeat(3999)), true, '4000 行应在阈值内');
+});
+
+test('语法高亮: isLargeText 判定大文件，空文本不算大', () => {
+  // 空文本不应被当作「大文件」（否则空文件会被误导去走虚拟化渲染）
+  assert.equal(isLargeText(''), false);
+  assert.equal(isLargeText(null), false);
+  // 普通文件不是大文件
+  assert.equal(isLargeText('const a = 1;'), false);
+  // 行数/字符数任一超限即大文件
+  assert.equal(isLargeText('a\n'.repeat(4000)), true);
+  assert.equal(isLargeText('x'.repeat(250001)), true);
+  // 单行超长（行数远未超限）同样视为大文件，交由虚拟化渲染
+  assert.equal(isLargeText('x'.repeat(20001)), true);
 });

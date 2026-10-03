@@ -26,7 +26,7 @@ import {
   partitionGitFiles,
   gitStatusSignature,
 } from "./services/git-service.js";
-import { highlightCodeHtml } from "./components/highlighter.js";
+import { highlightCodeHtml, isLargeText } from "./components/highlighter.js";
 import { renderMarkdownHtml } from "./components/markdown-renderer.js";
 import { renderTreeView } from "./components/tree-view.js";
 import { loadJavaPackageTree } from "./services/java-project.js";
@@ -68,8 +68,6 @@ import {
   abortCommitMessage,
 } from "./services/git-actions.js";
 import { parseUnifiedDiff } from "./services/diff.js";
-
-const MAX_PREVIEW_CHARS = 200000;
 
 /**
  * 当前面板根目录的规范化键（小写 + 去尾部分隔符）
@@ -208,7 +206,6 @@ export function mount(container, api, _options = {}) {
       path: "",
       text: "",
       highlightedHtml: "",
-      truncated: false,
       // Markdown 专用字段
       isMarkdown: false,
       mode: "preview", // 预览模式（默认）| code 模式
@@ -260,7 +257,6 @@ export function mount(container, api, _options = {}) {
       path: "",
       text: "",
       highlightedHtml: "",
-      truncated: false,
       isMarkdown: false,
       mode: "preview",
       html: "",
@@ -1102,7 +1098,6 @@ export function mount(container, api, _options = {}) {
           path: "",
           text: "",
           highlightedHtml: "",
-          truncated: false,
           isMarkdown: false,
           mode: "preview",
           html: "",
@@ -1382,20 +1377,24 @@ export function mount(container, api, _options = {}) {
     }
 
     const text = String(result.content || "");
-    const truncated = text.length > MAX_PREVIEW_CHARS;
-    const displayText = truncated ? text.slice(0, MAX_PREVIEW_CHARS) : text;
     const isMarkdown = isMarkdownPath(entry.name);
 
+    // 大文件不再截断：由 code-viewer 的虚拟列表只渲染可视行，DOM 与总行数解耦，
+    // 内容保持完整。大文件同时跳过预计算高亮（逐行渲染时也无 token 可复用），
+    // 避免打开即触发昂贵的全量 Prism 分词。
+    const large = isLargeText(text);
+    const highlightedHtml =
+      large || isMarkdown ? "" : highlightCodeHtml(text, extname(entry.name));
+
     // Markdown 文件默认进入预览模式：额外生成净化 HTML（代码模式复用语法高亮）
-    const html = isMarkdown ? renderMarkdownHtml(displayText) : "";
+    const html = isMarkdown ? renderMarkdownHtml(text) : "";
 
     return {
       kind: "text",
       name: entry.name,
       path: entry.path,
-      text: displayText,
-      highlightedHtml: highlightCodeHtml(displayText, extname(entry.name)),
-      truncated,
+      text,
+      highlightedHtml,
       isMarkdown,
       mode: "preview",
       html,
@@ -1411,6 +1410,22 @@ export function mount(container, api, _options = {}) {
     saveRequestId++;
     state.selected = entry.path;
 
+    // 先立刻切到「正在读取」并渲染，保证点击后马上看到反馈。
+    // 全屏联动可能等待宿主 React 更新数帧（见 ensureRightPanelFullscreen），
+    // 若排在 loading 之前，用户会先看到界面无响应，误以为卡死——这是体验倒退的根因。
+    state.preview = {
+      kind: "loading",
+      name: entry.name,
+      path: entry.path,
+    };
+    // 仅就地切换文件树选中高亮与重绘右侧预览：不重建整棵树，大目录下点文件不再卡顿
+    applyTreeSelectionHighlight();
+    renderPreview();
+
+    // 让出当前任务，使浏览器先把「正在读取」绘制出来，再执行可能阻塞的全屏联动；
+    // 否则全屏触发与 loading 渲染同处一个同步任务，绘制被推迟，点击后仍会先卡一下。
+    await waitForNextFrame();
+
     // 智能联动全屏：非全屏模式下点击具体文件自动全屏展开代码大视野
     if (!isRightPanelFullscreen()) {
       const fullscreenReady = await ensureRightPanelFullscreen();
@@ -1418,15 +1433,6 @@ export function mount(container, api, _options = {}) {
         setOperationStatus(false, "无法进入右侧面板全屏");
       }
     }
-
-    state.preview = {
-      kind: "loading",
-      name: entry.name,
-      path: entry.path,
-    };
-    // 仅更新文件树选中高亮与右侧预览，不重建整个主视图（保留树滚动与选区）
-    renderTree();
-    renderPreview();
 
     try {
       const result = await readFileContent(entry.path);
@@ -1476,6 +1482,12 @@ export function mount(container, api, _options = {}) {
   function setPreviewMode(mode) {
     const next = mode === "code" ? "code" : "preview";
     if (state.preview.mode === next) return;
+    // 切到代码模式时补算懒加载的语法高亮：Markdown 打开时默认预览，highlightedHtml 为空，
+    // 仅在用户真正需要看代码时才算，避免大 Markdown 打开即触发全量高亮。
+    const needHighlight =
+      next === "code" &&
+      state.preview.kind === "text" &&
+      !state.preview.highlightedHtml;
     state.preview = {
       ...state.preview,
       mode: next,
@@ -1483,6 +1495,9 @@ export function mount(container, api, _options = {}) {
       editable: false,
       saveState: "idle",
       saveMessage: "",
+      highlightedHtml: needHighlight
+        ? highlightCodeHtml(state.preview.text, extname(state.preview.name))
+        : state.preview.highlightedHtml,
     };
     renderPreview();
     // 切回预览模式时需重新触发本地图片内联（预览 DOM 是重建的）
@@ -1511,13 +1526,12 @@ export function mount(container, api, _options = {}) {
     state.preview.saveMessage = "";
   }
 
-  // 保存只接受当前文件的完整未截断文本；写入完成后再更新高亮和 Git 状态。
+  // 保存只接受当前文件的完整文本；写入完成后再更新高亮和 Git 状态。
   async function handleSavePreview() {
     if (
       !state.preview ||
       state.preview.kind !== "text" ||
       !state.preview.editable ||
-      state.preview.truncated ||
       !state.preview.path
     ) return;
 
@@ -1537,7 +1551,10 @@ export function mount(container, api, _options = {}) {
     ) return;
 
     if (result && result.ok === true) {
-      state.preview.highlightedHtml = highlightCodeHtml(content, extname(state.preview.name));
+      // 保存后与打开时用同一熔断判定：大文件跳过全量 Prism / 转义重算，只保留纯文本虚拟渲染。
+      state.preview.highlightedHtml = isLargeText(content)
+        ? ""
+        : highlightCodeHtml(content, extname(state.preview.name));
       state.preview.html = state.preview.isMarkdown ? renderMarkdownHtml(content) : "";
       state.preview.saveState = "saved";
       state.preview.saveMessage = "";
@@ -1802,6 +1819,26 @@ export function mount(container, api, _options = {}) {
     const gitPreviewPane = el("div", "sfe-git-preview-pane");
     mainView.appendChild(gitPreviewPane);
     layoutEls.gitPreviewPane = gitPreviewPane;
+  }
+
+  // 局部：仅切换文件树的选中行高亮，不重建 DOM
+  // @description previewFile 只改 state.selected，不重建整棵树：大目录下整树重建是卡顿根因。
+  //   选中态对文件行只是 .selected class（纯背景色），就地切换与重建后的渲染结果完全等价，
+  //   同时天然保住滚动位置、展开态与行内事件。
+  function applyTreeSelectionHighlight() {
+    if (disposed || !layoutEls || !layoutEls.treePane) return;
+    const pane = layoutEls.treePane;
+    const selectedKey = pathKey(state.selected);
+    pane.querySelectorAll(".sfe-file-item.selected").forEach((node) => {
+      if (pathKey(node.dataset.path) !== selectedKey) node.classList.remove("selected");
+    });
+    if (!state.selected) return;
+    for (const node of pane.querySelectorAll(".sfe-file-item")) {
+      if (pathKey(node.dataset.path) === selectedKey) {
+        node.classList.add("selected");
+        return;
+      }
+    }
   }
 
   // 局部：文件树（保留滚动位置）

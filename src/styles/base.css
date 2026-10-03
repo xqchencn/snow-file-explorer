@@ -148,3 +148,22 @@
   font-size: 13px;
   color: var(--text-secondary);
 }
+
+/* ==========================================================================
+   通用窗口化虚拟列表（components/virtual-list.js）
+   容器 position:relative + overflow:auto；spacer 撑出总高度；content 绝对定位承载可视行。
+   行高必须固定（等宽代码行天然满足），据此把滚动位置换算成行区间。
+   ========================================================================== */
+.sfe-vlist-spacer {
+  width: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.sfe-vlist-content {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  will-change: transform;
+}

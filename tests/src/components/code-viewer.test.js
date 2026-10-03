@@ -243,6 +243,89 @@ test('Git 差异视图: 按文件语言高亮增删行正文并保持源码安�
   assert.equal(host.querySelector('.sfe-floating-edit-btn'), null, 'Git 差异视图不应出现编辑按钮');
 });
 
+test('Git 差异视图: 超大差异整体降级为纯文本，不再逐行调用 Prism', () => {
+  const host = document.createElement('div');
+  // 构造超过行数熔断阈值（4000 行）的全文件差异，触发整体降级
+  const fullContent = Array.from({ length: 4100 }, (_, i) => `const v${i} = ${i};`).join('\n');
+  const result = parseUnifiedDiff('@@ -1,1 +1,1 @@\n-const changed = 1;\n+const changed = 2;');
+
+  renderCodeViewer(host, {
+    preview: {
+      kind: 'text',
+      name: 'big.js',
+      text: fullContent,
+      diff: { result, fullContent },
+      gitView: 'diff',
+      diffMode: 'unified',
+    },
+    copied: false,
+    onCopy: () => {},
+    onSetDiffMode: () => {},
+    t,
+  });
+
+  const added = host.querySelector('.sfe-diff-line.add .sfe-diff-text');
+  assert.ok(added, '大 diff 仍应渲染差异行');
+  assert.equal(added.textContent, 'const changed = 2;', '降级后正文必须完整保留');
+  // 核心契约：大 diff 不产生任何 Prism token，避免数千次同步分词阻塞主线程
+  assert.equal(host.querySelector('.sfe-diff-text .token'), null, '大 diff 不应产生语法 token');
+});
+
+test('预览组件: 大文件只读态走虚拟滚动，小文件保持整块高亮', () => {
+  // 大文件（超过熔断阈值）：走窗口化虚拟列表，DOM 行数远小于总行数，内容不截断
+  const bigHost = document.createElement('div');
+  const bigText = Array.from({ length: 4200 }, (_, i) => `line ${i}`).join('\n');
+  renderCodeViewer(bigHost, {
+    preview: {
+      kind: 'text',
+      name: 'big.txt',
+      path: 'D:/repo/big.txt',
+      text: bigText,
+      highlightedHtml: '',
+      isMarkdown: false,
+      mode: 'preview',
+    },
+    copied: false,
+    onCopy: () => {},
+    t,
+  });
+  // 虚拟化标记落在滚动容器上，不再使用整块高亮容器
+  const scroll = bigHost.querySelector('.sfe-file-viewer-code-scroll');
+  assert.ok(scroll.classList.contains('sfe-file-viewer-code-scroll-virtual'), '大文件应启用虚拟滚动容器');
+  assert.equal(bigHost.querySelector('.sfe-file-viewer-code'), null, '虚拟化时不再使用整块 <pre> 高亮容器');
+  const rows = scroll.querySelectorAll('.sfe-file-viewer-line');
+  // 核心契约：只渲染可视区 + 缓冲，DOM 行数必须远小于总行数
+  assert.ok(rows.length > 0, '应渲染初始可视窗口的行');
+  assert.ok(rows.length < 4200, `DOM 行数应远小于总行数，实际 ${rows.length}`);
+  assert.equal(rows[0].querySelector('.sfe-file-viewer-line-no').textContent, '1', '首行号从 1 开始');
+  assert.equal(rows[0].querySelector('.sfe-file-viewer-line-text').textContent, 'line 0', '首行正文正确');
+  // 滚动占位高度按总行数撑满，保证滚动条与总行数一致（内容未截断）
+  const spacer = scroll.querySelector('.sfe-vlist-spacer');
+  assert.ok(spacer, '应存在撑起总高度的占位元素');
+  assert.ok(parseFloat(spacer.style.height) > 0, '占位高度应大于 0');
+
+  // 小文件：保持整块高亮（避免把跨行注释/字符串 token 按行切碎）
+  const smallHost = document.createElement('div');
+  renderCodeViewer(smallHost, {
+    preview: {
+      kind: 'text',
+      name: 'a.js',
+      path: 'D:/repo/a.js',
+      text: 'const value = 1;',
+      highlightedHtml: '<span class="token keyword">const</span> value = 1;',
+      isMarkdown: false,
+      mode: 'preview',
+    },
+    copied: false,
+    onCopy: () => {},
+    t,
+  });
+  const smallScroll = smallHost.querySelector('.sfe-file-viewer-code-scroll');
+  assert.ok(!smallScroll.classList.contains('sfe-file-viewer-code-scroll-virtual'), '小文件不启用虚拟滚动');
+  assert.ok(smallScroll.querySelector('.sfe-file-viewer-code-content'), '小文件保留整块高亮容器');
+  assert.equal(smallScroll.querySelector('.sfe-file-viewer-line'), null, '小文件不按行渲染');
+});
+
 test('Git 差异视图: 多个 hunk 显示上下箭头并可跳到下一个差异', () => {
   const host = document.createElement('div');
   const result = parseUnifiedDiff(
@@ -281,20 +364,18 @@ test('Git 差异视图: 多个 hunk 显示上下箭头并可跳到下一个差�
   assert.equal(previous.disabled, true, '尚未定位时不能回到上一个差异');
   assert.equal(next.disabled, false, '尚未定位时下一个按钮应可用');
 
-  let scrolledTo = null;
-  const anchors = host.querySelectorAll('.sfe-diff-hunk-anchor');
-  anchors.forEach((anchor) => {
-    anchor.scrollIntoView = () => {
-      scrolledTo = anchor.dataset.hunkIndex;
-    };
-  });
+  // hunk 跳转改为虚拟列表 scrollToIndex：断言滚动容器的 scrollTop 随行索引变化。
+  // 注意第一个 hunk 位于文件第 1 行（items[0]），跳转后 scrollTop 天然为 0，
+  // 因此滚动位置断言放在跳转到文件中部（第二个 hunk）之后。
+  const scroll = host.querySelector('.sfe-diff-scroll');
+  assert.equal(scroll.scrollTop, 0, '初始应停在顶部');
   next.click();
   assert.equal(nav.querySelector('.sfe-diff-hunk-position').textContent, '1/2');
-  assert.equal(scrolledTo, '0', '首次点击下一个应先滚动到第一个差异块');
   assert.equal(next.disabled, false, '到达第一个差异后仍应可前往第二个差异');
+  const afterFirst = scroll.scrollTop;
   next.click();
   assert.equal(nav.querySelector('.sfe-diff-hunk-position').textContent, '2/2');
-  assert.equal(scrolledTo, '1', '再次点击下一个应滚动到第二个差异块');
+  assert.ok(scroll.scrollTop > afterFirst, '再次点击下一个应滚动到更靠后的第二个差异块');
   assert.equal(next.disabled, true, '到达最后一个差异后下一个按钮应禁用');
 });
 
@@ -326,13 +407,11 @@ test('Git 差异视图: 单个 hunk 仍可通过下箭头定位', () => {
   assert.equal(previous.disabled, true, '单个 hunk 尚未定位时没有上一个差异');
   assert.equal(next.disabled, false, '单个 hunk 尚未定位时下一个按钮必须可用');
 
-  let scrolledTo = null;
-  const anchor = host.querySelector('.sfe-diff-hunk-anchor');
-  anchor.scrollIntoView = () => {
-    scrolledTo = anchor.dataset.hunkIndex;
-  };
+  // hunk 跳转改为虚拟列表 scrollToIndex：断言滚动容器的 scrollTop 随行索引变化
+  const scroll = host.querySelector('.sfe-diff-scroll');
+  assert.equal(scroll.scrollTop, 0, '初始应停在顶部');
   next.click();
-  assert.equal(scrolledTo, '0', '单个 hunk 点击下箭头应滚动到差异位置');
+  assert.ok(scroll.scrollTop > 0, '单个 hunk 点击下箭头应滚动到差异位置');
   assert.equal(nav.querySelector('.sfe-diff-hunk-position').textContent, '1/1');
   assert.equal(previous.disabled, true);
   assert.equal(next.disabled, true, '定位到唯一 hunk 后下一个按钮应禁用');

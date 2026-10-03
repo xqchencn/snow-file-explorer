@@ -65,8 +65,6 @@
   "preview.hint": "Select a file to preview.",
   "preview.loading": "Loading…",
   "preview.binary": "Binary file ({{mime}}) — no preview.",
-  "preview.truncated": "Content is long; showing the first 200k characters.",
-  "preview.diffTruncated": "Diff is large; showing the first {{count}} lines.",
   "preview.error": "Unable to read: ",
   "preview.editUnavailable": "The host does not provide file writing",
   "error.readRoot": "Unable to read the root folder",

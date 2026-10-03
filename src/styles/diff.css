@@ -92,13 +92,6 @@
   user-select: none;
 }
 
-/* 空锚点只提供滚动目标，不占用差异正文的可见高度。 */
-.sfe-diff-hunk-anchor {
-  position: relative;
-  height: 0;
-  scroll-margin-top: 4px;
-}
-
 /* 增删统计条 */
 .sfe-diff-stat {
   display: flex;

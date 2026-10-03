@@ -111,6 +111,8 @@ export function renderTreeView(parentEl, options) {
         (isSelected ? " selected" : "")
     );
     item.style.paddingLeft = 12 + row.depth * 14 + "px";
+    // 记录条目路径：选中态变化时据此就地定位行，避免整棵树重建（大目录卡顿根因）
+    item.dataset.path = entry.path;
     if (entry.packageName) item.title = entry.packageName;
 
     // 1. 展开/折叠三角（仅目录显示）
