@@ -113,6 +113,10 @@
   flex: 1;
   min-height: 0;
   overflow: auto;
+  /* 虚拟列表的 .sfe-vlist-content 为 position:absolute，其包含块必须是滚动容器本身，
+     否则该层相对外层定位、脱离滚动内容流，滚动时内容不动（只能看到首屏）。
+     与代码视图 .sfe-file-viewer-code-scroll-virtual 的 position:relative 保持一致。 */
+  position: relative;
   font-family: var(--font-mono, monospace);
   font-size: 12px;
   line-height: 1.55;
