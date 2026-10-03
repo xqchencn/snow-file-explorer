@@ -32,5 +32,9 @@
     "zh-TW": "locales/zh-TW.json",
     "en": "locales/en.json"
   },
-  "styles": ["index.css"]
+  "styles": ["index.css"],
+  "privacy": {
+    "scopes": ["filesystem"],
+    "note": "允许在用户明确进入编辑模式并点击保存后写回当前文本文件。"
+  }
 }

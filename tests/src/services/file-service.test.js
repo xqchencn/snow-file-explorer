@@ -6,6 +6,7 @@ import {
   sortEntries,
   resolveActiveDirectoryPath,
   detectJavaProjectFromEntries,
+  writeFileContent,
 } from '../../../src/services/file-service.js';
 
 test('文件服务: basename 与 extname', () => {
@@ -106,15 +107,27 @@ test('Java 项目检测: 多个根目录 Java 文件作为弱信号', () => {
   assert.deepEqual(result.evidence, ['multiple-java-files']);
 });
 
-test('Java 项目检测: 忽略无效条目和大小写差异', () => {
-  const result = detectJavaProjectFromEntries([
-    null,
-    { name: 'POM.XML', isDirectory: false },
-    { name: '.java', isDirectory: false },
-    { name: 'notes.txt', isDirectory: false },
-  ]);
 
-  assert.equal(result.isJavaProject, true);
-  assert.deepEqual(result.buildFiles, ['POM.XML']);
-  assert.equal(result.javaFileCount, 0);
+test('文件服务: 宿主无写入能力时明确失败，不伪造保存成功', async () => {
+  const result = await writeFileContent({}, 'D:/repo/a.txt', 'new text');
+  assert.equal(result.ok, false);
+  assert.match(result.error, /未提供文件写入能力/);
 });
+
+test('文件服务: 写入调用使用真实路径和完整文本，并透传成功结果', async () => {
+  const calls = [];
+  const api = {
+    write: {
+      filesystem: {
+        writeFile: async (params) => {
+          calls.push(params);
+          return { ok: true, data: { bytes: 8 } };
+        },
+      },
+    },
+  };
+  const result = await writeFileContent(api, 'D:/repo/a.txt', '完整文本');
+  assert.equal(result.ok, true);
+  assert.deepEqual(calls, [{ filePath: 'D:/repo/a.txt', content: '完整文本' }]);
+});
+

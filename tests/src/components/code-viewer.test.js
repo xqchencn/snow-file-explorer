@@ -99,6 +99,96 @@ test('预览组件: Markdown 代码模式渲染语法高亮视图', () => {
   assert.equal(activeBtn.getAttribute('aria-pressed'), 'true', '代码按钮应处于激活态');
 });
 
+
+test('预览组件: 普通文本默认只读，笔/眼睛按钮切换真实编辑状态', () => {
+  const host = document.createElement('div');
+  let editable = false;
+  let inputValue = '';
+  const preview = {
+    kind: 'text',
+    name: 'a.js',
+    path: 'D:/repo/a.js',
+    text: 'const value = 1;',
+    highlightedHtml: '<span>const value = 1;</span>',
+    isMarkdown: false,
+    mode: 'preview',
+    truncated: false,
+  };
+  const render = () =>
+    renderCodeViewer(host, {
+      preview,
+      copied: false,
+      onCopy: () => {},
+      onToggleEdit: (next) => {
+        editable = next;
+        render();
+      },
+      onEditInput: (value) => {
+        inputValue = value;
+      },
+      onSave: () => {},
+      editable,
+      t,
+    });
+
+  render();
+  const editButton = host.querySelector('.sfe-floating-edit-btn');
+  assert.ok(editButton, '普通文本默认应显示编辑按钮');
+  assert.equal(editButton.title, '编辑');
+  assert.equal(host.querySelector('textarea'), null, '默认只读不能渲染 textarea');
+
+  editButton.click();
+  const textarea = host.querySelector('textarea');
+  assert.ok(textarea, '点击笔图标后应进入真实编辑模式');
+  assert.equal(host.querySelector('.sfe-floating-edit-btn').title, '只读');
+  const editHighlight = host.querySelector('.sfe-file-viewer-edit-highlight');
+  assert.ok(editHighlight, '编辑模式应保留语法高亮层');
+  assert.ok(editHighlight.classList.contains('sfe-file-viewer-code'), '编辑高亮层必须复用代码 token 配色作用域');
+  assert.ok(editHighlight.querySelector('.token.keyword'), '编辑模式应显示关键字高亮');
+  textarea.value = 'const value = 2;';
+  textarea.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+  assert.equal(inputValue, 'const value = 2;');
+  assert.ok(editHighlight.querySelector('.token.keyword'), '输入后高亮层应实时更新');
+
+  host.querySelector('.sfe-floating-edit-btn').click();
+  assert.equal(host.querySelector('textarea'), null, '点击眼睛图标后应返回只读');
+});
+
+test('预览组件: Markdown 预览不显示编辑按钮，代码模式才显示笔图标', () => {
+  const host = document.createElement('div');
+  const preview = {
+    kind: 'text',
+    name: 'README.md',
+    path: 'D:/repo/README.md',
+    text: '# title',
+    html: '<h1>title</h1>',
+    highlightedHtml: '<span># title</span>',
+    isMarkdown: true,
+    mode: 'preview',
+    truncated: false,
+  };
+  const render = () =>
+    renderCodeViewer(host, {
+      preview,
+      copied: false,
+      onCopy: () => {},
+      onSetMode: (mode) => {
+        preview.mode = mode;
+        render();
+      },
+      onToggleEdit: () => {},
+      onSave: () => {},
+      t,
+    });
+
+  render();
+  assert.equal(host.querySelector('.sfe-floating-edit-btn'), null);
+  assert.equal(host.querySelector('textarea'), null);
+  host.querySelector('.sfe-md-mode-btn:not(.active)').click();
+  assert.ok(host.querySelector('.sfe-floating-edit-btn'), 'Markdown 代码模式应显示编辑按钮');
+  assert.equal(host.querySelector('.sfe-floating-edit-btn').title, '编辑');
+});
+
 test('Git 差异视图: 按文件语言高亮增删行正文并保持源码安全', () => {
   const host = document.createElement('div');
   const result = parseUnifiedDiff('@@ -1,2 +1,2 @@\n-const oldValue = 1;\n+const newValue = "<img src=x onerror=alert(1)>";');
@@ -109,15 +199,13 @@ test('Git 差异视图: 按文件语言高亮增删行正文并保持源码安�
       name: 'example.js',
       text: 'const newValue = "<img src=x onerror=alert(1)>";',
       diff: { result, fullContent: 'const newValue = "<img src=x onerror=alert(1)>";' },
-      gitView: 'diff',
-      diffMode: 'unified',
-      diffScopeMode: 'hunks',
+        gitView: 'diff',
+        diffMode: 'unified',
     },
     copied: false,
     onCopy: () => {},
     onSetMode: () => {},
     onSetDiffMode: () => {},
-    onSetScopeMode: () => {},
     t,
   });
 
@@ -128,5 +216,167 @@ test('Git 差异视图: 按文件语言高亮增删行正文并保持源码安�
   assert.ok(added.querySelector('.token.string'), '字符串 token 应保留');
   assert.equal(added.querySelector('img'), null, '源码中的 HTML 不得被当成 DOM 标签执行');
   assert.match(added.textContent, /onerror=alert\(1\)/, '源码文本必须完整保留');
+  assert.equal(host.querySelector('.sfe-floating-edit-btn'), null, 'Git 差异视图不应出现编辑按钮');
+});
+
+test('Git 差异视图: 多个 hunk 显示上下箭头并可跳到下一个差异', () => {
+  const host = document.createElement('div');
+  const result = parseUnifiedDiff(
+    [
+      '@@ -1,1 +1,1 @@',
+      '-const first = 1;',
+      '+const first = 2;',
+      '@@ -10,1 +10,1 @@',
+      '-const second = 1;',
+      '+const second = 2;',
+    ].join('\n')
+  );
+
+  renderCodeViewer(host, {
+    preview: {
+      kind: 'text',
+      name: 'example.js',
+      text: ['const first = 2;', 'const second = 2;'].join('\n'),
+      diff: { result, fullContent: ['const first = 2;', 'const second = 2;'].join('\n') },
+      gitView: 'diff',
+      diffMode: 'unified',
+    },
+    copied: false,
+    onCopy: () => {},
+    onSetDiffMode: () => {},
+    t,
+  });
+
+  const nav = host.querySelector('.sfe-diff-hunk-nav');
+  assert.ok(nav, '多个差异块应显示导航控件');
+  assert.equal(nav.querySelector('.sfe-diff-hunk-position').textContent, '0/2');
+  const previous = nav.querySelector('.sfe-diff-nav-previous');
+  const next = nav.querySelector('.sfe-diff-nav-next');
+  assert.equal(previous.title, '上一个差异');
+  assert.equal(next.title, '下一个差异');
+  assert.equal(previous.disabled, true, '尚未定位时不能回到上一个差异');
+  assert.equal(next.disabled, false, '尚未定位时下一个按钮应可用');
+
+  let scrolledTo = null;
+  const anchors = host.querySelectorAll('.sfe-diff-hunk-anchor');
+  anchors.forEach((anchor) => {
+    anchor.scrollIntoView = () => {
+      scrolledTo = anchor.dataset.hunkIndex;
+    };
+  });
+  next.click();
+  assert.equal(nav.querySelector('.sfe-diff-hunk-position').textContent, '1/2');
+  assert.equal(scrolledTo, '0', '首次点击下一个应先滚动到第一个差异块');
+  assert.equal(next.disabled, false, '到达第一个差异后仍应可前往第二个差异');
+  next.click();
+  assert.equal(nav.querySelector('.sfe-diff-hunk-position').textContent, '2/2');
+  assert.equal(scrolledTo, '1', '再次点击下一个应滚动到第二个差异块');
+  assert.equal(next.disabled, true, '到达最后一个差异后下一个按钮应禁用');
+});
+
+test('Git 差异视图: 单个 hunk 仍可通过下箭头定位', () => {
+  const host = document.createElement('div');
+  const result = parseUnifiedDiff(
+    ['@@ -20,1 +20,1 @@', '-const oldValue = 1;', '+const newValue = 2;'].join('\n')
+  );
+
+  renderCodeViewer(host, {
+    preview: {
+      kind: 'text',
+      name: 'example.js',
+      text: 'const newValue = 2;',
+      diff: { result, fullContent: 'const newValue = 2;' },
+      gitView: 'diff',
+      diffMode: 'unified',
+    },
+    copied: false,
+    onCopy: () => {},
+    onSetDiffMode: () => {},
+    t,
+  });
+
+  const nav = host.querySelector('.sfe-diff-hunk-nav');
+  const previous = nav.querySelector('.sfe-diff-nav-previous');
+  const next = nav.querySelector('.sfe-diff-nav-next');
+  assert.equal(nav.querySelector('.sfe-diff-hunk-position').textContent, '0/1');
+  assert.equal(previous.disabled, true, '单个 hunk 尚未定位时没有上一个差异');
+  assert.equal(next.disabled, false, '单个 hunk 尚未定位时下一个按钮必须可用');
+
+  let scrolledTo = null;
+  const anchor = host.querySelector('.sfe-diff-hunk-anchor');
+  anchor.scrollIntoView = () => {
+    scrolledTo = anchor.dataset.hunkIndex;
+  };
+  next.click();
+  assert.equal(scrolledTo, '0', '单个 hunk 点击下箭头应滚动到差异位置');
+  assert.equal(nav.querySelector('.sfe-diff-hunk-position').textContent, '1/1');
+  assert.equal(previous.disabled, true);
+  assert.equal(next.disabled, true, '定位到唯一 hunk 后下一个按钮应禁用');
+});
+
+test('预览组件: Markdown 代码模式的模式切换与复制/编辑按钮共用工具栏', () => {
+  const host = document.createElement('div');
+  renderCodeViewer(host, {
+    preview: {
+      kind: 'text',
+      name: 'README.md',
+      path: 'D:/repo/README.md',
+      text: '# title',
+      highlightedHtml: '<span># title</span>',
+      isMarkdown: true,
+      mode: 'code',
+      truncated: false,
+    },
+    copied: false,
+    onCopy: () => {},
+    onSetMode: () => {},
+    onToggleEdit: () => {},
+    onSave: () => {},
+    editable: true,
+    t,
+  });
+
+  const toolbar = host.querySelector('.sfe-viewer-toolbar');
+  assert.ok(toolbar, 'Markdown 代码模式应有统一的顶部工具栏');
+  assert.equal(toolbar.querySelector('.sfe-md-mode-switch')?.parentElement, toolbar);
+  assert.equal(toolbar.querySelector('.sfe-viewer-actions')?.parentElement, toolbar);
+  assert.equal(toolbar.children.length, 2, '模式切换和操作按钮应作为同级控件排列');
+});
+
+test('Git 差异视图: 固定显示完整文件且统一/分栏切换生效', () => {
+  const host = document.createElement('div');
+  const result = parseUnifiedDiff('@@ -1,2 +1,2 @@\\n-const oldValue = 1;\\n+const newValue = 2;');
+  let mode = 'unified';
+  const render = () =>
+    renderCodeViewer(host, {
+      preview: {
+        kind: 'text',
+        name: 'example.js',
+        text: 'const newValue = 2;\\nline two',
+        diff: { result, fullContent: 'const newValue = 2;\\nline two' },
+        gitView: 'diff',
+        diffMode: mode,
+      },
+      copied: false,
+      onCopy: () => {},
+      onSetDiffMode: (next) => {
+        mode = next;
+        render();
+      },
+      t,
+    });
+
+  render();
+  assert.equal(host.textContent.includes('完整文件'), false, '不应显示完整文件/仅差异切换');
+  assert.equal(host.textContent.includes('仅差异'), false, '不应显示完整文件/仅差异切换');
+  assert.equal(host.querySelectorAll('.sfe-diff-mode-switch').length, 1, '只保留统一/分栏切换');
+  assert.equal(host.querySelector('.sfe-diff-scroll.split'), null, '默认应为统一视图');
+
+  const splitButton = Array.from(host.querySelectorAll('.sfe-md-mode-btn')).find(
+    (button) => button.title === '分栏视图'
+  );
+  assert.ok(splitButton, '应存在分栏视图按钮');
+  splitButton.click();
+  assert.ok(host.querySelector('.sfe-diff-scroll.split'), '点击分栏视图后应切换布局');
 });
 

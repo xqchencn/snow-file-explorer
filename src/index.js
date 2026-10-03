@@ -11,6 +11,7 @@ import {
   sortEntries,
   readDirectoryEntries,
   readFileContent,
+  writeFileContent,
   resolveActiveDirectoryPath,
   detectJavaProject,
 } from "./services/file-service.js";
@@ -46,8 +47,6 @@ import {
   saveViewSettings,
   loadDiffViewMode,
   saveDiffViewMode,
-  loadDiffScopeMode,
-  saveDiffScopeMode,
 } from "./services/settings.js";
 import {
   gitStage,
@@ -114,6 +113,8 @@ export function mount(container, api, _options = {}) {
   let disposed = false;
   let copiedTimer = null;
   let gitDebounceTimer = null;
+  let previewRequestId = 0;
+  let saveRequestId = 0;
 
   // 翻译：api.t 不可用时回退到 defaultValue
   const t = (key, fallback, values) => {
@@ -154,9 +155,8 @@ export function mount(container, api, _options = {}) {
     gitSelected: null,
     // Git 变更视图右侧文件查看器状态（双击文件行后加载）
     gitPreview: null,
-    // 差异展示模式（unified / split）与范围模式（full / hunks，对标 VS Code 默认 full 完整文件）
+    // 差异展示模式（unified / split）；差异范围固定显示完整文件
     diffMode: "unified",
-    diffScopeMode: "full",
     gitCommitMode: "commit",
     gitCommitMenuOpen: false,
     collapsedStaged: new Set(),
@@ -172,6 +172,9 @@ export function mount(container, api, _options = {}) {
       isMarkdown: false,
       mode: "preview", // 预览模式（默认）| code 模式
       html: "", // 已净化的 Markdown HTML
+      editable: false,
+      saveState: "idle",
+      saveMessage: "",
     },
   };
 
@@ -205,6 +208,8 @@ export function mount(container, api, _options = {}) {
     state.gitignoreRules = [];
     state.gitPreview = null;
     state.gitSelected = null;
+    previewRequestId++;
+    saveRequestId++;
     state.preview = {
       kind: "empty",
       name: "",
@@ -215,6 +220,9 @@ export function mount(container, api, _options = {}) {
       isMarkdown: false,
       mode: "preview",
       html: "",
+      editable: false,
+      saveState: "idle",
+      saveMessage: "",
     };
     render();
     if (!state.rootPath) {
@@ -596,14 +604,8 @@ export function mount(container, api, _options = {}) {
     renderGitPreview();
   }
 
-  // 切换差异范围模式（full / hunks，对标 VS Code：默认 full 完整文件），持久化偏好并仅重绘右侧查看器
-  function setDiffScopeMode(scope) {
-    const next = scope === "hunks" ? "hunks" : "full";
-    if (state.diffScopeMode === next) return;
-    state.diffScopeMode = next;
-    saveDiffScopeMode(api, next);
-    renderGitPreview();
-  }
+  // 差异范围固定为完整文件，不提供范围切换。
+
 
   // 将 Git 变更视图的文件状态映射为 code-viewer 的 preview 结构
   function gitPreviewView() {
@@ -616,7 +618,6 @@ export function mount(container, api, _options = {}) {
       text: gp.diff?.fullContent ?? base.text,
       gitView: gp.mode,
       diffMode: state.diffMode,
-      diffScopeMode: state.diffScopeMode,
     };
   }
 
@@ -667,11 +668,12 @@ export function mount(container, api, _options = {}) {
     if (ta) ta.value = state.gitCommitMessage;
   }
 
-  // 过滤选项：仅在对应开关开启时启用
+  // 过滤选项：同一个 .gitignore 开关同时控制 Git 元数据与 .gitignore 命中项
   function viewFilterOpts() {
+    const filterEnabled = state.viewSettings.respectGitignore;
     return {
-      excludeMeta: state.viewSettings.excludeMeta,
-      useGitignore: state.viewSettings.respectGitignore,
+      excludeMeta: filterEnabled,
+      useGitignore: filterEnabled,
       gitignoreRules: state.gitignoreRules,
     };
   }
@@ -707,7 +709,7 @@ export function mount(container, api, _options = {}) {
    * @param {string} dir 当前扫描目录绝对路径
    * @param {Array} rules 规则累加器
    */
-  async function collectGitignoreRules(dir, rules, isRoot = false) {
+  async function collectGitignoreRules(dir, rules, _isRoot = false) {
     if (disposed) return;
     let entries;
     try {
@@ -723,13 +725,10 @@ export function mount(container, api, _options = {}) {
         rules.push(...parseGitignore(res.content, base));
       }
     }
-    // 剪枝：不进入元数据目录与被忽略目录。
-    // 注意：开关关闭（reload 不调用本函数）时不做忽略剪枝，否则会漏掉深层 .gitignore；
-    // 仅根调用（isRoot）时强制按元数据剪枝（.git 等），避免扫描 VCS 元数据。
     const children = entries.filter((e) => {
       if (!e || !e.isDirectory) return false;
+      // 规则始终用于标记浅色条目，同时继续剪枝避免扫描被忽略的大型目录。
       if (isExcludedMeta(e.name)) return false;
-      if (!isRoot && !state.viewSettings.respectGitignore) return true;
       const rel = getRelativeGitPath(e.path, state.rootPath);
       return !(rel && isIgnoredByRules(rel, true, rules));
     });
@@ -739,9 +738,9 @@ export function mount(container, api, _options = {}) {
     }
   }
 
-  // 扫描并重建 .gitignore 规则（开关关闭时清空）
+  // 扫描并重建 .gitignore 规则。无论过滤开关状态如何都保留规则，关闭时只改变显示策略。
   async function reloadGitignore() {
-    if (!state.viewSettings.respectGitignore || !state.rootPath) {
+    if (!state.rootPath) {
       state.gitignoreRules = [];
       return;
     }
@@ -876,11 +875,16 @@ export function mount(container, api, _options = {}) {
       isMarkdown,
       mode: "preview",
       html,
+      editable: false,
+      saveState: "idle",
+      saveMessage: "",
     };
   }
 
   // 5. 选中并预览文件
   async function previewFile(entry) {
+    const requestId = ++previewRequestId;
+    saveRequestId++;
     state.selected = entry.path;
 
     // 智能联动全屏：非全屏模式下点击具体文件自动全屏展开代码大视野
@@ -899,7 +903,7 @@ export function mount(container, api, _options = {}) {
 
     try {
       const result = await readFileContent(entry.path);
-      if (disposed) return;
+      if (disposed || requestId !== previewRequestId || pathKey(entry.path) !== pathKey(state.selected)) return;
       state.preview = buildFilePreview(entry, result);
       renderPreview();
 
@@ -909,7 +913,7 @@ export function mount(container, api, _options = {}) {
       }
       return;
     } catch (err) {
-      if (disposed) return;
+      if (disposed || requestId !== previewRequestId || pathKey(entry.path) !== pathKey(state.selected)) return;
       state.preview = {
         kind: "error",
         name: entry.name,
@@ -945,11 +949,82 @@ export function mount(container, api, _options = {}) {
   function setPreviewMode(mode) {
     const next = mode === "code" ? "code" : "preview";
     if (state.preview.mode === next) return;
-    state.preview.mode = next;
+    state.preview = {
+      ...state.preview,
+      mode: next,
+      // Markdown 回到预览模式时强制退出编辑，预览 DOM 永远不可编辑。
+      editable: false,
+      saveState: "idle",
+      saveMessage: "",
+    };
     renderPreview();
     // 切回预览模式时需重新触发本地图片内联（预览 DOM 是重建的）
     if (next === "preview" && state.preview.kind === "text" && state.preview.isMarkdown) {
       inlineMarkdownImages(state.preview.path);
+    }
+  }
+
+  // 5.3 编辑状态只属于当前文件；输入时不重建 DOM，避免光标跳动。
+  function setPreviewEditable(next) {
+    if (!state.preview || state.preview.kind !== "text") return;
+    if (state.preview.isMarkdown && state.preview.mode !== "code") return;
+    state.preview = {
+      ...state.preview,
+      editable: next === true,
+      saveState: "idle",
+      saveMessage: "",
+    };
+    renderPreview();
+  }
+
+  function handlePreviewInput(value) {
+    if (!state.preview || !state.preview.editable) return;
+    state.preview.text = String(value ?? "");
+    state.preview.saveState = "idle";
+    state.preview.saveMessage = "";
+  }
+
+  // 保存只接受当前文件的完整未截断文本；写入完成后再更新高亮和 Git 状态。
+  async function handleSavePreview() {
+    if (
+      !state.preview ||
+      state.preview.kind !== "text" ||
+      !state.preview.editable ||
+      state.preview.truncated ||
+      !state.preview.path
+    ) return;
+
+    const saveId = ++saveRequestId;
+    const filePath = state.preview.path;
+    const content = state.preview.text;
+    state.preview.saveState = "saving";
+    state.preview.saveMessage = "";
+    renderPreview();
+
+    const result = await writeFileContent(api, filePath, content);
+    if (
+      disposed ||
+      saveId !== saveRequestId ||
+      !state.preview ||
+      pathKey(state.preview.path) !== pathKey(filePath)
+    ) return;
+
+    if (result && result.ok === true) {
+      state.preview.highlightedHtml = highlightCodeHtml(content, extname(state.preview.name));
+      state.preview.html = state.preview.isMarkdown ? renderMarkdownHtml(content) : "";
+      state.preview.saveState = "saved";
+      state.preview.saveMessage = "";
+      renderPreview();
+      await refreshGitAll();
+    } else {
+      state.preview.saveState = "failed";
+      state.preview.saveMessage =
+        result && result.error === "当前宿主未提供文件写入能力"
+          ? t("preview.editUnavailable", "当前宿主未提供文件写入能力")
+          : result && result.error
+            ? String(result.error)
+            : t("action.saveFailed", "保存失败");
+      renderPreview();
     }
   }
 
@@ -1006,7 +1081,6 @@ export function mount(container, api, _options = {}) {
         return row;
       };
 
-      menu.appendChild(item("excludeMeta", t("settings.excludeMeta", "隐藏 .git 等元数据项")));
       menu.appendChild(item("respectGitignore", t("settings.respectGitignore", "按 .gitignore 过滤")));
       menu.appendChild(item("onlyGitChanges", t("settings.onlyGitChanges", "只显示 Git 变更")));
       if (
@@ -1230,6 +1304,11 @@ export function mount(container, api, _options = {}) {
       copied: state.copied,
       onCopy: handleCopyCode,
       onSetMode: setPreviewMode,
+      onToggleEdit: setPreviewEditable,
+      onEditInput: handlePreviewInput,
+      onSave: handleSavePreview,
+      editable: state.preview.editable === true,
+      saving: state.preview.saveState === "saving",
       t,
     });
   }
@@ -1320,7 +1399,6 @@ export function mount(container, api, _options = {}) {
       onCopy: handleCopyCode,
       onSetMode: setPreviewMode,
       onSetDiffMode: setDiffMode,
-      onSetScopeMode: setDiffScopeMode,
       t,
     });
     // 「差异 / 内容」切换位于工具栏，需随查看器同步（打开/切换文件、切换子视图）
@@ -1422,9 +1500,8 @@ export function mount(container, api, _options = {}) {
     } catch {
       // 忽略读取失败，使用默认模式
     }
-    // 读取持久化的差异展示模式（unified / split）与范围模式（full / hunks）
+     // 读取持久化的差异展示模式（unified / split）
     state.diffMode = await loadDiffViewMode(api);
-    state.diffScopeMode = await loadDiffScopeMode(api);
     if (disposed) return;
     await reloadGitignore();
     if (disposed) return;

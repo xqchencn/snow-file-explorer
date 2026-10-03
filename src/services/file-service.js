@@ -74,6 +74,33 @@ export async function readFileContent(filePath) {
   return await snow.readFileContent(filePath);
 }
 
+/**
+ * 写入文本文件内容
+ * @description 插件 ESM 运行时通过 api.write.filesystem.writeFile 执行真实写入，宿主参数名为 filePath。
+ *   宿主未提供能力或动作失败时统一返回 ok:false，调用方不得伪造保存成功。
+ * @param {Object|null} api Snow App 插件运行时 API
+ * @param {string} filePath 文件绝对路径
+ * @param {string} content 要写入的完整文本
+ * @returns {Promise<{ok: boolean, data?: unknown, denied?: Object, error?: string}>}
+ */
+export async function writeFileContent(api, filePath, content) {
+  const writeFile = api && api.write && api.write.filesystem && api.write.filesystem.writeFile;
+  if (typeof writeFile !== "function" || !filePath) {
+    return { ok: false, error: "当前宿主未提供文件写入能力" };
+  }
+  try {
+    const result = await writeFile({ filePath, content: String(content ?? "") });
+    if (result && result.ok === true) return result;
+    return {
+      ...(result && typeof result === "object" ? result : {}),
+      ok: false,
+      error: result && result.error ? String(result.error) : "文件写入失败",
+    };
+  } catch (err) {
+    return { ok: false, error: err && err.message ? err.message : String(err) };
+  }
+}
+
 /* Java 项目检测服务定义如下。 */
 
 /**

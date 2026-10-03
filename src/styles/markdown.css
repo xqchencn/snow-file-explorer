@@ -11,16 +11,13 @@
   background: var(--bg-primary);
 }
 
-/* 预览 / 代码 模式切换分段控件（右上角，避让悬浮复制按钮） */
+/* 预览 / 代码 模式切换分段控件，由 .sfe-viewer-toolbar 统一排列 */
 .sfe-md-mode-switch {
-  position: absolute;
-  top: 10px;
-  right: 54px;
-  z-index: 10;
   display: inline-flex;
   align-items: center;
   gap: 2px;
   padding: 2px;
+  flex-shrink: 0;
   border-radius: var(--radius-sm, 4px);
   border: 1px solid var(--border-color, var(--border-light));
   background: var(--surface-island, var(--bg-secondary));

@@ -26,9 +26,7 @@ const MAX_RENDER_LINES = 8000;
  * @param {boolean} [options.loading] 是否加载中
  * @param {string} [options.error] 错误信息
  * @param {'unified'|'split'} [options.mode] 展示模式（默认 unified）
- * @param {'full'|'hunks'} [options.scopeMode] 范围模式（默认 full 完整文件，对标 VS Code）
  * @param {Function} [options.onSetMode] 切换展示模式回调 (mode)
- * @param {Function} [options.onSetScopeMode] 切换范围模式回调 (scopeMode)
  * @param {Function} options.t 国际化翻译函数
  */
 export function renderDiffView(parentEl, {
@@ -38,9 +36,7 @@ export function renderDiffView(parentEl, {
   loading,
   error,
   mode,
-  scopeMode,
   onSetMode,
-  onSetScopeMode,
   t,
 }) {
   parentEl.replaceChildren();
@@ -67,11 +63,38 @@ export function renderDiffView(parentEl, {
   }
 
   const viewMode = mode === "split" ? "split" : "unified";
-  // 默认为完整文件 (full)，如 VS Code 一样显示全部内容并标记差异
-  const currentScope = scopeMode === "hunks" ? "hunks" : "full";
+  // 差异范围固定为完整文件；用户只需要选择统一或分栏布局。
+  const currentScope = "full";
   const wrap = el("div", "sfe-diff-view");
+  const scroll = el("div", "sfe-diff-scroll" + (viewMode === "split" ? " split" : ""));
+  const hunkAnchors = [];
+  const hunkStartByLine = new Map();
 
-  // 顶部条：增删统计 + 范围切换（完整文件/仅差异） + 展示模式切换（统一/分栏）
+  // 完整文件模式复用 hunk 行对象引用，用对象身份建立稳定的跳转锚点。
+  result.hunks.forEach((hunk, index) => {
+    if (hunk && Array.isArray(hunk.lines) && hunk.lines[0]) {
+      hunkStartByLine.set(hunk.lines[0], index);
+    }
+  });
+
+  const appendHunkAnchor = (index) => {
+    if (hunkAnchors[index]) return;
+    const anchor = el("div", "sfe-diff-hunk-anchor");
+    anchor.dataset.hunkIndex = String(index);
+    anchor.setAttribute("aria-hidden", "true");
+    hunkAnchors[index] = anchor;
+    scroll.appendChild(anchor);
+  };
+
+  const appendFullHunkAnchor = (value) => {
+    const line = value && Object.prototype.hasOwnProperty.call(value, "left")
+      ? value.left || value.right
+      : value;
+    const index = hunkStartByLine.get(line);
+    if (index !== undefined) appendHunkAnchor(index);
+  };
+
+  // 顶部条：增删统计 + hunk 导航 + 展示模式切换（统一/分栏）
   const bar = el("div", "sfe-diff-bar");
   const stat = el("div", "sfe-diff-stat");
   stat.appendChild(el("span", "sfe-diff-stat-add", "+" + result.additions));
@@ -79,12 +102,12 @@ export function renderDiffView(parentEl, {
   bar.appendChild(stat);
 
   const controls = el("div", "sfe-diff-controls");
-  controls.appendChild(renderScopeSwitch(currentScope, t, onSetScopeMode));
+  const hunkNavigator = renderHunkNavigator(scroll, hunkAnchors, result.hunks.length, t);
+  controls.appendChild(hunkNavigator);
   controls.appendChild(renderModeSwitch(viewMode, t, onSetMode));
   bar.appendChild(controls);
   wrap.appendChild(bar);
 
-  const scroll = el("div", "sfe-diff-scroll" + (viewMode === "split" ? " split" : ""));
   let rendered = 0;
   let truncated = false;
 
@@ -97,6 +120,7 @@ export function renderDiffView(parentEl, {
           truncated = true;
           break;
         }
+        appendFullHunkAnchor(row);
         scroll.appendChild(renderSplitRow(row, extension));
         rendered++;
       }
@@ -106,14 +130,16 @@ export function renderDiffView(parentEl, {
           truncated = true;
           break;
         }
+        appendFullHunkAnchor(line);
         scroll.appendChild(renderDiffLine(line, extension));
         rendered++;
       }
     }
   } else {
     // 仅差异片段模式 (hunks)
-    for (const hunk of result.hunks) {
+    for (const [index, hunk] of result.hunks.entries()) {
       if (truncated) break;
+      appendHunkAnchor(index);
       scroll.appendChild(el("div", "sfe-diff-hunk-head", hunk.header));
       if (viewMode === "split") {
         for (const row of buildSplitRows(hunk)) {
@@ -137,6 +163,7 @@ export function renderDiffView(parentEl, {
     }
   }
 
+  hunkNavigator.update();
   wrap.appendChild(scroll);
   if (truncated) {
     wrap.appendChild(
@@ -150,33 +177,60 @@ export function renderDiffView(parentEl, {
   parentEl.appendChild(wrap);
 }
 
+// 范围模式固定为完整文件，不渲染范围切换控件。
+
 /**
- * 渲染范围模式切换分段控件（完整文件 / 仅差异）
- * @param {'full'|'hunks'} current 当前范围模式
+ * 渲染 hunk 上一个/下一个导航；按钮只在 Git 差异视图内部出现。
+ * @param {HTMLElement} scroll 差异滚动容器
+ * @param {Array<HTMLElement>} anchors 每个 hunk 的滚动锚点
+ * @param {number} count hunk 总数
  * @param {Function} t 国际化翻译函数
- * @param {Function} [onSetScope] 切换回调
  * @returns {HTMLElement}
  */
-function renderScopeSwitch(current, t, onSetScope) {
-  const switcher = el("div", "sfe-diff-mode-switch");
-  switcher.setAttribute("role", "group");
-  const segments = [
-    { key: "full", label: t("diff.full", "完整文件") },
-    { key: "hunks", label: t("diff.hunks", "仅差异") },
-  ];
-  for (const seg of segments) {
-    const isActive = seg.key === current;
-    const btn = el("button", "sfe-md-mode-btn" + (isActive ? " active" : ""));
-    btn.type = "button";
-    btn.title = seg.label;
-    btn.setAttribute("aria-pressed", isActive ? "true" : "false");
-    btn.appendChild(el("span", "sfe-md-mode-label", seg.label));
-    if (!isActive && typeof onSetScope === "function") {
-      btn.addEventListener("click", () => onSetScope(seg.key));
+function renderHunkNavigator(scroll, anchors, count, t) {
+  const nav = el("div", "sfe-diff-hunk-nav");
+  // -1 表示尚未定位到任何 hunk；即使只有一个 hunk，也必须允许首次点击下箭头跳过去。
+  let current = -1;
+  const previous = el("button", "sfe-diff-nav-btn sfe-diff-nav-previous");
+  const position = el("span", "sfe-diff-hunk-position");
+  const next = el("button", "sfe-diff-nav-btn sfe-diff-nav-next");
+  previous.type = "button";
+  next.type = "button";
+  previous.title = t("diff.previous", "上一个差异");
+  next.title = t("diff.next", "下一个差异");
+  previous.setAttribute("aria-label", previous.title);
+  next.setAttribute("aria-label", next.title);
+  previous.appendChild(createActionIcon("arrowUp", 13));
+  next.appendChild(createActionIcon("arrowDown", 13));
+
+  const update = () => {
+    const total = Math.max(0, count);
+    position.textContent = total ? `${current < 0 ? 0 : current + 1}/${total}` : "0/0";
+    previous.disabled = current <= 0 || !anchors[current - 1];
+    next.disabled = !anchors[0] || (current >= 0 && current >= total - 1);
+  };
+  const jump = (delta) => {
+    const firstTargetIndex = current < 0 && delta > 0 ? 0 : current + delta;
+    const targetIndex = Math.max(0, Math.min(Math.max(0, count - 1), firstTargetIndex));
+    const target = anchors[targetIndex];
+    if (!target) return;
+    current = targetIndex;
+    update();
+    if (typeof target.scrollIntoView === "function") {
+      target.scrollIntoView({ block: "start" });
+    } else {
+      scroll.scrollTop = target.offsetTop;
     }
-    switcher.appendChild(btn);
-  }
-  return switcher;
+  };
+
+  previous.addEventListener("click", () => jump(-1));
+  next.addEventListener("click", () => jump(1));
+  nav.appendChild(previous);
+  nav.appendChild(position);
+  nav.appendChild(next);
+  nav.update = update;
+  update();
+  return nav;
 }
 
 /**

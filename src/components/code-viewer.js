@@ -6,6 +6,7 @@
  */
 
 import { el, escapeHtml } from "../utils/dom.js";
+import { highlightCodeHtml } from "./highlighter.js";
 import { createActionIcon } from "../icons/action-icons.js";
 import { resolveMarkdownAssetPath, resolveProxiedImageSrc } from "../services/markdown-asset.js";
 import { extname } from "../services/file-service.js";
@@ -22,10 +23,29 @@ const NL = String.fromCharCode(10);
  * @param {Function} options.onCopy 点击复制回调
  * @param {Function} options.onSetMode 切换预览/代码模式回调 (mode: 'preview' | 'code')
  * @param {Function} options.onSetDiffMode 切换差异展示模式回调 (mode: 'unified' | 'split')
- * @param {Function} [options.onSetScopeMode] 切换差异范围模式回调 (scopeMode: 'full' | 'hunks')
+ * @param {Function} [options.onToggleEdit] 切换只读/编辑状态回调
+ * @param {Function} [options.onEditInput] 编辑文本变化回调
+ * @param {Function} [options.onSave] 保存当前文本回调
+ * @param {boolean} [options.editable=false] 当前是否处于编辑状态
+ * @param {boolean} [options.saving=false] 是否正在保存
  * @param {Function} options.t 本地化翻译函数
  */
-export function renderCodeViewer(bodyEl, { preview, copied, onCopy, onSetMode, onSetDiffMode, onSetScopeMode, t }) {
+export function renderCodeViewer(
+  bodyEl,
+  {
+    preview,
+    copied,
+    onCopy,
+    onSetMode,
+    onSetDiffMode,
+    onToggleEdit,
+    onEditInput,
+    onSave,
+    editable = false,
+    saving = false,
+    t,
+  }
+) {
   bodyEl.replaceChildren();
 
   if (!preview) {
@@ -43,14 +63,14 @@ export function renderCodeViewer(bodyEl, { preview, copied, onCopy, onSetMode, o
       const diffPane = el("div", "sfe-diff-pane");
       renderDiffView(diffPane, {
         result: preview.diff.result,
-        // 全文件差异：透传工作区新版本完整文本与视图范围控制
+        // 全文件差异：透传工作区新版本完整文本
         fullContent: preview.diff.fullContent ?? preview.text ?? null,
         loading: preview.diff.loading,
         error: preview.diff.error,
         // 使用文件扩展名选择 Prism 语言，确保差异正文与普通代码预览使用同一套高亮规则
         extension: extname(preview.name),
+        mode: preview.diffMode,
         onSetMode: onSetDiffMode,
-        onSetScopeMode,
         t,
       });
       bodyEl.appendChild(diffPane);
@@ -63,6 +83,8 @@ export function renderCodeViewer(bodyEl, { preview, copied, onCopy, onSetMode, o
   if (preview.kind === "text") {
     // Markdown 默认进入预览模式；预览/代码双模式可切换
     const mode = preview.isMarkdown && preview.mode === "code" ? "code" : "preview";
+    // 模式切换与复制/编辑/保存按钮共用一个工具栏，避免多个绝对定位层相互覆盖。
+    const viewerToolbar = el("div", "sfe-viewer-toolbar");
 
     // Markdown 专属：模式切换分段控件
     if (preview.isMarkdown) {
@@ -85,18 +107,46 @@ export function renderCodeViewer(bodyEl, { preview, copied, onCopy, onSetMode, o
         }
         switcher.appendChild(btn);
       }
-      bodyEl.appendChild(switcher);
+      viewerToolbar.appendChild(switcher);
     }
 
-    // 悬浮复制按钮：复制的是原始 Markdown / 代码文本
+    // 编辑能力只属于普通文本或 Markdown 代码模式；截断内容禁止编辑，避免覆盖原文件未读取部分。
+    const canEdit =
+      preview.kind === "text" &&
+      !preview.truncated &&
+      (!preview.isMarkdown || mode === "code") &&
+      typeof onToggleEdit === "function";
+
+    // 复制与编辑控制集中在同一工具组，避免两个绝对定位按钮互相覆盖。
+    const actions = el("div", "sfe-viewer-actions");
     const copyBtn = el("button", "sfe-floating-copy-btn" + (copied ? " copied" : ""));
     copyBtn.type = "button";
     copyBtn.title = copied ? t("action.copied", "已复制") : t("action.copy", "复制代码");
     copyBtn.appendChild(createActionIcon(copied ? "check" : "copy", 14));
-    if (typeof onCopy === "function") {
-      copyBtn.addEventListener("click", onCopy);
+    if (typeof onCopy === "function") copyBtn.addEventListener("click", onCopy);
+    actions.appendChild(copyBtn);
+
+    if (canEdit) {
+      const editBtn = el("button", "sfe-floating-edit-btn" + (editable ? " editing" : ""));
+      editBtn.type = "button";
+      editBtn.title = editable ? t("action.readOnly", "只读") : t("action.edit", "编辑");
+      editBtn.setAttribute("aria-pressed", editable ? "true" : "false");
+      editBtn.appendChild(createActionIcon(editable ? "eye" : "pencil", 14));
+      editBtn.addEventListener("click", () => onToggleEdit(!editable));
+      actions.appendChild(editBtn);
+
+      if (editable && typeof onSave === "function") {
+        const saveBtn = el("button", "sfe-floating-save-btn");
+        saveBtn.type = "button";
+        saveBtn.title = saving ? t("action.saving", "保存中…") : t("action.save", "保存");
+        saveBtn.disabled = saving;
+        saveBtn.appendChild(createActionIcon("check", 14));
+        saveBtn.addEventListener("click", onSave);
+        actions.appendChild(saveBtn);
+      }
     }
-    bodyEl.appendChild(copyBtn);
+    viewerToolbar.appendChild(actions);
+    bodyEl.appendChild(viewerToolbar);
 
     // Markdown 预览模式：渲染已净化的 HTML
     if (preview.isMarkdown && mode === "preview") {
@@ -127,28 +177,70 @@ export function renderCodeViewer(bodyEl, { preview, copied, onCopy, onSetMode, o
       return;
     }
 
-    // 代码模式（含普通文本文件）：语法高亮 + 行号
-    const scroll = el("div", "sfe-file-viewer-code-scroll");
-    const pre = el("pre", "sfe-file-viewer-code");
+    if (editable) {
+      // 编辑态使用高亮层 + 透明文字 textarea：textarea 负责真实输入，高亮层只负责显示。
+      // 同时复用 sfe-file-viewer-code 作用域，使现有语法 token 配色覆盖编辑层。
+      const editScroll = el("div", "sfe-file-viewer-edit-scroll");
+      const editHighlight = el("pre", "sfe-file-viewer-edit-highlight sfe-file-viewer-code");
+      editHighlight.setAttribute("aria-hidden", "true");
+      const updateEditHighlight = (value) => {
+        const source = String(value ?? "");
+        editHighlight.innerHTML =
+          highlightCodeHtml(source, extname(preview.name)) || escapeHtml(source);
+        // 保留末尾空行的高度，避免输入换行后高亮层比 textarea 少一行。
+        if (source.endsWith("\n")) editHighlight.appendChild(document.createTextNode(" "));
+      };
+      updateEditHighlight(preview.text);
 
-    // 行号槽
-    const gutter = el("div", "sfe-file-viewer-line-numbers");
-    const linesArray = String(preview.text || "").split(/\r\n|\r|\n/);
-    const total = linesArray.length;
-    let gutterText = "";
-    for (let i = 1; i <= total; i++) {
-      gutterText += i + (i < total ? NL : "");
+      const textarea = document.createElement("textarea");
+      textarea.className = "sfe-file-viewer-textarea";
+      textarea.value = String(preview.text || "");
+      textarea.wrap = "off";
+      textarea.spellcheck = false;
+      textarea.setAttribute("aria-label", t("action.edit", "编辑文件"));
+      if (typeof onEditInput === "function") {
+        textarea.addEventListener("input", () => {
+          updateEditHighlight(textarea.value);
+          onEditInput(textarea.value);
+        });
+      }
+      editScroll.appendChild(editHighlight);
+      editScroll.appendChild(textarea);
+      bodyEl.appendChild(editScroll);
+    } else {
+      // 只读态继续使用经过转义/高亮的 HTML。
+      const scroll = el("div", "sfe-file-viewer-code-scroll");
+      const pre = el("pre", "sfe-file-viewer-code");
+
+      // 行号槽
+      const gutter = el("div", "sfe-file-viewer-line-numbers");
+      const linesArray = String(preview.text || "").split(/\r\n|\r|\n/);
+      const total = linesArray.length;
+      let gutterText = "";
+      for (let i = 1; i <= total; i++) {
+        gutterText += i + (i < total ? NL : "");
+      }
+      gutter.textContent = gutterText;
+      pre.appendChild(gutter);
+
+      // 代码高亮内容
+      const content = el("div", "sfe-file-viewer-code-content");
+      content.innerHTML = preview.highlightedHtml || escapeHtml(preview.text || "");
+      pre.appendChild(content);
+
+      scroll.appendChild(pre);
+      bodyEl.appendChild(scroll);
     }
-    gutter.textContent = gutterText;
-    pre.appendChild(gutter);
 
-    // 代码高亮内容
-    const content = el("div", "sfe-file-viewer-code-content");
-    content.innerHTML = preview.highlightedHtml || escapeHtml(preview.text || "");
-    pre.appendChild(content);
-
-    scroll.appendChild(pre);
-    bodyEl.appendChild(scroll);
+    if (preview.saveState && preview.saveState !== "idle") {
+      const saveText =
+        preview.saveState === "saving"
+          ? t("action.saving", "保存中…")
+          : preview.saveState === "saved"
+            ? t("action.saveSuccess", "已保存")
+            : preview.saveMessage || t("action.saveFailed", "保存失败");
+      bodyEl.appendChild(el("div", "sfe-pv-note", saveText));
+    }
 
     // 截断提示
     if (preview.truncated) {

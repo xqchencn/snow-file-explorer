@@ -51,6 +51,54 @@
   background: var(--surface-island, var(--bg-secondary));
 }
 
+/* 差异块导航：位于统一/分栏切换左侧，箭头直接跳转到上一个/下一个 hunk。 */
+.sfe-diff-hunk-nav {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.sfe-diff-nav-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--border-color, var(--border-light));
+  border-radius: var(--radius-sm, 4px);
+  background: var(--surface-island, var(--bg-secondary));
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.sfe-diff-nav-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.sfe-diff-nav-btn:disabled {
+  cursor: default;
+  opacity: 0.4;
+}
+
+.sfe-diff-hunk-position {
+  min-width: 30px;
+  color: var(--text-muted);
+  font-family: var(--font-mono, monospace);
+  font-size: 10px;
+  text-align: center;
+  user-select: none;
+}
+
+/* 空锚点只提供滚动目标，不占用差异正文的可见高度。 */
+.sfe-diff-hunk-anchor {
+  position: relative;
+  height: 0;
+  scroll-margin-top: 4px;
+}
+
 /* 增删统计条 */
 .sfe-diff-stat {
   display: flex;

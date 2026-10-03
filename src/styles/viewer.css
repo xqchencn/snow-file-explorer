@@ -24,12 +24,37 @@ html:has(.app-shell.right-panel-fullscreen) .sfe-preview-pane {
   flex: 1;
 }
 
-/* 优雅浮动复制按钮：置于代码区右上角，继承 Snow 主题岛屿与边框变量 */
-.sfe-floating-copy-btn {
+/* 预览区顶部工具栏：模式切换与复制/编辑/保存按钮统一排列，避免控件重叠。 */
+.sfe-viewer-toolbar {
   position: absolute;
   top: 10px;
   right: 18px;
   z-index: 10;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  max-width: calc(100% - 36px);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.sfe-viewer-toolbar::-webkit-scrollbar {
+  display: none;
+}
+
+/* 复制、笔/眼睛、保存按钮按顺序排列在统一工具栏内。 */
+.sfe-viewer-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.sfe-floating-copy-btn,
+.sfe-floating-edit-btn,
+.sfe-floating-save-btn {
+  position: static;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -46,19 +71,103 @@ html:has(.app-shell.right-panel-fullscreen) .sfe-preview-pane {
   backdrop-filter: blur(8px);
 }
 
-.sfe-floating-copy-btn:hover {
+.sfe-floating-copy-btn:hover,
+.sfe-floating-edit-btn:hover,
+.sfe-floating-save-btn:hover {
   opacity: 1;
   background: var(--bg-hover);
   color: var(--text-primary);
 }
 
+.sfe-floating-copy-btn.copied,
+.sfe-floating-save-btn {
+  color: var(--accent-green-text, var(--accent-green));
+}
+
 .sfe-floating-copy-btn.copied {
   opacity: 1;
-  color: var(--accent-green-text, var(--accent-green));
   border-color: var(--accent-green);
 }
 
-/* 代码滚动视窗（对标 .file-viewer-code-scroll） */
+.sfe-floating-save-btn:disabled {
+  cursor: wait;
+  opacity: 0.5;
+}
+
+/* 兼容旧类名的公共边界，工具组内按钮不再使用绝对定位。 */
+.sfe-floating-copy-btn {
+  top: auto;
+  right: auto;
+}
+
+
+/* 编辑态：高亮层与透明输入层叠放，输入仍由真实 textarea 处理。 */
+.sfe-file-viewer-edit-scroll {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  background: var(--bg-primary);
+}
+
+.sfe-file-viewer-edit-highlight {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 0;
+  box-sizing: border-box;
+  width: max-content;
+  min-width: 100%;
+  min-height: 100%;
+  margin: 0;
+  padding: 12px 14px;
+  overflow: visible;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.6;
+  tab-size: 2;
+  white-space: pre;
+  pointer-events: none;
+  user-select: none;
+}
+
+.sfe-file-viewer-textarea {
+  position: relative;
+  z-index: 1;
+  display: block;
+  box-sizing: border-box;
+  width: max-content;
+  min-width: 100%;
+  min-height: 100%;
+  padding: 12px 14px;
+  border: 0;
+  outline: 0;
+  resize: none;
+  overflow: visible;
+  background: transparent;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  caret-color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.6;
+  tab-size: 2;
+  white-space: pre;
+}
+
+.sfe-file-viewer-textarea::selection {
+  background: var(--selection-bg);
+  color: transparent;
+}
+
+.sfe-file-viewer-textarea:focus {
+  outline: 1px solid var(--accent-color, var(--border-color));
+  outline-offset: -1px;
+}
+
+
 .sfe-file-viewer-code-scroll {
   flex: 1;
   min-height: 0;
@@ -116,6 +225,14 @@ html:has(.app-shell.right-panel-fullscreen) .sfe-preview-pane {
   /* 显式放开文本选中：祖先 .sfe-container 设了 user-select:none，
      这里必须重新开启，否则代码无法用鼠标划选复制 */
   user-select: text;
+}
+
+/* 编辑高亮层复用代码作用域只为继承 token 配色；布局仍必须保持叠层定位。 */
+.sfe-file-viewer-edit-highlight.sfe-file-viewer-code {
+  position: absolute;
+  display: block;
+  padding: 12px 14px;
+  user-select: none;
 }
 
 /* 超大文本截断提示条 */

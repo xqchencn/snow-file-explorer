@@ -1,6 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseGitignore, isIgnoredByRules, isExcludedMeta } from '../../../src/services/file-filter.js';
+import {
+  parseGitignore,
+  isIgnoredByRules,
+  isExcludedMeta,
+  filterExcludedEntries,
+} from '../../../src/services/file-filter.js';
 
 test('文件过滤: 元数据项精确匹配，且不误伤 .gitignore 本身', () => {
   for (const n of ['.git', '.svn', '.hg', 'CVS', '.DS_Store', 'Thumbs.db']) {
@@ -56,8 +61,96 @@ test('文件过滤: 多层 .gitignore 按 base 相对生效且深层覆盖浅层
   assert.equal(isIgnoredByRules('other/a.tmp', false, subOnly), false);
 });
 
+
 test('文件过滤: 空 .gitignore 返回空规则', () => {
   assert.equal(parseGitignore('').length, 0);
   assert.equal(parseGitignore('# only comments\n\n').length, 0);
   assert.equal(isIgnoredByRules('a.log', false, []), false);
+});
+
+test('文件过滤: 关闭元数据开关时保留条目并增加浅色标记', () => {
+  const entry = { name: '.git', path: 'D:/repo/.git', isDirectory: true, size: 12 };
+  const result = filterExcludedEntries([entry], 'D:/repo', {
+    excludeMeta: false,
+    useGitignore: true,
+    gitignoreRules: [],
+  });
+  assert.equal(result.length, 1);
+  assert.equal(result[0].isSoftHidden, true);
+  assert.equal(result[0].isMetaExcluded, true);
+  assert.equal(result[0].path, entry.path);
+  assert.equal(result[0].size, entry.size);
+});
+
+test('文件过滤: 关闭 .gitignore 开关时保留命中条目并增加浅色标记', () => {
+  const entry = { name: 'debug.log', path: 'D:/repo/debug.log', isDirectory: false };
+  const result = filterExcludedEntries([entry], 'D:/repo', {
+    excludeMeta: true,
+    useGitignore: false,
+    gitignoreRules: parseGitignore('*.log'),
+  });
+  assert.equal(result.length, 1);
+  assert.equal(result[0].isSoftHidden, true);
+  assert.equal(result[0].isGitignored, true);
+  assert.equal(result[0].path, entry.path);
+});
+
+test('文件过滤: 开关打开时过滤命中项，同时命中两条规则也只保留一个条目', () => {
+  const entry = { name: '.git', path: 'D:/repo/.git', isDirectory: true };
+  const result = filterExcludedEntries([entry], 'D:/repo', {
+    excludeMeta: false,
+    useGitignore: false,
+    gitignoreRules: parseGitignore('.git'),
+  });
+  assert.equal(result.length, 1);
+  assert.equal(result[0].isSoftHidden, true);
+
+  const filtered = filterExcludedEntries([entry], 'D:/repo', {
+    excludeMeta: true,
+    useGitignore: true,
+    gitignoreRules: parseGitignore('.git'),
+  });
+  assert.equal(filtered.length, 0);
+});
+
+test('文件过滤: 未命中规则的条目不带浅色标记', () => {
+  const entry = { name: 'src', path: 'D:/repo/src', isDirectory: true };
+  const result = filterExcludedEntries([entry], 'D:/repo', {
+    excludeMeta: false,
+    useGitignore: false,
+    gitignoreRules: parseGitignore('*.log'),
+  });
+  assert.equal(result.length, 1);
+  assert.equal(result[0].isSoftHidden, false);
+});
+
+test('文件过滤: 单一 .gitignore 开关同时控制元数据和忽略项', () => {
+  const entries = [
+    { name: '.git', path: 'D:/repo/.git', isDirectory: true },
+    { name: 'debug.log', path: 'D:/repo/debug.log', isDirectory: false },
+    { name: 'src', path: 'D:/repo/src', isDirectory: true },
+  ];
+  const gitignoreRules = parseGitignore('.git\n*.log');
+
+  const filterEnabled = true;
+  const hidden = filterExcludedEntries(entries, 'D:/repo', {
+    excludeMeta: filterEnabled,
+    useGitignore: filterEnabled,
+    gitignoreRules,
+  });
+  assert.deepEqual(hidden.map((entry) => entry.path), ['D:/repo/src']);
+
+  const filterDisabled = false;
+  const visible = filterExcludedEntries(entries, 'D:/repo', {
+    excludeMeta: filterDisabled,
+    useGitignore: filterDisabled,
+    gitignoreRules,
+  });
+  assert.deepEqual(
+    visible.map((entry) => entry.path),
+    entries.map((entry) => entry.path)
+  );
+  assert.equal(visible[0].isSoftHidden, true);
+  assert.equal(visible[1].isSoftHidden, true);
+  assert.equal(visible[2].isSoftHidden, false);
 });

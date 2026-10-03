@@ -105,6 +105,7 @@ export function renderTreeView(parentEl, options) {
         (isDir ? " sfe-folder-row" : "") +
         (entry.isVirtualPackage ? " sfe-java-package-row" : "") +
         (entry.isJavaSourceRoot ? " sfe-java-source-root-row" : "") +
+        (entry.isSoftHidden ? " sfe-soft-hidden" : "") +
         (isSelected ? " selected" : "")
     );
     item.style.paddingLeft = 12 + row.depth * 14 + "px";

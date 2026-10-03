@@ -97,36 +97,4 @@ export function saveDiffViewMode(api, mode) {
   }
 }
 
-const DIFF_SCOPE_MODE_KEY = "diffScopeMode";
-
-/**
- * 读取差异范围模式偏好（full / hunks），默认 full（完整文件，对标 VS Code）
- * @param {Object} api 宿主插件运行时 API
- * @returns {Promise<'full'|'hunks'>}
- */
-export async function loadDiffScopeMode(api) {
-  try {
-    if (api && api.storage && typeof api.storage.getJson === "function") {
-      const saved = await api.storage.getJson(DIFF_SCOPE_MODE_KEY);
-      if (saved === "hunks" || saved === "full") return saved;
-    }
-  } catch (err) {
-    console.warn("[FileExplorer] 读取差异范围模式失败:", err);
-  }
-  return "full";
-}
-
-/**
- * 保存差异范围模式偏好（尽力而为，不抛异常）
- * @param {Object} api 宿主插件运行时 API
- * @param {'full'|'hunks'} mode 范围模式
- */
-export function saveDiffScopeMode(api, mode) {
-  try {
-    if (api && api.storage && typeof api.storage.setJson === "function") {
-      api.storage.setJson(DIFF_SCOPE_MODE_KEY, mode === "hunks" ? "hunks" : "full");
-    }
-  } catch (err) {
-    console.warn("[FileExplorer] 保存差异范围模式失败:", err);
-  }
-}
+// 差异范围固定显示完整文件，不再持久化范围切换偏好。

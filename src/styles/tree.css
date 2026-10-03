@@ -133,9 +133,14 @@ html:has(.app-shell.right-panel-fullscreen) .sfe-tree-pane {
   color: var(--accent-color, var(--text-primary));
 }
 
-/* --------------------------------------------------------------------------
-   Git 状态与文件着色（100% 纯粹继承 Snow App 官方主题强调色系统变量）
-   -------------------------------------------------------------------------- */
+/* 过滤开关关闭后仍显示的条目：保留展开、点击、Git 与选中行为，仅降低文件名和图标视觉权重。
+   不直接给整行着色，避免覆盖 Git 状态色和 Java 包节点强调色。 */
+.sfe-soft-hidden .sfe-file-name,
+.sfe-soft-hidden .sfe-type-icon {
+  opacity: 0.55;
+}
+
+
 .sfe-git-modify {
   color: var(--accent-orange, var(--accent-color)) !important;
 }

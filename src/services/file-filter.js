@@ -148,7 +148,29 @@ export function isIgnoredByRules(relPath, isDir, rules) {
 }
 
 /**
- * 按开关过滤目录条目（排除元数据项 / .gitignore 命中项）
+ * 计算条目命中的过滤原因，但不根据开关丢弃条目。
+ * @param {Object} entry 文件树条目
+ * @param {string} rootPath 仓库根目录路径
+ * @param {Object} [opts] 过滤规则选项
+ * @returns {Object} 保留原字段并附加命中标记
+ */
+export function annotateExcludedEntry(entry, rootPath, opts = {}) {
+  if (!entry) return entry;
+  const { gitignoreRules = [] } = opts;
+  const metaExcluded = isExcludedMeta(entry.name);
+  const rel = getRelativeGitPath(entry.path, rootPath);
+  const gitignored =
+    !!rel && isIgnoredByRules(rel, !!entry.isDirectory, gitignoreRules);
+  return {
+    ...entry,
+    isMetaExcluded: metaExcluded,
+    isGitignored: gitignored,
+    isSoftHidden: metaExcluded || gitignored,
+  };
+}
+
+/**
+ * 按开关过滤目录条目；关闭开关时保留命中项并以 isSoftHidden 标记。
  * @param {Array} entries 目录条目列表
  * @param {string} rootPath 仓库根目录路径
  * @param {Object} [opts]
@@ -160,14 +182,12 @@ export function isIgnoredByRules(relPath, isDir, rules) {
 export function filterExcludedEntries(entries, rootPath, opts = {}) {
   if (!Array.isArray(entries)) return entries;
   const { excludeMeta = true, useGitignore = true, gitignoreRules = [] } = opts;
-  if (!excludeMeta && !(useGitignore && gitignoreRules.length)) return entries;
-  return entries.filter((entry) => {
-    if (!entry) return false;
-    if (excludeMeta && isExcludedMeta(entry.name)) return false;
-    if (useGitignore && gitignoreRules.length) {
-      const rel = getRelativeGitPath(entry.path, rootPath);
-      if (rel && isIgnoredByRules(rel, !!entry.isDirectory, gitignoreRules)) return false;
-    }
-    return true;
-  });
+  return entries
+    .map((entry) => annotateExcludedEntry(entry, rootPath, { gitignoreRules }))
+    .filter((entry) => {
+      if (!entry) return false;
+      if (excludeMeta && entry.isMetaExcluded) return false;
+      if (useGitignore && entry.isGitignored) return false;
+      return true;
+    });
 }

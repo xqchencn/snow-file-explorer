@@ -11,6 +11,7 @@ import {
   Copy,
   Check,
   Eye,
+  Pencil,
   Code,
   MoreHorizontal,
   Square,
@@ -36,6 +37,7 @@ const ICON_MAP = {
   copy: Copy,
   check: Check,
   eye: Eye,
+  pencil: Pencil,
   code: Code,
   more: MoreHorizontal,
   square: Square,
@@ -60,7 +62,7 @@ const ICON_MAP = {
 
 /**
  * 创建动作图标 SVG 节点
- * @param {'chevronRight'|'chevronDown'|'refresh'|'sync'|'copy'|'check'|'eye'|'code'|'more'|'square'|'sparkles'|'gitCommit'|'minus'|'plus'|'undo'|'fileText'|'diff'|'unified'|'split'|'arrowUp'|'arrowDown'|'branch'} name 图标名称
+ * @param {'chevronRight'|'chevronDown'|'refresh'|'sync'|'copy'|'check'|'eye'|'pencil'|'code'|'more'|'square'|'sparkles'|'gitCommit'|'minus'|'plus'|'undo'|'fileText'|'diff'|'unified'|'split'|'arrowUp'|'arrowDown'|'branch'} name 图标名称
  * @param {number} [size=14] 图标大小
  * @returns {SVGSVGElement|HTMLElement}
  */
