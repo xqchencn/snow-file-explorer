@@ -1,0 +1,166 @@
+/* ==========================================================================
+   Snow App File Explorer - 代码与文件预览区样式 (styles/viewer.css)
+   100% 像素级对齐 Snow App 官方 FileViewerContent 组件规范
+   ========================================================================== */
+
+/* 预览区主面板：代码从第 1 行顶格直达，无多余头部占行 */
+.sfe-preview-pane {
+  min-width: 0;
+  display: none;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg-primary);
+  position: relative;
+}
+
+/* 全屏状态下展示代码预览大视野
+   宿主全屏态：.right-panel.fullscreen（RightPanel.tsx）/ .app-shell.right-panel-fullscreen（App.tsx）
+   注意：宿主全屏按钮的 className 恒为 right-panel-fullscreen-btn，从不带 .active，故不能用它判断 */
+:root:has(.right-panel.fullscreen) .sfe-preview-pane,
+:root:has(.app-shell.right-panel-fullscreen) .sfe-preview-pane,
+html:has(.right-panel.fullscreen) .sfe-preview-pane,
+html:has(.app-shell.right-panel-fullscreen) .sfe-preview-pane {
+  display: flex;
+  flex: 1;
+}
+
+/* 优雅浮动复制按钮：置于代码区右上角，继承 Snow 主题岛屿与边框变量 */
+.sfe-floating-copy-btn {
+  position: absolute;
+  top: 10px;
+  right: 18px;
+  z-index: 10;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: var(--radius-sm, 4px);
+  border: 1px solid var(--border-color, var(--border-light));
+  background: var(--surface-island, var(--bg-secondary));
+  color: var(--text-muted);
+  cursor: pointer;
+  opacity: 0.75;
+  transition: opacity 0.15s ease, background 0.15s ease, color 0.15s ease;
+  backdrop-filter: blur(8px);
+}
+
+.sfe-floating-copy-btn:hover {
+  opacity: 1;
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.sfe-floating-copy-btn.copied {
+  opacity: 1;
+  color: var(--accent-green-text, var(--accent-green));
+  border-color: var(--accent-green);
+}
+
+/* 代码滚动视窗（对标 .file-viewer-code-scroll） */
+.sfe-file-viewer-code-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: scroll;
+  overflow-x: auto;
+  background: var(--bg-primary);
+}
+
+/* 代码等宽容器（100% 对标官方 pre.file-viewer-code 定义） */
+.sfe-file-viewer-code {
+  margin: 0;
+  padding: 12px 0;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.6;
+  display: flex;
+  min-height: 100%;
+  width: max-content;
+  min-width: 100%;
+  tab-size: 2;
+  user-select: text;
+  position: relative;
+}
+
+/* 选区色彩高亮（对标官方 ::selection） */
+.sfe-file-viewer-code ::selection {
+  background: var(--selection-bg);
+  color: inherit;
+}
+
+/* 行号槽（100% 对标官方 .file-viewer-line-numbers） */
+.sfe-file-viewer-line-numbers {
+  flex-shrink: 0;
+  padding: 0 10px 0 14px;
+  text-align: right;
+  color: var(--text-muted);
+  user-select: none;
+  white-space: pre;
+  background: var(--bg-primary);
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  border-right: 1px solid var(--border-color);
+}
+
+/* 语法代码内容主体（对标官方 .file-viewer-code-content） */
+.sfe-file-viewer-code-content {
+  flex: 1;
+  padding: 0 14px 0 10px;
+  background: transparent;
+  white-space: pre;
+  color: var(--text-primary);
+  /* 显式放开文本选中：祖先 .sfe-container 设了 user-select:none，
+     这里必须重新开启，否则代码无法用鼠标划选复制 */
+  user-select: text;
+}
+
+/* 超大文本截断提示条 */
+.sfe-pv-note {
+  flex-shrink: 0;
+  padding: 6px 12px;
+  font-size: 11px;
+  color: var(--text-muted);
+  border-top: 1px solid var(--border-light);
+  background: var(--bg-secondary);
+}
+
+/* 图片查看容器（对标官方 .file-viewer-image-container） */
+.sfe-file-viewer-image-container {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: var(--bg-primary);
+}
+
+.sfe-file-viewer-image {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: var(--radius-sm, 4px);
+}
+
+/* 空态与异常提示（对标官方 .file-viewer-empty） */
+.sfe-file-viewer-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--text-tertiary);
+  font-size: 12.5px;
+  padding: 24px;
+  user-select: none;
+}
+
+.sfe-file-viewer-empty.error {
+  color: var(--accent-red-text, var(--accent-red));
+}

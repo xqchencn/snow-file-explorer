@@ -1,0 +1,198 @@
+/* ==========================================================================
+   Snow App File Explorer - 文件目录树样式 (styles/tree.css)
+   尺寸、字体与色彩完全继承自 Snow App 官方 GitFileList 规范
+   ========================================================================== */
+
+/* 目录树面板 */
+.sfe-tree-pane {
+  overflow: auto;
+  padding: 4px 0;
+  background: var(--bg-primary);
+  flex: 1;
+}
+
+/* 全屏状态下限制目录树宽度在标准侧栏范围内，给预览区留出最大视野
+   宿主全屏态：.right-panel.fullscreen / .app-shell.right-panel-fullscreen（按钮类名恒无 .active） */
+:root:has(.right-panel.fullscreen) .sfe-tree-pane,
+:root:has(.app-shell.right-panel-fullscreen) .sfe-tree-pane,
+html:has(.right-panel.fullscreen) .sfe-tree-pane,
+html:has(.app-shell.right-panel-fullscreen) .sfe-tree-pane {
+  width: var(--right-panel-width, 380px);
+  min-width: 340px;
+  max-width: 500px;
+  flex: none;
+  border-right: 1px solid var(--border-color, var(--border-light));
+}
+
+.sfe-list {
+  display: flex;
+  flex-direction: column;
+}
+
+/* 单行条目样式（对标 .git-file-item） */
+.sfe-file-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  cursor: pointer;
+  transition: background 0.1s ease;
+  user-select: none;
+  font-size: 12px;
+}
+
+.sfe-file-item:hover {
+  background: var(--bg-hover);
+}
+
+.sfe-file-item.selected {
+  background: var(--bg-active);
+}
+
+/* 折叠/展开三角指示 */
+.sfe-tree-chevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  color: var(--text-muted);
+  transition: transform 0.15s ease;
+}
+
+.sfe-file-item:hover .sfe-tree-chevron {
+  color: var(--text-secondary);
+}
+
+/* 专有文件图标容器 */
+.sfe-type-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+
+/* material-icon-theme 的 SVG 仅含 viewBox（自适应），由容器控制渲染尺寸 */
+.sfe-type-icon svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+/* 文件名称与文本（对齐 .git-file-name） */
+.sfe-file-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sfe-file-name-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sfe-file-item.selected .sfe-file-name,
+.sfe-folder-row:hover .sfe-file-name {
+  color: var(--text-primary);
+}
+
+/* 辅助属性：子项数与文件大小 */
+.sfe-tree-folder-count {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: var(--text-muted);
+  opacity: 0.75;
+}
+
+.sfe-file-size {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
+/* --------------------------------------------------------------------------
+   Git 状态与文件着色（100% 纯粹继承 Snow App 官方主题强调色系统变量）
+   -------------------------------------------------------------------------- */
+.sfe-git-modify {
+  color: var(--accent-orange, var(--accent-color)) !important;
+}
+
+.sfe-git-untracked {
+  color: var(--accent-green-text, var(--accent-green)) !important;
+}
+
+.sfe-git-add {
+  color: var(--accent-green-text, var(--accent-green)) !important;
+}
+
+.sfe-git-delete {
+  color: var(--accent-red-text, var(--accent-red)) !important;
+  text-decoration: line-through;
+  opacity: 0.65;
+}
+
+.sfe-git-rename {
+  color: var(--accent-purple, var(--accent-color)) !important;
+}
+
+/* Git 变更圆点：文件夹专用（对齐 VS Code「Contains emphasized items」，无字母徽章）
+   颜色跟随状态染色 Class 的 currentColor，半透明以贴合官方气泡徽章观感 */
+.sfe-git-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  margin-left: 4px;
+  background: currentColor;
+  opacity: 0.4;
+}
+
+/* Git 状态字母徽章 (M / U / A / D / R) */
+.sfe-git-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: var(--radius-sm, 3px);
+  font-size: 10px;
+  font-weight: 700;
+  font-family: var(--font-mono, monospace);
+  flex-shrink: 0;
+  margin-left: 4px;
+}
+
+.sfe-git-badge.git-status-modify {
+  background: color-mix(in srgb, var(--accent-orange, var(--accent-color)) 15%, transparent);
+  color: var(--accent-orange, var(--accent-color));
+}
+
+.sfe-git-badge.git-status-untracked {
+  background: var(--accent-green-bg);
+  color: var(--accent-green-text, var(--accent-green));
+}
+
+.sfe-git-badge.git-status-add {
+  background: var(--accent-green-bg);
+  color: var(--accent-green-text, var(--accent-green));
+}
+
+.sfe-git-badge.git-status-delete {
+  background: var(--accent-red-bg);
+  color: var(--accent-red-text, var(--accent-red));
+}
+
+.sfe-git-badge.git-status-rename {
+  background: color-mix(in srgb, var(--accent-purple, var(--accent-color)) 15%, transparent);
+  color: var(--accent-purple, var(--accent-color));
+}

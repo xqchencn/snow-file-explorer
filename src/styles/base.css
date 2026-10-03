@@ -1,0 +1,150 @@
+/* ==========================================================================
+   Snow App File Explorer - 基础与布局样式 (styles/base.css)
+   100% 纯粹继承 Snow App 官方 ThemePalette CSS 变量与字体度量规范
+   严禁硬编码颜色与外部方案，全生命周期与宿主明暗/自定义主题无缝同步
+   ========================================================================== */
+
+.sfe-root {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+
+  /* 基础代码视窗变量：直接映射宿主 ThemePalette 主题调色板 */
+  --sfe-code-bg: var(--bg-primary);
+  --sfe-code-text: var(--text-primary);
+  --sfe-gutter-text: var(--text-muted);
+  --sfe-gutter-border: var(--border-color);
+  --sfe-selection-bg: var(--selection-bg);
+
+  /* 宿主基础主题（:root / [data-theme="dark"]）仅定义 green/red/blue/amber，
+     未定义 --accent-orange 与 --accent-purple（仅个别 preset 定义）。
+     此处按官方调色板语义补齐：橙=琥珀强调色（主题自适应），紫=语法类型色。
+     作用域限定在插件根容器，避免污染宿主全局样式。 */
+  --accent-orange: var(--accent-amber-text, #d19a66);
+  --accent-purple: var(--accent-violet, #c678dd);
+
+  /* 语法色彩：完全绑定宿主官方强调色体系，跟随主题自动适配明暗与色彩倾向 */
+  --sfe-hl-control: var(--accent-color);
+  --sfe-hl-keyword: var(--accent-blue-text, var(--accent-blue));
+  --sfe-hl-fn: var(--accent-orange, var(--accent-color));
+  --sfe-hl-type: var(--accent-purple, var(--accent-color));
+  --sfe-hl-prop: var(--accent-blue);
+  --sfe-hl-string: var(--accent-green-text, var(--accent-green));
+  --sfe-hl-number: var(--accent-red-text, var(--accent-red));
+  --sfe-hl-comment: var(--text-muted);
+  --sfe-hl-var: var(--text-primary);
+}
+
+.sfe-container {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  font-family: var(--app-font-family, var(--font-sans, inherit));
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: var(--bg-primary);
+  user-select: none;
+}
+
+/* 顶部工具栏（项目路径与刷新按钮） */
+.sfe-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 12px;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--border-light);
+  background: var(--surface-island-muted, var(--bg-secondary));
+}
+
+.sfe-toolbar-path {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sfe-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.sfe-toolbar-status {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+/* 工具栏内「差异 / 内容」切换容器：紧邻刷新按钮，仅在 Git 变更视图且已打开文件时显示 */
+.sfe-toolbar-git-view {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+/* 工具栏内隐藏元素：作者样式的 display 会覆盖 UA 的 [hidden]{display:none}，
+   必须显式声明，否则「该隐藏的却一直显示」（.sfe-toolbar-push / .sfe-toolbar-git-view 都依赖它） */
+.sfe-toolbar [hidden] {
+  display: none;
+}
+
+.sfe-btn-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm, 4px);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.1s ease, color 0.1s ease;
+}
+
+.sfe-btn-icon:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+/* 主视图双栏 */
+.sfe-main-view {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+/* 底部状态栏容器：文件树与 Git 变更视图共用，常驻于 layout（不随主视图重建） */
+.sfe-sync-bar {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+}
+
+/* 空状态通配 */
+.sfe-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 32px 16px;
+  text-align: center;
+  color: var(--text-tertiary);
+  font-size: 12.5px;
+}
+
+.sfe-empty-title {
+  font-size: 13px;
+  color: var(--text-secondary);
+}

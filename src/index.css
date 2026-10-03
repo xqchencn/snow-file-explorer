@@ -1,0 +1,14 @@
+/**
+ * Snow App 文件浏览器样式入口 (src/index.css)
+ * 采用工程化模块划分，分别聚合基础布局、文件树、代码视窗与语法高亮
+ * 由构建脚本打包并压缩内联为根目录 index.css
+ */
+
+@import "./styles/base.css";
+@import "./styles/tree.css";
+@import "./styles/viewer.css";
+@import "./styles/markdown.css";
+@import "./styles/menu.css";
+@import "./styles/git-view.css";
+@import "./styles/diff.css";
+@import "./styles/syntax.css";

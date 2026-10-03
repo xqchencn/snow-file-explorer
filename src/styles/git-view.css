@@ -1,0 +1,780 @@
+/* ==========================================================================
+   Snow App File Explorer - Git 变更视图样式 (styles/git-view.css)
+   对齐宿主 Git 面板（.git-control / .git-file-list / .git-commit-*）的视觉规范，
+   100% 继承宿主主题变量。
+   ========================================================================== */
+
+.sfe-git-view {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  background: var(--bg-primary);
+}
+
+/* --------------------------------------------------------------------------
+   Git 变更视图双栏：左侧变更列表 + 右侧文件查看器
+   与文件树视图（.sfe-tree-pane / .sfe-preview-pane）逐字一致的规则：
+   左侧列表在非全屏时占满面板（面板本身 ≤380px，等同固定窄栏），
+   全屏时固定为侧栏宽度（min 340 / max 500），右侧查看器占满剩余空间。
+   因此左侧宽度在任何情况下都受固定上限约束，不会因是否点开文件而跳变。
+   -------------------------------------------------------------------------- */
+.sfe-git-pane {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+.sfe-git-preview-pane {
+  display: none;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+  background: var(--bg-primary);
+  position: relative;
+}
+
+/* 宿主全屏态：左侧列表收窄为侧栏宽度并固定上限，右侧查看器占满剩余空间 */
+:root:has(.right-panel.fullscreen) .sfe-git-pane,
+:root:has(.app-shell.right-panel-fullscreen) .sfe-git-pane,
+html:has(.right-panel.fullscreen) .sfe-git-pane,
+html:has(.app-shell.right-panel-fullscreen) .sfe-git-pane {
+  width: var(--right-panel-width, 380px);
+  min-width: 340px;
+  max-width: 500px;
+  flex: none;
+  border-right: 1px solid var(--border-color, var(--border-light));
+}
+
+:root:has(.right-panel.fullscreen) .sfe-git-preview-pane,
+:root:has(.app-shell.right-panel-fullscreen) .sfe-git-preview-pane,
+html:has(.right-panel.fullscreen) .sfe-git-preview-pane,
+html:has(.app-shell.right-panel-fullscreen) .sfe-git-preview-pane {
+  display: flex;
+  flex: 1;
+}
+
+.sfe-git-empty {
+  padding: 12px 14px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* --------------------------------------------------------------------------
+   提交信息输入区（两行：输入框 + 提交按钮）
+   -------------------------------------------------------------------------- */
+.sfe-git-commit {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 12px;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--border-light);
+  background: var(--surface-island-muted, var(--bg-secondary));
+}
+
+.sfe-git-commit-input-wrap {
+  position: relative;
+  display: flex;
+  width: 100%;
+}
+
+.sfe-git-commit-input {
+  width: 100%;
+  padding: 6px 34px 6px 8px;
+  border-radius: var(--radius-md, 6px);
+  border: 1px solid var(--border-color, var(--border-light));
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 12.5px;
+  font-family: var(--app-font-family, var(--font-sans, inherit));
+  line-height: 1.5;
+  resize: none;
+  field-sizing: content;
+  overflow-y: auto;
+  min-height: 34px;
+  max-height: 164px;
+  /* 祖先 .sfe-container 设了 user-select:none，会被继承导致输入框无法用鼠标
+     选中文本/放置光标；这里显式放开文本选择。 */
+  user-select: text;
+}
+
+.sfe-git-commit-input:focus {
+  outline: none;
+  border-color: var(--accent-color);
+}
+
+.sfe-git-commit-input::placeholder {
+  color: var(--text-muted);
+}
+
+.sfe-git-commit-input.is-generating {
+  cursor: default;
+}
+
+.sfe-git-ai-btn {
+  position: absolute;
+  right: 4px;
+  /* 垂直居中：输入框多行增高时，星星跟随右缘居中而非固定在第一行 */
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm, 4px);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background 0.1s ease, color 0.1s ease;
+}
+
+.sfe-git-ai-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.sfe-git-ai-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* 第二行：提交 / 提交并推送 split 按钮（占满整行） */
+.sfe-git-commit-actions {
+  display: flex;
+}
+
+.sfe-git-commit-split {
+  position: relative;
+  display: flex;
+  width: 100%;
+}
+
+.sfe-git-commit-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  flex: 1;
+  padding: 6px 14px;
+  min-height: 30px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md, 6px) 0 0 var(--radius-md, 6px);
+  background: var(--text-primary);
+  color: var(--on-solid, var(--bg-primary));
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: opacity 0.12s ease;
+}
+
+.sfe-git-commit-btn:hover:not(:disabled) {
+  opacity: 0.9;
+}
+
+.sfe-git-commit-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* 模式下拉触发（split 的右半） */
+.sfe-git-commit-caret {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  min-height: 30px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-left: 1px solid rgba(0, 0, 0, 0.18);
+  border-radius: 0 var(--radius-md, 6px) var(--radius-md, 6px) 0;
+  background: var(--text-primary);
+  color: var(--on-solid, var(--bg-primary));
+  cursor: pointer;
+  transition: opacity 0.12s ease;
+}
+
+.sfe-git-commit-caret:hover:not(:disabled) {
+  opacity: 0.9;
+}
+
+.sfe-git-commit-caret:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* 提交模式下拉菜单 */
+.sfe-git-commit-menu {
+  position: absolute;
+  bottom: calc(100% + 4px);
+  right: 0;
+  z-index: 30;
+  min-width: 140px;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  border: 1px solid var(--border-color, var(--border-light));
+  border-radius: var(--radius-md, 6px);
+  background: var(--surface-island, var(--bg-secondary));
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+}
+
+.sfe-git-commit-menu-item {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  padding: 6px 8px;
+  border: none;
+  border-radius: var(--radius-sm, 4px);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.sfe-git-commit-menu-item:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.sfe-git-commit-menu-item.active {
+  color: var(--accent-color);
+}
+
+.sfe-git-commit-menu-label {
+  white-space: nowrap;
+}
+
+/* --------------------------------------------------------------------------
+   变更列表
+   -------------------------------------------------------------------------- */
+.sfe-git-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+/* --------------------------------------------------------------------------
+   底部同步栏（常驻于 layout，文件树与 Git 变更视图共用）：
+   左侧「当前分支下拉 + 同步」，其后紧随「↓未拉取 / ↑未推送」计数
+   -------------------------------------------------------------------------- */
+.sfe-git-sync {
+  display: flex;
+  align-items: center;
+  /* 计数区紧随左侧「分支 + 同步」之后；不用 space-between，避免把计数推到最右端 */
+  gap: 8px;
+  flex-shrink: 0;
+  padding: 4px 8px;
+  border-top: 1px solid var(--border-light);
+  background: var(--surface-island-muted, var(--bg-secondary));
+}
+
+.sfe-git-sync-left {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+/* 分支下拉（容器需 relative 以承载绝对定位的菜单） */
+.sfe-git-branch {
+  position: relative;
+  min-width: 0;
+}
+
+.sfe-git-branch-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 150px;
+  height: 20px;
+  padding: 0 6px;
+  border: none;
+  border-radius: var(--radius-sm, 4px);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.sfe-git-branch-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.sfe-git-branch-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.sfe-git-branch-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sfe-git-branch-menu {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  z-index: 30;
+  min-width: 180px;
+  max-width: 280px;
+  max-height: 300px;
+  overflow-y: auto;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  border: 1px solid var(--border-color, var(--border-light));
+  border-radius: var(--radius-md, 6px);
+  background: var(--surface-island, var(--bg-secondary));
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+}
+
+.sfe-git-branch-empty {
+  padding: 6px 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.sfe-git-branch-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  min-height: 26px;
+  padding: 6px 10px;
+  border: none;
+  border-radius: var(--radius-sm, 4px);
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.sfe-git-branch-item:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.sfe-git-branch-item.current {
+  color: var(--accent-color);
+  font-weight: 600;
+}
+
+.sfe-git-branch-item:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.sfe-git-branch-item-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sfe-git-branch-tag {
+  flex-shrink: 0;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: var(--bg-active);
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.sfe-git-sync-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm, 4px);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.sfe-git-sync-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.sfe-git-sync-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.sfe-git-sync-counts {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.sfe-git-sync-count {
+  display: inline-flex;
+  align-items: center;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  cursor: default;
+}
+
+.sfe-git-sync-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+/* 数字与箭头同色：有数量时上色（↑未推送蓝，发往远端 / ↓未拉取橙，来自远端），
+   为 0 时整体转灰（.zero）且不可点。 */
+.sfe-git-sync-count.push:not(.zero) {
+  color: var(--accent-blue-text, var(--accent-blue, #3b82f6));
+}
+
+.sfe-git-sync-count.pull:not(.zero) {
+  color: var(--accent-orange, #d19a66);
+}
+
+.sfe-git-sync-count.zero {
+  color: var(--text-muted);
+  cursor: default;
+}
+
+/* 0 计数整体再压暗一档，与「有提交」形成明确对比；但仍需清晰可读（此前 0.5 过淡） */
+.sfe-git-sync-count.zero .sfe-git-sync-label {
+  opacity: 0.72;
+}
+
+.sfe-git-sync-count.clickable {
+  cursor: pointer;
+}
+
+.sfe-git-sync-count.clickable:not(.zero):hover {
+  text-decoration: underline;
+}
+
+/* 作者样式的 display 会覆盖 UA 的 [hidden]{display:none}，同步栏计数容器声明了
+   display，必须显式兜底，否则非仓库时 hidden 失效。 */
+.sfe-git-sync-counts[hidden] {
+  display: none;
+}
+
+.sfe-git-sync-count.clickable[disabled],
+.sfe-git-sync-count.clickable.is-disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  text-decoration: none;
+}
+
+/* 单独拉取 / 推送时：即使计数项被禁用，也保留方向性动效作为操作反馈。 */
+.sfe-git-sync-count.pulling svg {
+  animation: sfe-sync-pull 0.75s ease-in-out infinite alternate;
+}
+
+.sfe-git-sync-count.pushing svg {
+  animation: sfe-sync-push 0.75s ease-in-out infinite alternate;
+}
+
+@keyframes sfe-sync-pull {
+  from {
+    transform: translateY(-1px);
+  }
+  to {
+    transform: translateY(2px);
+  }
+}
+
+@keyframes sfe-sync-push {
+  from {
+    transform: translateY(2px);
+  }
+  to {
+    transform: translateY(-1px);
+  }
+}
+
+/* 同步进行中：双向箭头保持上下方向，沿 Y 轴轻微往复，表示下载 / 上传进行中 */
+.sfe-git-sync-btn.syncing {
+  opacity: 1;
+}
+
+.sfe-git-sync-btn.syncing svg {
+  animation: sfe-sync-bounce 0.9s ease-in-out infinite alternate;
+}
+
+@keyframes sfe-sync-bounce {
+  from {
+    transform: translateY(2px);
+  }
+  to {
+    transform: translateY(-2px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sfe-git-sync-count.pulling svg,
+  .sfe-git-sync-count.pushing svg,
+  .sfe-git-sync-btn.syncing svg {
+    animation: none;
+  }
+}
+
+.sfe-git-section {
+  border-bottom: 1px solid var(--border-light);
+}
+
+.sfe-git-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px 4px;
+}
+
+.sfe-git-section-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sfe-git-section-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+}
+
+.sfe-git-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--bg-active);
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.sfe-git-section-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm, 4px);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background 0.1s ease, color 0.1s ease;
+}
+
+.sfe-git-section-action:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.sfe-git-section-action:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.sfe-git-items {
+  display: flex;
+  flex-direction: column;
+  padding-bottom: 4px;
+}
+
+/* 单个文件行 */
+.sfe-git-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.1s ease;
+}
+
+.sfe-git-row:hover {
+  background: var(--bg-hover);
+}
+
+.sfe-git-row.selected {
+  background: var(--bg-active);
+}
+
+/* 状态字母徽章 */
+.sfe-git-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 700;
+  font-family: var(--font-mono, monospace);
+  flex-shrink: 0;
+}
+
+.sfe-git-status.sfe-git-add {
+  background: var(--accent-green-bg);
+  color: var(--accent-green-text, var(--accent-green));
+}
+
+.sfe-git-status.sfe-git-untracked {
+  background: var(--bg-active);
+  color: var(--text-muted);
+}
+
+.sfe-git-status.sfe-git-modify {
+  background: color-mix(in srgb, var(--accent-orange, var(--accent-color)) 15%, transparent);
+  color: var(--accent-orange, var(--accent-color));
+}
+
+.sfe-git-status.sfe-git-delete {
+  background: var(--accent-red-bg);
+  color: var(--accent-red-text, var(--accent-red));
+}
+
+.sfe-git-status.sfe-git-rename {
+  background: color-mix(in srgb, var(--accent-purple, var(--accent-color)) 15%, transparent);
+  color: var(--accent-purple, var(--accent-color));
+}
+
+.sfe-git-status.sfe-git-ignored {
+  background: var(--bg-active);
+  color: var(--text-muted);
+}
+
+/* 文件名与路径 */
+.sfe-git-name {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  overflow: hidden;
+}
+
+.sfe-git-name-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 1;
+  min-width: 0;
+}
+
+.sfe-git-name-text.deleted {
+  text-decoration: line-through;
+  opacity: 0.6;
+}
+
+.sfe-git-path {
+  font-size: 11px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 10;
+  min-width: 0;
+}
+
+.sfe-git-row.selected .sfe-git-name {
+  color: var(--text-primary);
+}
+
+/* 行内操作按钮：默认隐藏，悬停/选中时显示 */
+.sfe-git-row-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm, 4px);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  opacity: 0;
+  flex-shrink: 0;
+  transition: opacity 0.1s ease, background 0.1s ease, color 0.1s ease;
+}
+
+.sfe-git-row:hover .sfe-git-row-btn,
+.sfe-git-row.selected .sfe-git-row-btn {
+  opacity: 1;
+}
+
+.sfe-git-row-btn:hover:not(:disabled) {
+  background: var(--bg-active);
+  color: var(--text-primary);
+}
+
+.sfe-git-row-btn.discard:hover:not(:disabled) {
+  color: var(--accent-red-text, var(--accent-red));
+}
+
+.sfe-git-row-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* --------------------------------------------------------------------------
+   目录树行
+   -------------------------------------------------------------------------- */
+.sfe-git-chevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+.sfe-git-folder-row {
+  cursor: pointer;
+}
+
+/* 目录行的暂存按钮恒靠最右（文件夹行没有 flex:1 的名称容器，需显式推开） */
+.sfe-git-folder-row .sfe-git-row-btn {
+  margin-left: auto;
+}
+
+.sfe-git-folder-row .sfe-git-name-text {
+  color: var(--text-secondary);
+}
+
+.sfe-git-folder-count {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: var(--text-muted);
+  opacity: 0.7;
+}

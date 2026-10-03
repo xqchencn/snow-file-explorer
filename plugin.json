@@ -1,0 +1,36 @@
+{
+  "id": "com.github.xqchencn.snow-file-explorer",
+  "name": {
+    "default": "File Explorer",
+    "zh-CN": "文件浏览器",
+    "zh-TW": "檔案瀏覽器"
+  },
+  "description": {
+    "default": "Browse local workspace with file preview, Markdown preview and git status",
+    "zh-CN": "浏览本地工作区并支持文件代码预览、Markdown 预览与 Git 状态",
+    "zh-TW": "瀏覽本機工作區並支援檔案程式碼預覽、Markdown 預覽与 Git 狀態"
+  },
+  "homepage": "https://github.com/xqchencn/snow-file-explorer",
+  "repository": "https://github.com/xqchencn/snow-file-explorer.git",
+  "downloadUrl": "https://github.com/xqchencn/snow-file-explorer/releases",
+  "icon": "lucide:FolderTree",
+  "renderMode": "esm",
+  "entry": "index.js",
+  "panels": [
+    {
+      "id": "explorer",
+      "title": {
+        "default": "File Explorer",
+        "zh-CN": "文件浏览器",
+        "zh-TW": "檔案瀏覽器"
+      },
+      "icon": "lucide:FolderTree"
+    }
+  ],
+  "locales": {
+    "zh-CN": "locales/zh-CN.json",
+    "zh-TW": "locales/zh-TW.json",
+    "en": "locales/en.json"
+  },
+  "styles": ["index.css"]
+}

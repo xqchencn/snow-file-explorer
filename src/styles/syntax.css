@@ -1,0 +1,201 @@
+/**
+ * 代码语法高亮调色体系 (src/styles/syntax.css)
+ * 选择器同时覆盖普通代码容器 .sfe-file-viewer-code 与 Git 差异容器 .sfe-diff-scroll，
+ * 颜色全部取自宿主 ThemePalette 变量并带安全 fallback，跟随宿主明暗/自定义主题。
+ *
+ * 覆盖范围：经 .tmp-token-audit.mjs 实测，Prism 297 语言 + 43 个真实样本会产出 100+ 种 token 类，
+ * 本文件按语义分组全部覆盖；仅排除 language-* / php / content 等纯容器类
+ * （它们包裹整段嵌入代码，必须保持颜色继承，不能染色）。
+ * 分组顺序即优先级：所有规则特异性相同（3 个类），同元素命中多组时后者胜出，
+ * 故 markdown / diff 等特殊语义置于末尾。
+ */
+
+/* 1. 注释与文档标记 */
+.sfe-file-viewer-code .token.comment, .sfe-diff-scroll .token.comment,
+.sfe-file-viewer-code .token.prolog, .sfe-diff-scroll .token.prolog,
+.sfe-file-viewer-code .token.doctype, .sfe-diff-scroll .token.doctype,
+.sfe-file-viewer-code .token.doctype-tag, .sfe-diff-scroll .token.doctype-tag,
+.sfe-file-viewer-code .token.cdata, .sfe-diff-scroll .token.cdata,
+.sfe-file-viewer-code .token.shebang, .sfe-diff-scroll .token.shebang {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+/* 2. 标点、分隔符与结构标记 */
+.sfe-file-viewer-code .token.punctuation, .sfe-diff-scroll .token.punctuation,
+.sfe-file-viewer-code .token.delimiter, .sfe-diff-scroll .token.delimiter,
+.sfe-file-viewer-code .token.attr-equals, .sfe-diff-scroll .token.attr-equals,
+.sfe-file-viewer-code .token.interpolation-punctuation, .sfe-diff-scroll .token.interpolation-punctuation,
+.sfe-file-viewer-code .token.template-punctuation, .sfe-diff-scroll .token.template-punctuation,
+.sfe-file-viewer-code .token.double-colon, .sfe-diff-scroll .token.double-colon,
+.sfe-file-viewer-code .token.regex-delimiter, .sfe-diff-scroll .token.regex-delimiter,
+.sfe-file-viewer-code .token.coord, .sfe-diff-scroll .token.coord,
+.sfe-file-viewer-code .token.line, .sfe-diff-scroll .token.line {
+  color: var(--text-secondary);
+}
+
+/* 3. 关键字、控制流、指令、模块与装饰器 */
+.sfe-file-viewer-code .token.keyword, .sfe-diff-scroll .token.keyword,
+.sfe-file-viewer-code .token.atrule, .sfe-diff-scroll .token.atrule,
+.sfe-file-viewer-code .token.rule, .sfe-diff-scroll .token.rule,
+.sfe-file-viewer-code .token.control-flow, .sfe-diff-scroll .token.control-flow,
+.sfe-file-viewer-code .token.directive, .sfe-diff-scroll .token.directive,
+.sfe-file-viewer-code .token.directive-hash, .sfe-diff-scroll .token.directive-hash,
+.sfe-file-viewer-code .token.module, .sfe-diff-scroll .token.module,
+.sfe-file-viewer-code .token.import, .sfe-diff-scroll .token.import,
+.sfe-file-viewer-code .token.imports, .sfe-diff-scroll .token.imports,
+.sfe-file-viewer-code .token.package, .sfe-diff-scroll .token.package,
+.sfe-file-viewer-code .token.instruction, .sfe-diff-scroll .token.instruction,
+.sfe-file-viewer-code .token.for-or-select, .sfe-diff-scroll .token.for-or-select,
+.sfe-file-viewer-code .token.decorator, .sfe-diff-scroll .token.decorator,
+.sfe-file-viewer-code .token.at, .sfe-diff-scroll .token.at,
+.sfe-file-viewer-code .token.annotation, .sfe-diff-scroll .token.annotation,
+.sfe-file-viewer-code .token.block, .sfe-diff-scroll .token.block,
+.sfe-file-viewer-code .token.expression, .sfe-diff-scroll .token.expression,
+.sfe-file-viewer-code .token.omit, .sfe-diff-scroll .token.omit,
+.sfe-file-viewer-code .token.handlebars, .sfe-diff-scroll .token.handlebars {
+  color: var(--accent-purple, var(--accent-color));
+  font-weight: 500;
+}
+
+/* 4. 字符串、字符、正则、模板与属性值 */
+.sfe-file-viewer-code .token.string, .sfe-diff-scroll .token.string,
+.sfe-file-viewer-code .token.char, .sfe-diff-scroll .token.char,
+.sfe-file-viewer-code .token.attr-value, .sfe-diff-scroll .token.attr-value,
+.sfe-file-viewer-code .token.regex, .sfe-diff-scroll .token.regex,
+.sfe-file-viewer-code .token.template-string, .sfe-diff-scroll .token.template-string,
+.sfe-file-viewer-code .token.string-literal, .sfe-diff-scroll .token.string-literal,
+.sfe-file-viewer-code .token.string-interpolation, .sfe-diff-scroll .token.string-interpolation,
+.sfe-file-viewer-code .token.double-quoted-string, .sfe-diff-scroll .token.double-quoted-string,
+.sfe-file-viewer-code .token.triple-quoted-string, .sfe-diff-scroll .token.triple-quoted-string,
+.sfe-file-viewer-code .token.interpolation, .sfe-diff-scroll .token.interpolation,
+.sfe-file-viewer-code .token.regex-source, .sfe-diff-scroll .token.regex-source,
+.sfe-file-viewer-code .token.regex-flags, .sfe-diff-scroll .token.regex-flags,
+.sfe-file-viewer-code .token.code, .sfe-diff-scroll .token.code,
+.sfe-file-viewer-code .token.code-snippet, .sfe-diff-scroll .token.code-snippet,
+.sfe-file-viewer-code .token.singleline, .sfe-diff-scroll .token.singleline,
+.sfe-file-viewer-code .token.value, .sfe-diff-scroll .token.value {
+  color: var(--accent-green-text, var(--accent-green, #10b981));
+}
+
+/* 5. 数字、布尔、常量、单位与颜色值 */
+.sfe-file-viewer-code .token.number, .sfe-diff-scroll .token.number,
+.sfe-file-viewer-code .token.boolean, .sfe-diff-scroll .token.boolean,
+.sfe-file-viewer-code .token.constant, .sfe-diff-scroll .token.constant,
+.sfe-file-viewer-code .token.unit, .sfe-diff-scroll .token.unit,
+.sfe-file-viewer-code .token.hexcode, .sfe-diff-scroll .token.hexcode,
+.sfe-file-viewer-code .token.color, .sfe-diff-scroll .token.color,
+.sfe-file-viewer-code .token.nil, .sfe-diff-scroll .token.nil,
+.sfe-file-viewer-code .token.null, .sfe-diff-scroll .token.null,
+.sfe-file-viewer-code .token.literal, .sfe-diff-scroll .token.literal {
+  color: var(--accent-orange, #f59e0b);
+}
+
+/* 6. 函数、方法与宏 */
+.sfe-file-viewer-code .token.function, .sfe-diff-scroll .token.function,
+.sfe-file-viewer-code .token.method, .sfe-diff-scroll .token.method,
+.sfe-file-viewer-code .token.function-definition, .sfe-diff-scroll .token.function-definition,
+.sfe-file-viewer-code .token.function-variable, .sfe-diff-scroll .token.function-variable,
+.sfe-file-viewer-code .token.method-definition, .sfe-diff-scroll .token.method-definition,
+.sfe-file-viewer-code .token.macro, .sfe-diff-scroll .token.macro {
+  color: var(--accent-blue, #3b82f6);
+}
+
+/* 7. 类型、类名、内建对象与命名空间 */
+.sfe-file-viewer-code .token.class-name, .sfe-diff-scroll .token.class-name,
+.sfe-file-viewer-code .token.class-name-definition, .sfe-diff-scroll .token.class-name-definition,
+.sfe-file-viewer-code .token.builtin, .sfe-diff-scroll .token.builtin,
+.sfe-file-viewer-code .token.maybe-class-name, .sfe-diff-scroll .token.maybe-class-name,
+.sfe-file-viewer-code .token.namespace, .sfe-diff-scroll .token.namespace,
+.sfe-file-viewer-code .token.scalar, .sfe-diff-scroll .token.scalar,
+.sfe-file-viewer-code .token.return-type, .sfe-diff-scroll .token.return-type,
+.sfe-file-viewer-code .token.type-definition, .sfe-diff-scroll .token.type-definition,
+.sfe-file-viewer-code .token.console, .sfe-diff-scroll .token.console {
+  color: var(--accent-purple, var(--accent-color));
+}
+
+/* 8. 属性、标签、键与选择器 */
+.sfe-file-viewer-code .token.property, .sfe-diff-scroll .token.property,
+.sfe-file-viewer-code .token.literal-property, .sfe-diff-scroll .token.literal-property,
+.sfe-file-viewer-code .token.property-access, .sfe-diff-scroll .token.property-access,
+.sfe-file-viewer-code .token.string-property, .sfe-diff-scroll .token.string-property,
+.sfe-file-viewer-code .token.tag, .sfe-diff-scroll .token.tag,
+.sfe-file-viewer-code .token.name, .sfe-diff-scroll .token.name,
+.sfe-file-viewer-code .token.script, .sfe-diff-scroll .token.script,
+.sfe-file-viewer-code .token.style, .sfe-diff-scroll .token.style,
+.sfe-file-viewer-code .token.symbol, .sfe-diff-scroll .token.symbol,
+.sfe-file-viewer-code .token.attr-name, .sfe-diff-scroll .token.attr-name,
+.sfe-file-viewer-code .token.key, .sfe-diff-scroll .token.key,
+.sfe-file-viewer-code .token.class, .sfe-diff-scroll .token.class,
+.sfe-file-viewer-code .token.selector, .sfe-diff-scroll .token.selector,
+.sfe-file-viewer-code .token.pseudo-class, .sfe-diff-scroll .token.pseudo-class,
+.sfe-file-viewer-code .token.target, .sfe-diff-scroll .token.target,
+.sfe-file-viewer-code .token.section, .sfe-diff-scroll .token.section,
+.sfe-file-viewer-code .token.section-name, .sfe-diff-scroll .token.section-name,
+.sfe-file-viewer-code .token.table, .sfe-diff-scroll .token.table {
+  color: var(--accent-blue, #3b82f6);
+}
+
+/* 9. 操作符、URL 与实体 */
+.sfe-file-viewer-code .token.operator, .sfe-diff-scroll .token.operator,
+.sfe-file-viewer-code .token.entity, .sfe-diff-scroll .token.entity,
+.sfe-file-viewer-code .token.url, .sfe-diff-scroll .token.url,
+.sfe-file-viewer-code .token.arrow, .sfe-diff-scroll .token.arrow,
+.sfe-file-viewer-code .token.prefix, .sfe-diff-scroll .token.prefix {
+  color: var(--text-secondary);
+}
+
+/* 10. 变量、参数与重要标记 */
+.sfe-file-viewer-code .token.variable, .sfe-diff-scroll .token.variable,
+.sfe-file-viewer-code .token.important, .sfe-diff-scroll .token.important,
+.sfe-file-viewer-code .token.parameter, .sfe-diff-scroll .token.parameter,
+.sfe-file-viewer-code .token.parent, .sfe-diff-scroll .token.parent {
+  color: var(--accent-red-text, var(--accent-red, #ef4444));
+}
+
+/* 11. Markdown 文本语义 */
+.sfe-file-viewer-code .token.title, .sfe-diff-scroll .token.title {
+  color: var(--accent-purple, var(--accent-color));
+  font-weight: 600;
+}
+
+.sfe-file-viewer-code .token.bold, .sfe-diff-scroll .token.bold {
+  font-weight: 600;
+}
+
+.sfe-file-viewer-code .token.italic, .sfe-diff-scroll .token.italic {
+  font-style: italic;
+}
+
+.sfe-file-viewer-code .token.blockquote, .sfe-diff-scroll .token.blockquote {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.sfe-file-viewer-code .token.list, .sfe-diff-scroll .token.list {
+  color: var(--text-secondary);
+}
+
+.sfe-file-viewer-code .token.equation, .sfe-diff-scroll .token.equation {
+  color: var(--accent-green-text, var(--accent-green, #10b981));
+}
+
+.sfe-file-viewer-code .token.code-language, .sfe-diff-scroll .token.code-language {
+  color: var(--text-muted);
+}
+
+/* 12. Git Diff 增删对比 */
+.sfe-file-viewer-code .token.inserted, .sfe-diff-scroll .token.inserted,
+.sfe-file-viewer-code .token.inserted-sign, .sfe-diff-scroll .token.inserted-sign {
+  background-color: var(--accent-green-bg, rgba(16, 185, 129, 0.15));
+  color: var(--accent-green-text, #10b981);
+}
+
+.sfe-file-viewer-code .token.deleted, .sfe-diff-scroll .token.deleted,
+.sfe-file-viewer-code .token.deleted-sign, .sfe-diff-scroll .token.deleted-sign {
+  background-color: var(--accent-red-bg, rgba(239, 68, 68, 0.15));
+  color: var(--accent-red-text, #ef4444);
+}
+
+
+

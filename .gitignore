@@ -1,0 +1,28 @@
+# Dependencies
+node_modules/
+package-lock.json
+
+# Build output (由 npm run build 生成，不入库)
+dist/
+
+# Logs & temp
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+.tmp-*
+.tmp*/
+
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# IDE & editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Local env
+.env
+.env.local

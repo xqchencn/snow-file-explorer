@@ -1,0 +1,216 @@
+/* ==========================================================================
+   Snow App File Explorer - 差异视图样式 (styles/diff.css)
+   轻量 unified diff 渲染（双行号 + 增删着色），100% 继承宿主主题变量。
+   ========================================================================== */
+
+.sfe-diff-view {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  background: var(--bg-primary);
+}
+
+/* 差异视图容器（code-viewer 注入的 diff 面板，占满查看器剩余空间） */
+.sfe-diff-pane {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+/* 顶部条：增删统计（左） + 控件组（右） */
+.sfe-diff-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 4px 12px;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--border-light);
+  background: var(--surface-island-muted, var(--bg-secondary));
+}
+
+/* 控件组容器：容纳范围切换（完整文件/仅差异）与视图模式切换（统一/分栏） */
+.sfe-diff-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+/* 展示模式切换分段控件（复用 .sfe-md-mode-btn 按钮外观，此处只做容器） */
+.sfe-diff-mode-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  flex-shrink: 0;
+  border-radius: var(--radius-sm, 4px);
+  border: 1px solid var(--border-color, var(--border-light));
+  background: var(--surface-island, var(--bg-secondary));
+}
+
+/* 增删统计条 */
+.sfe-diff-stat {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+}
+
+.sfe-diff-stat-add {
+  color: var(--accent-green-text, var(--accent-green));
+}
+
+.sfe-diff-stat-del {
+  color: var(--accent-red-text, var(--accent-red));
+}
+
+.sfe-diff-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  line-height: 1.55;
+  user-select: text;
+}
+
+/* hunk 头（@@ -a,b +c,d @@） */
+.sfe-diff-hunk-head {
+  padding: 2px 12px;
+  color: var(--text-muted);
+  background: var(--bg-secondary);
+  white-space: pre;
+}
+
+/* 单行差异：旧行号 + 新行号 + 标记 + 正文（对标 VS Code：左边框差异指示条） */
+.sfe-diff-line {
+  display: flex;
+  align-items: stretch;
+  min-height: 1.55em;
+  border-left: 3px solid transparent;
+  box-sizing: border-box;
+}
+
+.sfe-diff-no {
+  flex-shrink: 0;
+  min-width: 2.4em;
+  padding: 0 6px;
+  text-align: right;
+  color: var(--text-muted);
+  opacity: 0.65;
+  user-select: none;
+}
+
+.sfe-diff-sign {
+  flex-shrink: 0;
+  width: 16px;
+  text-align: center;
+  color: var(--text-muted);
+}
+
+.sfe-diff-text {
+  flex: 1;
+  min-width: 0;
+  padding-right: 12px;
+  white-space: pre;
+}
+
+/* 新增行 */
+.sfe-diff-line.add {
+  background: color-mix(in srgb, var(--accent-green) 12%, transparent);
+  border-left-color: var(--accent-green);
+}
+
+.sfe-diff-line.add .sfe-diff-sign {
+  color: var(--accent-green-text, var(--accent-green));
+}
+
+/* 删除行 */
+.sfe-diff-line.del {
+  background: color-mix(in srgb, var(--accent-red) 12%, transparent);
+  border-left-color: var(--accent-red);
+}
+
+.sfe-diff-line.del .sfe-diff-sign {
+  color: var(--accent-red-text, var(--accent-red));
+}
+
+/* 元信息行（\ No newline at end of file 等） */
+.sfe-diff-line.meta .sfe-diff-text {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.sfe-diff-scroll ::selection {
+  background: var(--selection-bg);
+  color: inherit;
+}
+
+/* --------------------------------------------------------------------------
+   Split（左右分栏）视图
+   -------------------------------------------------------------------------- */
+/* 分栏时横向可滚动（两侧内容各自不换行） */
+.sfe-diff-scroll.split {
+  overflow-x: auto;
+}
+
+.sfe-diff-split-row {
+  display: flex;
+  align-items: stretch;
+  min-height: 1.55em;
+}
+
+/* 单个单元格：行号 + 行号 + 标记 + 正文，占半栏（对标 VS Code：左边框差异指示条） */
+.sfe-diff-split-cell {
+  display: flex;
+  align-items: stretch;
+  flex: 1 1 50%;
+  min-width: 0;
+  width: 50%;
+  border-left: 3px solid transparent;
+  box-sizing: border-box;
+}
+
+/* 左栏加分隔线，视觉上区分两栏 */
+.sfe-diff-split-cell.left {
+  border-right: 1px solid var(--border-light);
+}
+
+/* 对侧无配对行时的空白占位（保持左右行高对齐） */
+.sfe-diff-split-cell.empty {
+  background: var(--surface-island-muted, var(--bg-secondary));
+  opacity: 0.5;
+}
+
+/* 分栏单元格内容裁切：正文为 white-space:pre，不裁切会溢出到相邻栏 */
+.sfe-diff-split-cell .sfe-diff-text {
+  overflow: hidden;
+}
+
+/* 分栏内的删除/新增着色（复用 unified 的语义色与指示条） */
+.sfe-diff-split-cell.del {
+  background: color-mix(in srgb, var(--accent-red) 12%, transparent);
+  border-left-color: var(--accent-red);
+}
+
+.sfe-diff-split-cell.del .sfe-diff-sign {
+  color: var(--accent-red-text, var(--accent-red));
+}
+
+.sfe-diff-split-cell.add {
+  background: color-mix(in srgb, var(--accent-green) 12%, transparent);
+  border-left-color: var(--accent-green);
+}
+
+.sfe-diff-split-cell.add .sfe-diff-sign {
+  color: var(--accent-green-text, var(--accent-green));
+}
+
+.sfe-diff-split-cell.meta .sfe-diff-text {
+  color: var(--text-muted);
+  font-style: italic;
+}
