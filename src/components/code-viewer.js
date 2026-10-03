@@ -5,7 +5,7 @@
  * 差异视图见 components/diff-view.js）。
  */
 
-import { el, escapeHtml } from "../utils/dom.js";
+import { el, escapeHtml, copyToClipboard } from "../utils/dom.js";
 import { highlightCodeHtml } from "./highlighter.js";
 import { createActionIcon } from "../icons/action-icons.js";
 import { resolveMarkdownAssetPath, resolveProxiedImageSrc } from "../services/markdown-asset.js";
@@ -13,6 +13,197 @@ import { extname } from "../services/file-service.js";
 import { renderDiffView } from "./diff-view.js";
 
 const NL = String.fromCharCode(10);
+const VIEWER_CONTEXT_MENU_BINDING = "__sfeViewerContextMenuBinding";
+const VIEWER_CONTEXT_MENU_CLEANUP = "__sfeViewerContextMenuCleanup";
+
+/** 关闭预览区右键菜单及 document 级监听，避免预览重绘后菜单残留。 */
+function closeViewerContextMenu(bodyEl) {
+  const bindingCleanup = bodyEl && bodyEl[VIEWER_CONTEXT_MENU_BINDING];
+  if (typeof bindingCleanup === "function") {
+    bindingCleanup();
+    return;
+  }
+  const menuCleanup = bodyEl && bodyEl[VIEWER_CONTEXT_MENU_CLEANUP];
+  if (typeof menuCleanup === "function") menuCleanup();
+  else bodyEl?.ownerDocument?.querySelector(".sfe-viewer-context-menu")?.remove();
+}
+
+function clearViewerContextMenu(bodyEl) {
+  const menuCleanup = bodyEl && bodyEl[VIEWER_CONTEXT_MENU_CLEANUP];
+  if (typeof menuCleanup === "function") {
+    menuCleanup();
+    return;
+  }
+  bodyEl?.ownerDocument?.querySelector(".sfe-viewer-context-menu")?.remove();
+}
+
+/** 绑定打开文件内容区的菜单；文件操作与文本编辑动作共用一个菜单。 */
+function bindViewerContextMenu(bodyEl, opts) {
+  if (!bodyEl || !opts.preview) return;
+  const handleContextMenu = (event) => {
+    if (event.target?.closest?.(".sfe-viewer-context-menu")) return;
+    event.preventDefault();
+    event.stopPropagation();
+    openViewerContextMenu(bodyEl, event.clientX, event.clientY, event.target, opts);
+  };
+  bodyEl.addEventListener("contextmenu", handleContextMenu);
+  const cleanup = () => {
+    bodyEl.removeEventListener("contextmenu", handleContextMenu);
+    clearViewerContextMenu(bodyEl);
+    if (bodyEl[VIEWER_CONTEXT_MENU_BINDING] === cleanup) {
+      delete bodyEl[VIEWER_CONTEXT_MENU_BINDING];
+    }
+  };
+  bodyEl[VIEWER_CONTEXT_MENU_BINDING] = cleanup;
+}
+
+function readViewerClipboardText() {
+  if (
+    typeof navigator === "undefined" ||
+    !navigator.clipboard ||
+    typeof navigator.clipboard.readText !== "function"
+  ) {
+    return Promise.resolve("");
+  }
+  return navigator.clipboard.readText().then((text) => String(text || "")).catch(() => "");
+}
+
+function getViewerSelection(target) {
+  if (target && target.tagName === "TEXTAREA") {
+    const start = Math.min(target.selectionStart, target.selectionEnd);
+    const end = Math.max(target.selectionStart, target.selectionEnd);
+    return {
+      text: target.value.slice(start, end),
+      target,
+      start,
+      end,
+    };
+  }
+  const selection = typeof window !== "undefined" && typeof window.getSelection === "function"
+    ? window.getSelection()
+    : null;
+  return {
+    text: selection ? selection.toString() : "",
+    target: null,
+    start: 0,
+    end: 0,
+  };
+}
+
+/** 在编辑 textarea 的原选区插入文本，并通过 input 事件走现有编辑状态链路。 */
+function replaceViewerSelection(selection, text) {
+  const target = selection && selection.target;
+  if (!target) return;
+  const value = target.value;
+  const next = value.slice(0, selection.start) + text + value.slice(selection.end);
+  const caret = selection.start + text.length;
+  target.focus();
+  target.value = next;
+  target.setSelectionRange(caret, caret);
+  // 使用 textarea 所属窗口的 Event 构造器，避免嵌入宿主或测试 DOM 时跨 realm 事件被拒绝。
+  const EventCtor = target.ownerDocument?.defaultView?.Event || Event;
+  target.dispatchEvent(new EventCtor("input", { bubbles: true }));
+}
+
+/** 构建预览区菜单；粘贴项只有剪贴板确实有文本时才启用。 */
+function openViewerContextMenu(bodyEl, x, y, target, opts) {
+  clearViewerContextMenu(bodyEl);
+  const { editable, onRevealFile, onCopyPath, onCopyRelativePath, t } = opts;
+  const selection = getViewerSelection(target);
+  const hasFileActions =
+    typeof onRevealFile === "function" ||
+    typeof onCopyPath === "function" ||
+    typeof onCopyRelativePath === "function";
+  const isEditableText = editable === true && !!selection.target;
+  if (!selection.text && !hasFileActions && !isEditableText) return;
+
+  const doc = bodyEl.ownerDocument;
+  const menu = el("div", "sfe-context-menu sfe-viewer-context-menu");
+  menu.setAttribute("role", "menu");
+  let closed = false;
+  const cleanup = () => {
+    if (closed) return;
+    closed = true;
+    doc.removeEventListener("click", handleOutsideClick, true);
+    doc.removeEventListener("keydown", handleEscape, true);
+    menu.remove();
+    if (bodyEl[VIEWER_CONTEXT_MENU_CLEANUP] === cleanup) {
+      delete bodyEl[VIEWER_CONTEXT_MENU_CLEANUP];
+    }
+  };
+  const handleOutsideClick = (event) => {
+    if (!menu.contains(event.target)) cleanup();
+  };
+  const handleEscape = (event) => {
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    cleanup();
+  };
+  const addSeparator = () => {
+    if (menu.childElementCount > 0) menu.appendChild(el("div", "sfe-context-menu-separator"));
+  };
+  const addItem = (id, label, icon, action, disabled = false) => {
+    const item = el("button", "sfe-context-menu-item sfe-viewer-context-menu-item", label);
+    item.type = "button";
+    item.disabled = disabled;
+    item.dataset.menuId = id;
+    item.setAttribute("role", "menuitem");
+    item.insertBefore(createActionIcon(icon, 13), item.firstChild);
+    item.addEventListener("click", async () => {
+      if (item.disabled) return;
+      cleanup();
+      await action();
+    });
+    menu.appendChild(item);
+    return item;
+  };
+
+  if (selection.text) {
+    addItem("copy", t("action.copySelection", "复制"), "copy", () => copyToClipboard(selection.text));
+    if (isEditableText) {
+      addItem("cut", t("action.cut", "剪切"), "scissors", async () => {
+        if (await copyToClipboard(selection.text)) replaceViewerSelection(selection, "");
+      });
+    }
+  }
+
+  let pasteItem = null;
+  if (isEditableText) {
+    if (selection.text) addSeparator();
+    pasteItem = addItem("paste", t("action.paste", "粘贴"), "clipboardPaste", async () => {
+      const text = pasteItem.dataset.clipboardText || (await readViewerClipboardText());
+      if (text) replaceViewerSelection(selection, text);
+    }, true);
+    void readViewerClipboardText().then((text) => {
+      if (!pasteItem.isConnected) return;
+      pasteItem.dataset.clipboardText = text;
+      pasteItem.disabled = !text;
+    });
+  }
+
+  if ((selection.text || isEditableText) && hasFileActions) addSeparator();
+  if (typeof onRevealFile === "function") {
+    addItem("reveal", t("action.revealInExplorer", "在资源管理器中打开"), "folderOpen", onRevealFile);
+  }
+  if (typeof onCopyPath === "function") {
+    addItem("copy-path", t("action.copyPath", "复制路径"), "copy", onCopyPath);
+  }
+  if (typeof onCopyRelativePath === "function") {
+    addItem("copy-relative-path", t("action.copyRelativePath", "复制相对路径"), "copy", onCopyRelativePath);
+  }
+
+  if (!menu.childElementCount) return;
+  bodyEl[VIEWER_CONTEXT_MENU_CLEANUP] = cleanup;
+  doc.body.appendChild(menu);
+  doc.addEventListener("click", handleOutsideClick, true);
+  doc.addEventListener("keydown", handleEscape, true);
+
+  const viewportWidth = window.innerWidth || doc.documentElement.clientWidth || 0;
+  const viewportHeight = window.innerHeight || doc.documentElement.clientHeight || 0;
+  const rect = menu.getBoundingClientRect();
+  menu.style.left = `${Math.max(4, Math.min(x, viewportWidth ? viewportWidth - rect.width - 4 : x))}px`;
+  menu.style.top = `${Math.max(4, Math.min(y, viewportHeight ? viewportHeight - rect.height - 4 : y))}px`;
+}
 
 /**
  * 渲染代码/文件预览面板
@@ -26,6 +217,9 @@ const NL = String.fromCharCode(10);
  * @param {Function} [options.onToggleEdit] 切换只读/编辑状态回调
  * @param {Function} [options.onEditInput] 编辑文本变化回调
  * @param {Function} [options.onSave] 保存当前文本回调
+ * @param {Function} [options.onRevealFile] 在资源管理器中打开当前文件回调
+ * @param {Function} [options.onCopyPath] 复制当前文件绝对路径回调
+ * @param {Function} [options.onCopyRelativePath] 复制当前文件相对路径回调
  * @param {boolean} [options.editable=false] 当前是否处于编辑状态
  * @param {boolean} [options.saving=false] 是否正在保存
  * @param {Function} options.t 本地化翻译函数
@@ -41,12 +235,25 @@ export function renderCodeViewer(
     onToggleEdit,
     onEditInput,
     onSave,
+    onRevealFile,
+    onCopyPath,
+    onCopyRelativePath,
     editable = false,
     saving = false,
     t,
   }
 ) {
+  closeViewerContextMenu(bodyEl);
   bodyEl.replaceChildren();
+  bindViewerContextMenu(bodyEl, {
+    preview,
+    editable,
+    onEditInput,
+    onRevealFile,
+    onCopyPath,
+    onCopyRelativePath,
+    t,
+  });
 
   if (!preview) {
     const empty = el("div", "sfe-file-viewer-empty");

@@ -20,6 +20,8 @@ import {
   Minus,
   Plus,
   Undo2,
+  Scissors,
+  ClipboardPaste,
   FileText,
   FileDiff,
   Rows3,
@@ -47,6 +49,8 @@ const ICON_MAP = {
   minus: Minus,
   plus: Plus,
   undo: Undo2,
+  scissors: Scissors,
+  clipboardPaste: ClipboardPaste,
   fileText: FileText,
   diff: FileDiff,
   // 差异视图模式切换：统一视图（Rows3）/ 分栏视图（Columns2），与宿主 DiffViewer 一致
@@ -64,7 +68,7 @@ const ICON_MAP = {
 
 /**
  * 创建动作图标 SVG 节点
- * @param {'chevronRight'|'chevronDown'|'refresh'|'sync'|'copy'|'check'|'eye'|'pencil'|'code'|'more'|'square'|'sparkles'|'gitCommit'|'minus'|'plus'|'undo'|'fileText'|'diff'|'unified'|'split'|'arrowUp'|'arrowDown'|'branch'|'folderOpen'} name 图标名称
+ * @param {'chevronRight'|'chevronDown'|'refresh'|'sync'|'copy'|'check'|'eye'|'pencil'|'code'|'more'|'square'|'sparkles'|'gitCommit'|'minus'|'plus'|'undo'|'scissors'|'clipboardPaste'|'fileText'|'diff'|'unified'|'split'|'arrowUp'|'arrowDown'|'branch'|'folderOpen'} name 图标名称
  * @param {number} [size=14] 图标大小
  * @returns {SVGSVGElement|HTMLElement}
  */

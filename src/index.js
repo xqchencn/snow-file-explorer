@@ -1003,6 +1003,32 @@ export function mount(container, api, _options = {}) {
     void copyPathText(joinPath(state.rootPath, file.path));
   }
 
+  // 普通预览区的文件操作只针对当前打开文件，不污染文件树菜单或 Git 差异查看器。
+  function handlePreviewRevealFile() {
+    const filePath = state.preview && state.preview.path;
+    if (!filePath) return;
+    void handleRevealInExplorer({ path: filePath });
+  }
+
+  function handlePreviewCopyPath() {
+    const filePath = state.preview && state.preview.path;
+    if (!filePath) return;
+    void copyPathText(filePath);
+  }
+
+  function handlePreviewCopyRelativePath() {
+    const filePath = state.preview && state.preview.path;
+    if (!filePath || !state.rootPath) return;
+
+    const value = relativePath(state.rootPath, filePath);
+    if (value == null) {
+      setOperationStatus(false, "目标路径不在当前工作区内");
+      return;
+    }
+
+    void copyPathText(value);
+  }
+
   /**
    * 删除工作区文件或目录。
    * @description 删除是破坏性操作，必须先确认；成功后刷新文件树和 Git 状态。
@@ -1810,6 +1836,9 @@ export function mount(container, api, _options = {}) {
       onToggleEdit: setPreviewEditable,
       onEditInput: handlePreviewInput,
       onSave: handleSavePreview,
+      onRevealFile: handlePreviewRevealFile,
+      onCopyPath: handlePreviewCopyPath,
+      onCopyRelativePath: handlePreviewCopyRelativePath,
       editable: state.preview.editable === true,
       saving: state.preview.saveState === "saving",
       t,

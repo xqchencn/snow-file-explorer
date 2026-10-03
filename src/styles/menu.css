@@ -158,7 +158,18 @@
   opacity: 0.6;
 }
 
-/* 通用确认弹窗：使用插件内异步层，不阻塞宿主渲染线程。 */
+/* 预览区文本/文件操作菜单：复用普通文件树菜单容器，统一图标与标签间距。 */
+.sfe-viewer-context-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.sfe-viewer-context-menu-item svg {
+  flex-shrink: 0;
+}
+
+
 .sfe-confirm-overlay {
   position: fixed;
   inset: 0;

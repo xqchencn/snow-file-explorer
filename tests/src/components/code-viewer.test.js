@@ -9,6 +9,30 @@ globalThis.document = dom.window.document;
 // Prism 的浏览器插件初始化会访问 Element，Node 测试环境需显式接入 JSDOM 构造器。
 globalThis.Element = dom.window.Element;
 
+function setClipboard({ writeText = async () => {}, readText = async () => "" } = {}) {
+  const clipboard = { writeText, readText };
+  Object.defineProperty(globalThis.navigator, "clipboard", {
+    configurable: true,
+    value: clipboard,
+  });
+  return clipboard;
+}
+
+function dispatchContextMenu(target) {
+  target.dispatchEvent(
+    new dom.window.MouseEvent("contextmenu", {
+      bubbles: true,
+      cancelable: true,
+      clientX: 20,
+      clientY: 20,
+    })
+  );
+}
+
+function flushClipboardRead() {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 const { renderMarkdownHtml } = await import('../../../src/components/markdown-renderer.js');
 const { renderCodeViewer } = await import('../../../src/components/code-viewer.js');
 const { parseUnifiedDiff } = await import('../../../src/services/diff.js');
@@ -378,5 +402,241 @@ test('Git 差异视图: 固定显示完整文件且统一/分栏切换生效', (
   assert.ok(splitButton, '应存在分栏视图按钮');
   splitButton.click();
   assert.ok(host.querySelector('.sfe-diff-scroll.split'), '点击分栏视图后应切换布局');
+});
+
+test('预览区右键菜单: 普通文件显示资源管理器、绝对路径和相对路径操作', () => {
+  const host = document.createElement('div');
+  const calls = [];
+  renderCodeViewer(host, {
+    preview: {
+      kind: 'text',
+      name: 'example.js',
+      path: 'D:/repo/example.js',
+      text: 'const value = 1;',
+      highlightedHtml: '<span>const value = 1;</span>',
+      isMarkdown: false,
+      truncated: false,
+    },
+    copied: false,
+    onCopy: () => {},
+    onRevealFile: () => calls.push('reveal'),
+    onCopyPath: () => calls.push('copy-path'),
+    onCopyRelativePath: () => calls.push('copy-relative-path'),
+    t,
+  });
+
+  dispatchContextMenu(host.querySelector('.sfe-file-viewer-code-content'));
+  const menu = document.querySelector('.sfe-viewer-context-menu');
+  assert.ok(menu, '右键打开文件内容区应显示菜单');
+  assert.deepEqual(
+    [...menu.querySelectorAll('[data-menu-id]')].map((item) => item.dataset.menuId),
+    ['reveal', 'copy-path', 'copy-relative-path']
+  );
+
+  for (const id of ['reveal', 'copy-path', 'copy-relative-path']) {
+    dispatchContextMenu(host.querySelector('.sfe-file-viewer-code-content'));
+    document.querySelector(`[data-menu-id="${id}"]`).click();
+  }
+  assert.deepEqual(calls, ['reveal', 'copy-path', 'copy-relative-path']);
+});
+
+test('预览区右键菜单: 只读选中文本只能复制，不能剪切或粘贴', async () => {
+  let copiedText = null;
+  setClipboard({ writeText: async (text) => { copiedText = text; } });
+  const host = document.createElement('div');
+  renderCodeViewer(host, {
+    preview: {
+      kind: 'text',
+      name: 'example.js',
+      path: 'D:/repo/example.js',
+      text: 'const value = 1;',
+      highlightedHtml: '<span>const value = 1;</span>',
+      isMarkdown: false,
+      truncated: false,
+    },
+    copied: false,
+    onCopy: () => {},
+    t,
+  });
+
+  const content = host.querySelector('.sfe-file-viewer-code-content');
+  const originalGetSelection = window.getSelection;
+  window.getSelection = () => ({ toString: () => 'const value = 1;' });
+  dispatchContextMenu(content);
+
+  const menu = document.querySelector('.sfe-viewer-context-menu');
+  assert.ok(menu.querySelector('[data-menu-id="copy"]'));
+  assert.equal(menu.querySelector('[data-menu-id="cut"]'), null);
+  assert.equal(menu.querySelector('[data-menu-id="paste"]'), null);
+  menu.querySelector('[data-menu-id="copy"]').click();
+  await flushClipboardRead();
+  assert.equal(copiedText, 'const value = 1;');
+  window.getSelection = originalGetSelection;
+});
+
+test('预览区右键菜单: 编辑态剪切先写剪贴板，再删除选区并触发输入', async () => {
+  let copiedText = null;
+  let inputValue = null;
+  setClipboard({
+    writeText: async (text) => {
+      copiedText = text;
+    },
+    readText: async () => 'paste source',
+  });
+  const host = document.createElement('div');
+  renderCodeViewer(host, {
+    preview: {
+      kind: 'text',
+      name: 'example.js',
+      path: 'D:/repo/example.js',
+      text: 'const value = 1;',
+      highlightedHtml: '<span>const value = 1;</span>',
+      isMarkdown: false,
+      truncated: false,
+    },
+    copied: false,
+    onCopy: () => {},
+    onEditInput: (value) => {
+      inputValue = value;
+    },
+    editable: true,
+    t,
+  });
+
+  const textarea = host.querySelector('textarea');
+  textarea.setSelectionRange(0, 5);
+  dispatchContextMenu(textarea);
+  const menu = document.querySelector('.sfe-viewer-context-menu');
+  assert.ok(menu.querySelector('[data-menu-id="copy"]'));
+  assert.ok(menu.querySelector('[data-menu-id="cut"]'));
+  assert.ok(menu.querySelector('[data-menu-id="paste"]'));
+  await flushClipboardRead();
+  menu.querySelector('[data-menu-id="cut"]').click();
+  await flushClipboardRead();
+  assert.equal(copiedText, 'const');
+  assert.equal(textarea.value, ' value = 1;');
+  assert.equal(inputValue, ' value = 1;');
+});
+
+test('预览区右键菜单: 编辑态只在剪贴板有文本时启用粘贴，并能插入文本', async () => {
+  let inputValue = null;
+  setClipboard({ readText: async () => 'pasted text' });
+  const host = document.createElement('div');
+  renderCodeViewer(host, {
+    preview: {
+      kind: 'text',
+      name: 'example.txt',
+      path: 'D:/repo/example.txt',
+      text: 'abc',
+      highlightedHtml: 'abc',
+      isMarkdown: false,
+      truncated: false,
+    },
+    copied: false,
+    onCopy: () => {},
+    onEditInput: (value) => {
+      inputValue = value;
+    },
+    editable: true,
+    t,
+  });
+
+  const textarea = host.querySelector('textarea');
+  textarea.setSelectionRange(1, 2);
+  dispatchContextMenu(textarea);
+  const menu = document.querySelector('.sfe-viewer-context-menu');
+  const paste = menu.querySelector('[data-menu-id="paste"]');
+  assert.equal(paste.disabled, true, '异步读取完成前粘贴必须禁用');
+  await flushClipboardRead();
+  assert.equal(paste.disabled, false);
+  paste.click();
+  await flushClipboardRead();
+  assert.equal(textarea.value, 'apasted textc');
+  assert.equal(inputValue, 'apasted textc');
+});
+
+test('预览区右键菜单: 剪贴板为空或读取失败时粘贴保持禁用，菜单可清理', async () => {
+  const host = document.createElement('div');
+  renderCodeViewer(host, {
+    preview: {
+      kind: 'text',
+      name: 'example.txt',
+      path: 'D:/repo/example.txt',
+      text: 'abc',
+      highlightedHtml: 'abc',
+      isMarkdown: false,
+      truncated: false,
+    },
+    copied: false,
+    onCopy: () => {},
+    onEditInput: () => {},
+    editable: true,
+    t,
+  });
+
+  setClipboard({ readText: async () => '' });
+  const textarea = host.querySelector('textarea');
+  dispatchContextMenu(textarea);
+  let menu = document.querySelector('.sfe-viewer-context-menu');
+  await flushClipboardRead();
+  assert.equal(menu.querySelector('[data-menu-id="paste"]').disabled, true);
+  document.body.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }));
+  assert.equal(document.querySelector('.sfe-viewer-context-menu'), null);
+
+  setClipboard({ readText: async () => { throw new Error('clipboard denied'); } });
+  dispatchContextMenu(textarea);
+  menu = document.querySelector('.sfe-viewer-context-menu');
+  await flushClipboardRead();
+  assert.equal(menu.querySelector('[data-menu-id="paste"]').disabled, true);
+  document.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  assert.equal(document.querySelector('.sfe-viewer-context-menu'), null);
+
+  dispatchContextMenu(textarea);
+  assert.equal(document.querySelectorAll('.sfe-viewer-context-menu').length, 1);
+  renderCodeViewer(host, {
+    preview: null,
+    copied: false,
+    onCopy: () => {},
+    t,
+  });
+  assert.equal(document.querySelector('.sfe-viewer-context-menu'), null, '预览重绘后不得残留旧菜单');
+});
+
+test('预览区右键菜单: 剪切写入剪贴板失败时保留原文', async () => {
+  let inputCount = 0;
+  setClipboard({
+    writeText: async () => {
+      throw new Error('clipboard denied');
+    },
+    readText: async () => '',
+  });
+  const host = document.createElement('div');
+  renderCodeViewer(host, {
+    preview: {
+      kind: 'text',
+      name: 'example.txt',
+      path: 'D:/repo/example.txt',
+      text: 'abc',
+      highlightedHtml: 'abc',
+      isMarkdown: false,
+      truncated: false,
+    },
+    copied: false,
+    onCopy: () => {},
+    onEditInput: () => {
+      inputCount += 1;
+    },
+    editable: true,
+    t,
+  });
+
+  const textarea = host.querySelector('textarea');
+  textarea.setSelectionRange(0, 2);
+  dispatchContextMenu(textarea);
+  const menu = document.querySelector('.sfe-viewer-context-menu');
+  menu.querySelector('[data-menu-id="cut"]').click();
+  await flushClipboardRead();
+  assert.equal(textarea.value, 'abc');
+  assert.equal(inputCount, 0);
 });
 
