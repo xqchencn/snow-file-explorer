@@ -10,7 +10,7 @@ import { highlightCodeHtml, shouldHighlight, isLargeText } from "./highlighter.j
 import { createVirtualList } from "./virtual-list.js";
 import { createActionIcon } from "../icons/action-icons.js";
 import { resolveMarkdownAssetPath, resolveProxiedImageSrc } from "../services/markdown-asset.js";
-import { extname } from "../services/file-service.js";
+import { extname, relativePath } from "../services/file-service.js";
 import { renderDiffView } from "./diff-view.js";
 import { findScriptLines } from "../services/package-scripts.js";
 
@@ -40,20 +40,38 @@ function createGutterRunButton(command, onRunCommand, t) {
 
 /**
  * 若当前预览是 package.json，返回「行号（1 基）→ 命令」映射，供行号槽渲染 ▶。
- * @description 命令从调用方注入的 runCommands() 里按 `npm:<scriptName>` 查，
- *   与工具栏/右键菜单共用同一份识别结果（DRY）。
+ * @description 先按 package.json 所在目录筛选命令，再按 script 名匹配，避免把子包命令误判为根包命令。
  * @param {Object|null} preview 预览状态
  * @param {Function} [runCommands] 读取扁平命令列表
+ * @param {string} [rootPath] 工作区根目录路径
  * @returns {Map<number, Object>}
  */
-function buildScriptCommandMap(preview, runCommands) {
+function buildScriptCommandMap(preview, runCommands, rootPath) {
   const map = new Map();
   if (!preview || preview.kind !== "text" || preview.name !== "package.json") return map;
   if (typeof runCommands !== "function") return map;
   const commands = runCommands();
   if (!Array.isArray(commands) || !commands.length) return map;
+
+  // preview.path 是绝对路径，命令 dir 是相对工作区路径；统一通过现有路径服务转换后再比较。
+  const relativePackagePath = rootPath ? relativePath(rootPath, preview.path) : "package.json";
+  const normalizedPackagePath = String(relativePackagePath || "").replace(/\\/g, "/");
+  if (!normalizedPackagePath || !/package\.json$/i.test(normalizedPackagePath)) return map;
+  const packageDir = normalizedPackagePath.replace(/\/package\.json$/i, "").replace(/^\.\/+/, "");
+  const packageDirKey = packageDir.toLowerCase();
+  const packageCommands = commands.filter((command) => {
+    const commandDir = typeof command?.dir === "string" ? command.dir : command?.group || "";
+    return commandDir.replace(/\\/g, "/").replace(/^\.\/+|\/+$/g, "").toLowerCase() === packageDirKey;
+  });
+
   for (const { name, line } of findScriptLines(preview.text)) {
-    const command = commands.find((c) => c && c.id === `npm:${name}`);
+    const command = packageCommands.find((candidate) => {
+      const label =
+        typeof candidate?.label === "string" && candidate.label
+          ? candidate.label
+          : String(candidate?.labelFallback || "").split("/").pop();
+      return label === name;
+    });
     if (command) map.set(line, command);
   }
   return map;
@@ -284,6 +302,7 @@ function openViewerContextMenu(bodyEl, x, y, target, opts) {
  * @param {HTMLElement} bodyEl 承载预览内容的容器 DOM
  * @param {Object} options
  * @param {Object} options.preview 预览状态对象 { kind, text, highlightedHtml, url, name, mime, message, diff?, gitView? }
+ * @param {string} [options.rootPath] 工作区根目录路径，用于匹配 package.json 所属包
  * @param {boolean} options.copied 是否刚点击过复制按钮
  * @param {Function} options.onCopy 点击复制回调
  * @param {Function} options.onSetMode 切换预览/代码模式回调 (mode: 'preview' | 'code')
@@ -304,6 +323,7 @@ export function renderCodeViewer(
   bodyEl,
   {
     preview,
+    rootPath,
     copied,
     onCopy,
     onSetMode,
@@ -512,7 +532,7 @@ export function renderCodeViewer(
       const rawText = String(preview.text || "");
       const linesArray = rawText.split(/\r\n|\r|\n/);
       // package.json 的 scripts 行 → 命令映射（行号槽 / 虚拟行内渲染 ▶，两分支共用）
-      const scriptCommandMap = buildScriptCommandMap(preview, runCommands);
+      const scriptCommandMap = buildScriptCommandMap(preview, runCommands, rootPath);
 
       // 大文件已被高亮熔断降级为纯文本，逐行渲染不会切坏跨行 token；
       // 虚拟列表只渲染「可视区 + 缓冲」的行，DOM 数量与总行数解耦，因此无需截断内容。

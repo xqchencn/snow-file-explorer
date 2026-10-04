@@ -8,12 +8,12 @@
  *
  * 设计要点：
  *   - 从「根目录命中即整体识别」改为「每个 package.json 就是一个包」：
- *       子包命令用 `npm --prefix <相对路径> run <name>`，在 cwd=工作区根目录的 shell 里正确执行。
- *   - 命令 id 带包路径前缀，避免多个包同名 script 冲突。
+ *       每条命令在所属 package.json 目录执行，使用 packageManager 字段 / 锁文件推断出的包管理器。
+ *   - 命令 id 带包路径和包管理器，避免多个包或多个管理器的同名 script 冲突。
  */
 
 import { readDirectoryEntries } from "./file-service.js";
-import { readNodeScripts, nodeEntryFallback } from "./ecosystems.js";
+import { readNodeScripts, nodeEntryFallback, detectPackageManager } from "./ecosystems.js";
 
 /** 递归扫描时跳过的目录名（海量 / 无关 / 生成物）。 */
 const SCAN_SKIP_DIRS = new Set([
@@ -47,7 +47,7 @@ function rootKey(p) {
   return String(p || "").replace(/\\/g, "/").toLowerCase().replace(/\/+$/, "");
 }
 
-/** 把目录名数组拼成 POSIX 相对路径（供 npm --prefix）。 */
+/** 把目录名数组拼成 POSIX 相对路径，用于包分组和工作目录计算。 */
 function joinRel(dirNames) {
   return dirNames.filter(Boolean).join("/");
 }
@@ -79,7 +79,7 @@ export async function ensureProjectCommands(state, rootPath, opts = {}) {
 /**
  * 纯函数：由「已发现的包」列表生成命令集合。
  * @description 每个包由 packageJson 内容 + 相对根目录的路径前缀（+ 该包目录条目，供根包入口兜底）描述。
- * @param {Array<{dir: string, packageJson: Object|null, entries?: Array}>} packages 包列表
+ * @param {Array<{dir: string, packageJson: Object|null, entries?: Array, packageManager?: string}>} packages 包列表
  * @returns {{ecosystems: Array, packages: Array, scannedAt: number}}
  */
 export function detectProjectCommands(packages) {
@@ -91,7 +91,8 @@ export function detectProjectCommands(packages) {
     if (!pkg) continue;
     const dir = typeof pkg.dir === "string" ? pkg.dir : "";
     const prefix = dir.replace(/^\/+|\/+$/g, "");
-    const commands = readNodeScripts(pkg.packageJson, { prefix });
+    const packageManager = detectPackageManager(pkg.packageJson, pkg.entries, pkg.packageManager || "npm");
+    const commands = readNodeScripts(pkg.packageJson, { prefix, packageManager });
     // 仅根包在无 scripts 时兜底为 `node <entry>`（子包不走，避免相对 cwd 的入口命令歧义）。
     const entryFallback = prefix ? [] : nodeEntryFallback(pkg.packageJson, pkg.entries);
     const finalCommands = commands.length ? commands : entryFallback;
@@ -101,10 +102,11 @@ export function detectProjectCommands(packages) {
       label: prefix ? `Node · ${prefix}` : "Node.js",
       markers: ["package.json"],
       dir: prefix,
+      packageManager,
       entry: null,
       commands: finalCommands,
     });
-    summary.push({ id: prefix || "node", dir: prefix, commandCount: finalCommands.length });
+    summary.push({ id: prefix || "node", dir: prefix, packageManager, commandCount: finalCommands.length });
   }
 
   return { ecosystems, packages: summary, scannedAt: Date.now() };
@@ -136,7 +138,7 @@ export async function scanProjectCommands(rootPath) {
     return null;
   };
 
-  const walk = async (dirPath, relNames, depth) => {
+  const walk = async (dirPath, relNames, depth, inheritedManager = "npm") => {
     if (depth > MAX_SCAN_DEPTH || packages.length >= MAX_PACKAGES) return;
     let entries;
     try {
@@ -147,18 +149,24 @@ export async function scanProjectCommands(rootPath) {
     if (!Array.isArray(entries)) return;
 
     const pkgEntry = entries.find((e) => e && e.name === "package.json" && e.isDirectory !== true);
+    const packageJson = pkgEntry ? await readPackageJson(pkgEntry) : null;
+    // workspace 子包默认继承根包管理器；子包自己的 packageManager / 锁文件可以显式覆盖。
+    const packageManager = pkgEntry
+      ? detectPackageManager(packageJson, entries, inheritedManager)
+      : inheritedManager;
     if (pkgEntry) {
       packages.push({
         dir: joinRel(relNames),
-        packageJson: await readPackageJson(pkgEntry),
-        entries: depth === 0 ? entries : null,
+        packageJson,
+        packageManager,
+        entries,
       });
     }
 
     const subDirs = entries.filter((e) => e && e.isDirectory === true && !SCAN_SKIP_DIRS.has(e.name));
     for (const sub of subDirs) {
       if (packages.length >= MAX_PACKAGES) break;
-      await walk(sub.path, relNames.concat(sub.name), depth + 1);
+      await walk(sub.path, relNames.concat(sub.name), depth + 1, packageManager);
     }
   };
 
@@ -172,12 +180,20 @@ export async function scanProjectCommands(rootPath) {
 
   // 已在根目录列出条目：直接复用，避免 walk 再列一次根目录。
   const rootPkgEntry = rootEntries.find((e) => e && e.name === "package.json" && e.isDirectory !== true);
+  let rootPackageManager = "npm";
   if (rootPkgEntry) {
-    packages.push({ dir: "", packageJson: await readPackageJson(rootPkgEntry), entries: rootEntries });
+    const rootPackageJson = await readPackageJson(rootPkgEntry);
+    rootPackageManager = detectPackageManager(rootPackageJson, rootEntries, "npm");
+    packages.push({
+      dir: "",
+      packageJson: rootPackageJson,
+      packageManager: rootPackageManager,
+      entries: rootEntries,
+    });
   }
   for (const sub of rootEntries.filter((e) => e && e.isDirectory === true && !SCAN_SKIP_DIRS.has(e.name))) {
     if (packages.length >= MAX_PACKAGES) break;
-    await walk(sub.path, [sub.name], 1);
+    await walk(sub.path, [sub.name], 1, rootPackageManager);
   }
 
   const detected = detectProjectCommands(packages);

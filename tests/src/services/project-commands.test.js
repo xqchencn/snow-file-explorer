@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { detectProjectCommands, flattenCommands } from "../../../src/services/project-commands.js";
-import { resolveNodeEntry, readNodeScripts, nodeEntryFallback } from "../../../src/services/ecosystems.js";
+import { detectProjectCommands, flattenCommands, scanProjectCommands } from "../../../src/services/project-commands.js";
+import { resolveNodeEntry, readNodeScripts, nodeEntryFallback, detectPackageManager } from "../../../src/services/ecosystems.js";
 
 function file(name, path) {
   return { name, path, isDirectory: false };
@@ -31,20 +31,21 @@ test("detectProjectCommands：根包生成 npm run 命令（无前缀）", () =>
   assert.equal(node.commands[0].id, "npm:dev");
 });
 
-test("detectProjectCommands：子包命令带 npm --prefix，且 id/标签带包路径", () => {
+test("detectProjectCommands：子包命令使用所属目录的 npm run，运行时由调用方切换 cwd", () => {
   const result = detectProjectCommands([pkg("sub", { scripts: { dev: "vite" } })]);
 
   assert.equal(result.ecosystems[0].id, "node:sub");
   assert.equal(result.ecosystems[0].label, "Node · sub");
   const cmd = result.ecosystems[0].commands[0];
-  assert.equal(cmd.cmd, "npm --prefix sub run dev");
+  assert.equal(cmd.cmd, "npm run dev");
   assert.equal(cmd.id, "npm:sub:dev");
   assert.equal(cmd.labelFallback, "sub/dev");
+  assert.equal(cmd.packageManager, "npm");
 });
 
 test("detectProjectCommands：多级子包路径保留层级", () => {
   const result = detectProjectCommands([pkg("packages/web", { scripts: { build: "tsc" } })]);
-  assert.equal(result.ecosystems[0].commands[0].cmd, "npm --prefix packages/web run build");
+  assert.equal(result.ecosystems[0].commands[0].cmd, "npm run build");
   assert.equal(result.ecosystems[0].commands[0].id, "npm:packages/web:build");
 });
 
@@ -58,7 +59,7 @@ test("detectProjectCommands：多个 package.json 各出一组命令", () => {
   const flat = flattenCommands(result);
   assert.deepEqual(
     flat.map((c) => c.cmd).sort(),
-    ["npm run dev", "npm --prefix api run start"].sort()
+    ["npm run dev", "npm run start"].sort()
   );
   // 多包同名 script 的 id 不冲突
   const dup = detectProjectCommands([pkg("a", { scripts: { dev: "x" } }), pkg("b", { scripts: { dev: "y" } })]);
@@ -106,14 +107,14 @@ test("nodeEntryFallback：有入口才产 node <entry>，无入口返回空数�
   assert.deepEqual(nodeEntryFallback({}, [file("README.md", "D:/proj/README.md")]), []);
 });
 
-test("readNodeScripts：忽略非字符串脚本值，空 scripts 返回空数组；prefix 生成 --prefix", () => {
+test("readNodeScripts：忽略非字符串脚本值，空 scripts 返回空数组；prefix 仅标记包目录", () => {
   assert.deepEqual(readNodeScripts(null), []);
   assert.deepEqual(readNodeScripts({}), []);
   const list = readNodeScripts({ scripts: { a: "x", b: 123 } });
   assert.deepEqual(list.map((c) => c.cmd), ["npm run a"]);
 
   const prefixed = readNodeScripts({ scripts: { a: "x" } }, { prefix: "sub" });
-  assert.deepEqual(prefixed.map((c) => c.cmd), ["npm --prefix sub run a"]);
+  assert.deepEqual(prefixed.map((c) => c.cmd), ["npm run a"]);
   assert.equal(prefixed[0].labelFallback, "sub/a");
 });
 
@@ -121,7 +122,7 @@ test("flattenCommands：汇总多包命令并标注来源生态", () => {
   const flat = flattenCommands({
     ecosystems: [
       { id: "node", commands: [{ id: "npm:dev", cmd: "npm run dev", labelFallback: "dev", labelKey: null }] },
-      { id: "node:sub", commands: [{ id: "npm:sub:dev", cmd: "npm --prefix sub run dev", labelFallback: "sub/dev", labelKey: null }] },
+      { id: "node:sub", commands: [{ id: "npm:sub:dev", cmd: "npm run dev", labelFallback: "sub/dev", labelKey: null }] },
     ],
   });
 
@@ -142,9 +143,79 @@ test("flattenCommands：命令按包分组、父包排在子包前，并携带 d
   // 根包（0 段）→ api（1 段）→ packages/web（2 段）
   assert.deepEqual(
     flat.map((c) => c.cmd),
-    ["npm run dev", "npm --prefix api run start", "npm --prefix packages/web run build"]
+    ["npm run dev", "npm run start", "npm run build"]
   );
   // 分组字段：根包 group=null（渲染层用「根目录」文案），子包为目录路径
   assert.deepEqual(flat.map((c) => c.group), [null, "api", "packages/web"]);
   assert.deepEqual(flat.map((c) => c.dir), ["", "api", "packages/web"]);
+});
+
+test("detectPackageManager：packageManager 优先，其次锁文件，最后继承或回退 npm", () => {
+  assert.equal(
+    detectPackageManager({ packageManager: "yarn@4.0.0" }, [file("pnpm-lock.yaml", "D:/repo/pnpm-lock.yaml")]),
+    "yarn"
+  );
+  assert.equal(detectPackageManager({}, [file("pnpm-lock.yaml", "D:/repo/pnpm-lock.yaml")]), "pnpm");
+  assert.equal(detectPackageManager({}, [file("yarn.lock", "D:/repo/yarn.lock")]), "yarn");
+  assert.equal(detectPackageManager({}, [file("bun.lock", "D:/repo/bun.lock")]), "bun");
+  assert.equal(detectPackageManager({}, [], "pnpm"), "pnpm");
+  assert.equal(detectPackageManager({}, []), "npm");
+});
+
+test("readNodeScripts：npm/yarn/pnpm/bun 都生成同一套 run 语义", () => {
+  for (const manager of ["npm", "yarn", "pnpm", "bun"]) {
+    const [command] = readNodeScripts(
+      { packageManager: `${manager}@9.0.0`, scripts: { check: "node check.js" } },
+      { prefix: "apps/web" }
+    );
+    assert.equal(command.cmd, `${manager} run check`);
+    assert.equal(command.id, `${manager}:apps/web:check`);
+    assert.equal(command.packageManager, manager);
+  }
+});
+
+test("detectProjectCommands：保留包管理器并让运行层按包目录切换 cwd", () => {
+  const result = detectProjectCommands([
+    pkg("apps/web", { packageManager: "pnpm@9.0.0", scripts: { dev: "vite" } }),
+  ]);
+  const command = result.ecosystems[0].commands[0];
+  assert.equal(result.ecosystems[0].packageManager, "pnpm");
+  assert.equal(command.cmd, "pnpm run dev");
+  assert.equal(command.packageManager, "pnpm");
+  assert.equal(command.id, "pnpm:apps/web:dev");
+});
+
+test("scanProjectCommands：workspace 子包继承根目录 packageManager 并保留真实目录", async () => {
+  const root = "D:/repo";
+  const paths = {
+    root,
+    apps: `${root}/apps`,
+    web: `${root}/apps/web`,
+  };
+  const directories = new Map([
+    [paths.root, [file("package.json", `${paths.root}/package.json`), file("pnpm-lock.yaml", `${paths.root}/pnpm-lock.yaml`), directory("apps", paths.apps)]],
+    [paths.apps, [directory("web", paths.web)]],
+    [paths.web, [file("package.json", `${paths.web}/package.json`)]],
+  ]);
+  const contents = new Map([
+    [`${paths.root}/package.json`, JSON.stringify({ private: true, packageManager: "pnpm@9.0.0", workspaces: ["apps/*"] })],
+    [`${paths.web}/package.json`, JSON.stringify({ name: "web", scripts: { dev: "vite" } })],
+  ]);
+  const previous = globalThis.window;
+  globalThis.window = {
+    snow: {
+      readDirectoryEntries: async (dirPath) => directories.get(dirPath) || [],
+      readFileContent: async (filePath) => ({ content: contents.get(filePath) || "", isBinary: false }),
+    },
+  };
+  try {
+    const result = await scanProjectCommands(root);
+    const [command] = flattenCommands(result).filter((item) => item.dir === "apps/web");
+    assert.equal(command.packageManager, "pnpm");
+    assert.equal(command.cmd, "pnpm run dev");
+    assert.equal(command.dir, "apps/web");
+  } finally {
+    if (previous === undefined) delete globalThis.window;
+    else globalThis.window = previous;
+  }
 });

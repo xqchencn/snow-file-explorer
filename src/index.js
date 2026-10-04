@@ -1908,7 +1908,7 @@ export function mount(container, api, _options = {}) {
    *   - mode="run"（模式 A）：一次性运行，跑完 shell 退出并回传退出码，tab 显示 ✓/✗；只读。
    *   - mode="terminal"（模式 B）：常驻交互终端，可连续敲命令，不要求状态回传。
    *   入口约定：工具栏 Run / 右键「运行」/ 代码行 ▶ → 模式 A；面板 ＋ → 模式 B。
-   * @param {{command?: string, commandId?: string|null, mode?: "run"|"terminal", title?: string}|string} [options] 命令与模式
+   * @param {{command?: string, commandId?: string|null, cwd?: string, mode?: "run"|"terminal", title?: string}|string} [options] 命令、工作目录与模式
    */
   function handleNewTerminal(options) {
     if (disposed) return;
@@ -1933,6 +1933,8 @@ export function mount(container, api, _options = {}) {
       onInput: null,
       onResize: null,
       pendingCommand: command,
+      // 运行命令使用所属 package.json 目录；交互式终端默认使用项目根目录。
+      cwd: typeof opts.cwd === "string" && opts.cwd ? opts.cwd : state.rootPath,
       // pty 启动阶段令牌：重跑复用同一 tab 时用于作废旧 pty 的迟到 onData/onExit。
       phase: 0,
     };
@@ -1986,7 +1988,7 @@ export function mount(container, api, _options = {}) {
     const runShell = term.mode === "run" ? await resolveRunShell() : null;
 
     const result = await createPtySession({
-      cwd: state.rootPath,
+      cwd: term.cwd || state.rootPath,
       cols,
       rows,
       // 仅模式 A 指定 shellPath；模式 B 传 undefined，走宿主默认检测。
@@ -2042,7 +2044,14 @@ export function mount(container, api, _options = {}) {
     // 运行中拦截：同一命令已有未结束的运行终端 → 忽略（要么运行，要么停止）。
     if (runCountForCommand(command) > 0) return;
     // 模式 A：一次性运行，跑完 shell 退出 → onPtyExit 回传退出码 → 工具栏回到 Run。
-    handleNewTerminal({ command: command.cmd, commandId: command.id || null, mode: "run", title: command.cmd });
+    const cwd = command.dir ? joinPath(state.rootPath, command.dir) : state.rootPath;
+    handleNewTerminal({
+      command: command.cmd,
+      commandId: command.id || null,
+      cwd,
+      mode: "run",
+      title: command.cmd,
+    });
   }
 
   // 文件树空白区右键：命中具体条目时由行自身处理并 stopPropagation（见 tree-view.js），
@@ -2621,6 +2630,7 @@ export function mount(container, api, _options = {}) {
     if (disposed || !layoutEls || !layoutEls.previewPane) return;
     renderCodeViewer(layoutEls.previewPane, {
       preview: state.preview,
+      rootPath: state.rootPath,
       copied: state.copied,
       onCopy: handleCopyCode,
       onSetMode: setPreviewMode,

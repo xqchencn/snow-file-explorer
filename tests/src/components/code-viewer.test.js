@@ -830,6 +830,44 @@ test('Git 右侧查看器: 差异视图右键弹出文件操作菜单（只读�
   assert.deepEqual(calls, ['refresh']);
 });
 
+test('代码预览: 二级 package.json 按所属包目录显示 pnpm 脚本运行按钮', () => {
+  const host = document.createElement('div');
+  let received = null;
+  const command = {
+    id: 'pnpm:apps/web:dev',
+    label: 'dev',
+    labelFallback: 'apps/web/dev',
+    cmd: 'pnpm run dev',
+    packageManager: 'pnpm',
+    dir: 'apps/web',
+    group: 'apps/web',
+  };
+  renderCodeViewer(host, {
+    rootPath: 'D:/repo',
+    preview: {
+      kind: 'text',
+      name: 'package.json',
+      path: 'D:/repo/apps/web/package.json',
+      text: '{\n  "scripts": {\n    "dev": "vite"\n  }\n}',
+      highlightedHtml: '{}',
+      isMarkdown: false,
+      truncated: false,
+    },
+    copied: false,
+    runCommands: () => [command],
+    onRunCommand: (value) => {
+      received = value;
+    },
+    onCopy: () => {},
+    t,
+  });
+
+  const button = host.querySelector('.sfe-file-viewer-gutter-run');
+  assert.ok(button, '二级 package.json 的脚本行应显示运行按钮');
+  button.click();
+  assert.equal(received, command);
+});
+
 test('预览区右键菜单: 运行分组按包显示组标题（根目录 / 子包路径，父包在前）', () => {
   const host = document.createElement('div');
   renderCodeViewer(host, {
