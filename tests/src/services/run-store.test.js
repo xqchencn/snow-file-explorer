@@ -9,7 +9,6 @@ import {
   pickActiveRunId,
   removeRun,
   runLabel,
-  createCommandDedup,
 } from "../../../src/services/run-store.js";
 
 test("isActiveStatus：running / starting 视为进行中", () => {
@@ -105,21 +104,4 @@ test("runLabel：优先本地化 labelKey，否则回退原文/命令", () => {
   assert.equal(runLabel({ labelKey: null, labelFallback: "deploy", cmd: "npm run deploy" }, t), "deploy");
   assert.equal(runLabel({ labelKey: null, labelFallback: "", cmd: "npm run x" }, t), "npm run x");
   assert.equal(runLabel(null, t), "");
-});
-
-test("createCommandDedup：窗口内同命令重复触发被跳过，窗口外放行", () => {
-  const skip = createCommandDedup(300);
-  // 首次触发放行
-  assert.equal(skip("npm:generate", 1000), false);
-  // 窗口内重复触发（双击 / 连点 / 面板重复挂载）一律跳过
-  assert.equal(skip("npm:generate", 1100), true);
-  assert.equal(skip("npm:generate", 1299), true);
-  // 窗口边界：达到窗口宽度后放行（明确的重新运行意图）
-  assert.equal(skip("npm:generate", 1300), false);
-  // 不同命令互不影响
-  assert.equal(skip("npm:build", 1301), false);
-  assert.equal(skip("npm:build", 1302), true);
-  // 无 id 不做去重
-  assert.equal(skip("", 5000), false);
-  assert.equal(skip(null, 5001), false);
 });

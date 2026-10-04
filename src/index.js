@@ -69,28 +69,16 @@ import {
 } from "./services/git-actions.js";
 import { parseUnifiedDiff } from "./services/diff.js";
 import { ensureProjectCommands, flattenCommands } from "./services/project-commands.js";
-import { startCommand, isTerminalAvailable } from "./services/terminal-runner.js";
 import {
-  createRun,
-  resetRun,
-  findRun,
-  removeRun,
-  isActiveStatus,
-  pickActiveRunId,
-  createCommandDedup,
-} from "./services/run-store.js";
-import { renderRunPanel, MAX_OUTPUT_CHARS, TRIM_THRESHOLD_CHARS } from "./components/run-panel.js";
+  createPtySession,
+  isTerminalAvailable,
+  resolveRunShell,
+  DEFAULT_COLS,
+  DEFAULT_ROWS,
+} from "./services/terminal-runner.js";
+import { renderToolWindow } from "./components/tool-window.js";
 import { renderRunToolbar } from "./components/run-toolbar.js";
-
-/**
- * 同一命令的启动去重判定器（模块级）。
- * @description 为什么必须是模块级：插件面板可能被重复挂载（每次 mount 都有独立的 state.runs，
- *   彼此不可见），单实例内的 status 守卫无法阻止同一命令被并发启动多次；双击 / 连点也会
- *   连续进入 handleRunCommand。判定器按命令 id 记时间戳，窗口内的重复触发一律跳过，
- *   确保「一次用户操作 = 一个进程」；窗口外的触发是明确的重新运行意图，不受影响。
- *   判定逻辑见 run-store.js 的 createCommandDedup（纯函数，可单测）。
- */
-const shouldSkipDuplicateStart = createCommandDedup(300);
+import { createXtermView } from "./components/terminal-view.js";
 
 /**
  * 当前面板根目录的规范化键（小写 + 去尾部分隔符）
@@ -174,17 +162,14 @@ export function mount(container, api, _options = {}) {
   let gitDebounceTimer = null;
   let previewRequestId = 0;
   let saveRequestId = 0;
-  // 运行请求号：同一命令重跑时用它丢弃「已被取代」的启动结果，避免状态错乱与进程泄漏。
-  let runRequestId = 0;
-  // 运行面板控制器（renderRunPanel 的返回值）与终端事件解绑函数。
-  let runPanel = null;
+  // 终端创建令牌：终端在 pty 建好前被关闭时，用它作废「迟到」的创建结果，避免泄漏孤儿进程。
+  let terminalToken = 0;
+  // 底部工具窗口控制器（renderToolWindow 的返回值）。两个窗口各自常驻、互斥显示：
+  //   terminalWindow = 交互终端窗口；runWindow = 运行窗口。各自持有自己的 xterm 实例，切换不丢输出。
+  let terminalWindow = null;
+  let runWindow = null;
   // 工具栏运行控件控制器（renderRunToolbar 的返回值）。
   let runToolbar = null;
-  // 运行耗时定时器：运行中每秒刷新一次耗时显示。
-  let elapsedTimer = null;
-  // 事件订阅：宿主 pty 退出事件只在 window.snow 上暴露（插件 api 未提供事件）。
-  // 用它兜住「用户在外部/宿主侧关闭进程」的情况，把状态置为真值。
-  let unsubPtyExit = null;
 
   // 翻译：api.t 不可用时回退到 defaultValue
   const t = (key, fallback, values) => {
@@ -198,13 +183,18 @@ export function mount(container, api, _options = {}) {
     rootPath: "",
     rootNodes: null,
     javaProject: null,
-    // 项目识别与运行：projectCommands 为懒加载的识别结果（含 rootPath 缓存键）；
-    // runs 为运行集合（IDEA 式多 tab：一条命令一个 tab），activeRunId 标记当前 tab。
+    // 项目识别与终端：projectCommands 为懒加载的识别结果（含 rootPath 缓存键）；
+    // terminals 为终端集合（IDEA 式多 tab：一个终端一个 tab），activeTerminalId 标记当前 tab。
     projectCommands: null,
-    runs: [],
-    activeRunId: null,
-    // 运行面板是否已打开（用户点过「运行」或「在运行面板中运行」）；决定面板区块是否可见。
-    runPanelOpen: false,
+    terminals: [],
+    // 终端窗口（mode B）的激活 tab。
+    activeTerminalId: null,
+    // 运行窗口（mode A）的激活 tab（与 activeTerminalId 分开：两个窗口各自维护激活项）。
+    activeRunTerminalId: null,
+    // 底部当前显示哪个工具窗口：null=收起 | "terminal" | "run"；由左侧竖排入口栏切换。
+    bottomView: null,
+    // 主视图：始终二选一 —— "files"（文件树）/ "git"（Git 变更）；由左侧入口栏顶部切换，不可都关。
+    mainView: "files",
     expanded: Object.create(null),
     selected: null,
     status: "",
@@ -214,11 +204,9 @@ export function mount(container, api, _options = {}) {
     viewSettings: {
       excludeMeta: true,
       respectGitignore: true,
-      onlyGitChanges: false,
       javaPackageView: true,
     },
     gitignoreRules: [],
-    menuOpen: false,
     contextMenu: null,
     confirmDialog: null,
     operationBusy: false,
@@ -280,13 +268,17 @@ export function mount(container, api, _options = {}) {
     state.rootPath = next;
     state.rootNodes = null;
     state.javaProject = null;
-    // 切换项目：先终止上一项目的全部运行进程（避免残留「看不见的进程」），再清空识别缓存与运行状态。
-    stopAllRuns({ silent: true });
+    // 切换项目：先终止上一项目的全部终端（避免残留「看不见的进程」），再清空识别缓存与终端状态。
+    killAllTerminals();
+    if (terminalWindow && typeof terminalWindow.dispose === "function") terminalWindow.dispose();
+    if (runWindow && typeof runWindow.dispose === "function") runWindow.dispose();
     state.projectCommands = null;
-    state.runs = [];
-    state.activeRunId = null;
-    state.runPanelOpen = false;
-    runPanel = null;
+    state.terminals = [];
+    state.activeTerminalId = null;
+    state.activeRunTerminalId = null;
+    state.bottomView = null;
+    terminalWindow = null;
+    runWindow = null;
     // 运行控件随新项目重建（命令集合必然变化）。
     if (runToolbar && typeof runToolbar.dispose === "function") runToolbar.dispose();
     runToolbar = null;
@@ -365,7 +357,7 @@ export function mount(container, api, _options = {}) {
     if (isSameGitMap(state.gitStatusMap, map)) return;
     state.gitStatusMap = map;
     // 文件树视图才需要文件级染色；Git 变更视图下无需重绘文件树
-    if (!state.viewSettings.onlyGitChanges) renderTree();
+    if (state.mainView === "files") renderTree();
   }
 
   // 拉取完整 Git 状态（供 Git 变更视图使用）
@@ -384,7 +376,7 @@ export function mount(container, api, _options = {}) {
     // 底部同步栏（当前分支名 + ↑/↓ 计数）依赖 gitStatus，文件树视图下同样要刷新，
     // 否则该视图底栏会一直停在「无分支 / 无计数」的初始态。
     renderGitPaneSync();
-    if (!state.viewSettings.onlyGitChanges) return;
+    if (state.mainView !== "git") return;
     renderGitPane();
   }
 
@@ -859,7 +851,7 @@ export function mount(container, api, _options = {}) {
     state.gitignoreRules = rules;
   }
 
-  // 切换视图开关：持久化后重新加载数据
+  // 切换视图开关：持久化后重新加载数据（入口：文件树右键菜单的勾选项）
   async function toggleViewSetting(key) {
     state.viewSettings = { ...state.viewSettings, [key]: !state.viewSettings[key] };
     saveViewSettings(api, state.viewSettings);
@@ -867,22 +859,7 @@ export function mount(container, api, _options = {}) {
     if (key === "javaPackageView") {
       // 普通目录树与 Java 虚拟包树的 children 结构不同，必须从根重新加载。
       state.expanded = Object.create(null);
-      state.menuOpen = false;
       await loadRoot();
-      return;
-    }
-    if (key === "onlyGitChanges") {
-      // 关闭菜单，并重建主视图以在「文件树 / Git 变更」之间切换
-      state.menuOpen = false;
-      if (!state.viewSettings.onlyGitChanges) {
-        // 离开 Git 变更视图：清空查看器状态，否则切回时会残留显示上次打开的比对
-        state.gitPreview = null;
-        state.gitSelected = null;
-      }
-      render();
-      if (state.viewSettings.onlyGitChanges && !state.gitStatus) {
-        await refreshGitViewStatus();
-      }
       return;
     }
     await loadRoot();
@@ -1355,6 +1332,51 @@ export function mount(container, api, _options = {}) {
     };
     const separator = () => menu.appendChild(el("div", "sfe-context-menu-separator"));
 
+    // 勾选型菜单项（视图开关）：左侧用 ✓ 标记勾选态，未勾选留空位保持对齐。
+    const addToggleItem = (label, checked, action, isDisabled = false) => {
+      const item = el("button", "sfe-context-menu-item sfe-context-toggle" + (isDisabled ? " disabled" : ""));
+      item.type = "button";
+      item.disabled = isDisabled;
+      item.setAttribute("role", "menuitemcheckbox");
+      item.setAttribute("aria-checked", checked ? "true" : "false");
+      const mark = el("span", "sfe-context-toggle-check");
+      if (checked) mark.appendChild(createActionIcon("check", 13));
+      item.appendChild(mark);
+      item.appendChild(el("span", "sfe-context-toggle-label", label));
+      item.addEventListener("click", () => {
+        if (!isDisabled && !state.operationBusy) action();
+      });
+      menu.appendChild(item);
+    };
+    // 视图开关分组（工作区级，原三点菜单设置项）：按 .gitignore 过滤（默认勾选，再点取消）；
+    // Java 包结构视图仅 Java 项目显示。切换后关闭菜单并重载文件树。
+    const appendViewToggles = (isDisabled) => {
+      addToggleItem(
+        t("settings.respectGitignore", "按 .gitignore 过滤"),
+        state.viewSettings.respectGitignore !== false,
+        () => {
+          closeContextMenu();
+          void toggleViewSetting("respectGitignore");
+        },
+        isDisabled,
+      );
+      if (
+        state.javaProject &&
+        Array.isArray(state.javaProject.sourceRoots) &&
+        state.javaProject.sourceRoots.length
+      ) {
+        addToggleItem(
+          t("settings.javaPackageView", "Java 包结构视图"),
+          state.viewSettings.javaPackageView !== false,
+          () => {
+            closeContextMenu();
+            void toggleViewSetting("javaPackageView");
+          },
+          isDisabled,
+        );
+      }
+    };
+
     if (context.renaming) {
       const input = el("input", "sfe-context-menu-input");
       input.type = "text";
@@ -1391,6 +1413,8 @@ export function mount(container, api, _options = {}) {
         () => copyPathText(state.rootPath),
         disabled || !state.rootPath,
       );
+      separator();
+      appendViewToggles(disabled);
     } else {
       addItem(
         entry.isDirectory
@@ -1436,6 +1460,8 @@ export function mount(container, api, _options = {}) {
       addItem(t("action.delete", "删除"), () => handleDelete(entry), disabled);
       separator();
       addItem(t("action.refresh", "刷新"), () => handleRefresh(), disabled);
+      separator();
+      appendViewToggles(disabled);
     }
 
     root.appendChild(menu);
@@ -1450,8 +1476,6 @@ export function mount(container, api, _options = {}) {
 
   function handleContextMenu(entry, x, y) {
     if (state.operationBusy || state.confirmDialog) return;
-    state.menuOpen = false;
-    renderToolbar();
     state.contextMenu = { entry, x, y };
     renderContextMenu();
   }
@@ -1463,175 +1487,252 @@ export function mount(container, api, _options = {}) {
   }
 
   // ------------------------------------------------------------------
-  // 5.0 项目运行：识别（懒加载）→ 右键 / 工具栏启动 → IDEA 式多 tab 输出 + 真实退出状态
+  // 5.0 项目终端：识别（懒加载）→ 右键 / 工具栏运行 → IDEA 式多 tab 交互终端
   // ------------------------------------------------------------------
 
-  /** 进行中的 run 数量（含启动中），工具栏主按钮与计时器据此切换。 */
+  /**
+   * 仍在运行的一次性任务数量（模式 A 且未结束）。
+   * @description 只统计模式 A：模式 B 是常驻交互终端，永远不会「退出」，若计入会把
+   *   工具栏按钮永久钉在 Stop。模式 B 的会话状态由 tab 自身表达（存在即开着），
+   *   不参与 Run/Stop 判定。仅用于底栏小圆点（提示后台仍在跑）。
+   */
   function runningCount() {
-    return state.runs.filter((run) => isActiveStatus(run.status)).length;
+    return state.terminals.filter((term) => term && term.mode === "run" && term.exited !== true).length;
+  }
+
+  /** 交互终端窗口（mode B）的终端集合。 */
+  function terminalModeTerminals() {
+    return state.terminals.filter((term) => term && term.mode === "terminal");
+  }
+
+  /** 运行窗口（mode A）的终端集合。 */
+  function runModeTerminals() {
+    return state.terminals.filter((term) => term && term.mode === "run");
+  }
+
+  /** 按 id 查终端（两个窗口共用）。 */
+  function findTerminal(id) {
+    return state.terminals.find((term) => term && term.id === id) || null;
   }
 
   /**
-   * 终止单个运行进程。
-   * @description stop() 会触发 startCommand 的 onExit（stopped=true），状态随之落到「已停止」。
-   * @param {string} id 运行 id
-   * @returns {boolean} 是否确实停止了进行中的进程
+   * 关闭终端后修正两个窗口的激活项：被移除的是激活项（或激活项已不存在）时回退到
+   *   同窗口首条；否则保持不动（不误改另一窗口的激活项）。
+   * @param {Iterable<string>} removedIds 被移除的终端 id
    */
-  function stopRunById(id) {
-    const run = findRun(state.runs, id);
-    if (!run || !isActiveStatus(run.status)) return false;
+  function reconcileActiveTerminals(removedIds) {
+    const removed = new Set(removedIds);
+    if (removed.has(state.activeTerminalId) || !findTerminal(state.activeTerminalId)) {
+      const list = terminalModeTerminals();
+      state.activeTerminalId = list.length ? list[0].id : null;
+    }
+    if (removed.has(state.activeRunTerminalId) || !findTerminal(state.activeRunTerminalId)) {
+      const list = runModeTerminals();
+      state.activeRunTerminalId = list.length ? list[0].id : null;
+    }
+  }
+
+  /** 终端集合变化后重建两个窗口的 tab 列表（xterm 实例由组件内部增量维护，不丢失）。 */
+  function rebuildTerminalWindows() {
+    if (terminalWindow && typeof terminalWindow.rebuild === "function") terminalWindow.rebuild();
+    if (runWindow && typeof runWindow.rebuild === "function") runWindow.rebuild();
+  }
+
+  /**
+   * 某条命令仍在运行的终端集合（模式 A 且未结束，按 commandId 归属）。
+   * @description 工具栏 Run/Stop 二态与「同一命令要么运行要么停止」的判定依据；
+   *   commandId 是终端记录上稳定的命令标识（不是命令文本，避免同 cmd 不同配置误判）。
+   * @param {{id?: string}|null} command 命令对象
+   * @returns {Array<Object>}
+   */
+  function runningTerminalsForCommand(command) {
+    const commandId = command && command.id ? command.id : null;
+    if (!commandId) return [];
+    return state.terminals.filter(
+      (term) => term && term.mode === "run" && term.exited !== true && term.commandId === commandId,
+    );
+  }
+
+  /** 某条命令当前是否运行中（驱动工具栏主按钮的 Run/Stop 二态）。 */
+  function runCountForCommand(command) {
+    return runningTerminalsForCommand(command).length;
+  }
+
+  /**
+   * 关闭一个终端会话（终止 pty + 从集合移除）。切换项目 / 卸载 / 关闭 tab 共用。
+   * @param {string} id 终端 id
+   * @returns {boolean} 是否确实移除了会话
+   */
+  function killTerminalById(id) {
+    const index = state.terminals.findIndex((term) => term && term.id === id);
+    if (index < 0) return false;
+    const term = state.terminals[index];
+    state.terminals.splice(index, 1);
     try {
-      if (typeof run.stop === "function") run.stop();
+      if (term.session && typeof term.session.kill === "function") term.session.kill();
     } catch {
       // 忽略：进程可能已自然退出
     }
-    run.status = "stopped";
-    run.exitCode = null;
-    run.stop = null;
-    run.endTime = Date.now();
-    syncRunBarBtn();
+    reconcileActiveTerminals([id]);
     return true;
   }
 
-  /**
-   * 终止全部运行进程（切换项目 / 卸载 / 停止全部）。
-   * @param {{silent?: boolean}} [opts] silent 用于不需要立即重绘面板的场景
-   * @returns {boolean} 是否停止了至少一个进程
-   */
-  function stopAllRuns({ silent = false } = {}) {
-    let changed = false;
-    for (const run of state.runs) {
-      if (!isActiveStatus(run.status)) continue;
+  /** 终止并移除全部终端（切换项目 / 卸载）。 */
+  function killAllTerminals() {
+    for (const term of state.terminals) {
       try {
-        if (typeof run.stop === "function") run.stop();
+        if (term && term.session && typeof term.session.kill === "function") term.session.kill();
       } catch {
         // 忽略：进程可能已自然退出
       }
-      run.status = "stopped";
-      run.exitCode = null;
-      run.stop = null;
-      run.endTime = Date.now();
-      changed = true;
     }
-    if (changed) {
-      syncElapsedTimer();
-      if (!silent) {
-        syncRunPanelStatus();
-        refreshRunPaneVisibility();
-      }
-      syncRunBarBtn();
-      syncRunToolbar();
-    }
-    return changed;
+    state.terminals = [];
+    state.activeTerminalId = null;
+    state.activeRunTerminalId = null;
   }
 
   /**
-   * 收起 / 最小化运行面板。
-   * @description 对齐 IDEA：关闭工具窗口不终止进程，仅隐藏；运行与输出保留，再次运行会重新展开。
-   *   底栏的运行面板图标可随时把面板拉回来。
+   * 终止并移除某条命令的运行终端（模式 A）——工具栏 Stop 按钮的语义。
+   * @description 只停「当前这条命令」的终端（用户诉求：点一个 Stop 不能把别的也停了）；
+   *   只处理模式 A：模式 B 是常驻交互终端，Stop 不应误杀用户正在交互的会话，
+   *   关闭模式 B 只能通过它自己的 tab ×（用户明确操作）。
+   * @param {{id?: string}|null} command 命令对象
+   */
+  function killRunTerminalsForCommand(command) {
+    const commandId = command && command.id ? command.id : null;
+    if (!commandId) return;
+    const victims = runningTerminalsForCommand(command);
+    if (!victims.length) return;
+    for (const term of victims) {
+      try {
+        if (term.session && typeof term.session.kill === "function") term.session.kill();
+      } catch {
+        // 忽略：进程可能已自然退出
+      }
+    }
+    const removed = new Set(victims.map((term) => term.id));
+    state.terminals = state.terminals.filter((term) => !removed.has(term.id));
+    reconcileActiveTerminals(removed);
+  }
+
+  /**
+   * 停止某条命令的运行终端，并同步面板 / 底栏 / 工具栏。
+   * @description killRunTerminalsForCommand 只改状态、不重绘：这里补 UI 同步，界面才会立即清空。
+   *   工具栏 Stop、⋮ 菜单的逐条停止、Rerun 的「先停」都复用它（DRY）。
+   * @param {{id?: string}|null} command 命令对象
+   */
+  function stopCommandAndSync(command) {
+    killRunTerminalsForCommand(command);
+    rebuildTerminalWindows();
+    syncSidebar();
+    syncSidebar();
+    syncRunToolbar();
+  }
+
+  /**
+   * 停止全部运行中的命令（模式 A）——工具栏 ⋮ 菜单「停止全部 N 个」的语义。
+   * @description 只有用户**显式**选择「全部停止」时才走这里（不是 Stop 的默认行为，这正是本轮修复点）；
+   *   模式 B 常驻交互终端不参与，只能由各自的 tab × 关闭。
+   */
+  function stopAllRunTerminals() {
+    for (const term of state.terminals) {
+      if (!term || term.mode !== "run") continue;
+      try {
+        if (term.session && typeof term.session.kill === "function") term.session.kill();
+      } catch {
+        // 忽略：进程可能已自然退出
+      }
+    }
+    state.terminals = state.terminals.filter((term) => !term || term.mode !== "run");
+    reconcileActiveTerminals([state.activeRunTerminalId]);
+    rebuildTerminalWindows();
+    syncSidebar();
+    syncRunToolbar();
+  }
+
+  /**
+   * 收起底部工具窗口（IDEA：关闭工具窗口不终止进程，仅隐藏；会话与输出保留，侧栏入口可随时拉回）。
    */
   function handleMinimizeRunPanel() {
-    state.runPanelOpen = false;
-    refreshRunPaneVisibility();
-    syncRunBarBtn();
+    state.bottomView = null;
+    refreshBottomVisibility();
+    syncSidebar();
   }
 
-  /**
-   * 关闭运行面板（清空全部运行记录）。
-   * @description 仅在没有任何任务运行时允许；仍有任务运行时退化为「最小化」，绝不静默杀进程。
-   */
-  function handleCloseAllRuns() {
-    if (state.runs.some((run) => isActiveStatus(run.status))) {
-      handleMinimizeRunPanel();
-      return;
-    }
-    state.runs = [];
-    state.activeRunId = null;
-    state.runPanelOpen = false;
-    afterRunsChanged();
+  /** 左侧竖排入口栏点击：切到指定工具窗口；再次点击同一入口则收起回文件视图。 */
+  function selectBottomView(view) {
+    const next = state.bottomView === view ? null : view;
+    state.bottomView = next;
+    if (next) ensureBottomWindows();
+    refreshBottomVisibility();
+    syncSidebar();
+    if (!next) return;
+    // 窗口可见后让终端适配尺寸并聚焦，打开即可直接输入。
+    const win = next === "run" ? runWindow : terminalWindow;
+    if (win && typeof win.fit === "function") win.fit();
+    if (win && typeof win.focus === "function") win.focus();
   }
 
-  /** 底栏运行面板按钮：最小化时点击拉起；可见时点击最小化。 */
-  function toggleRunPanelFromBar() {
-    if (state.runPanelOpen) handleMinimizeRunPanel();
-    else {
-      state.runPanelOpen = true;
-      refreshRunPaneVisibility();
-      syncRunBarBtn();
-    }
+  /** 切换终端窗口激活 tab（点 tab）。 */
+  function handleSelectTerminal(id) {
+    if (disposed || state.activeTerminalId === id) return;
+    if (!findTerminal(id)) return;
+    state.activeTerminalId = id;
+    if (terminalWindow && typeof terminalWindow.syncActive === "function") terminalWindow.syncActive();
   }
 
-  /**
-   * 同步底栏运行面板按钮：有运行记录时显示（面板最小化后是唯一的恢复入口）；
-   * 有任务运行中时叠加一个小圆点，提示「后台仍在跑」。
-   */
-  function syncRunBarBtn() {
-    if (disposed || !layoutEls || !layoutEls.runBarBtn) return;
-    const btn = layoutEls.runBarBtn;
-    const hasRuns = state.runs.length > 0;
-    btn.hidden = !hasRuns;
-    btn.classList.toggle("active", state.runPanelOpen === true);
-    btn.title = state.runPanelOpen
-      ? t("run.minimize", "最小化运行面板")
-      : t("run.showPanel", "显示运行面板");
-    btn.setAttribute("aria-label", btn.title);
-    const dot = layoutEls.runBarDot;
-    if (dot) dot.hidden = runningCount() <= 0;
+  /** 切换运行窗口激活 tab（点 tab）。 */
+  function handleSelectRunTerminal(id) {
+    if (disposed || state.activeRunTerminalId === id) return;
+    if (!findTerminal(id)) return;
+    state.activeRunTerminalId = id;
+    if (runWindow && typeof runWindow.syncActive === "function") runWindow.syncActive();
   }
 
-  /** 运行集合变化后的统一收尾：面板显隐 / 重建、工具栏同步、计时器同步。 */
-  function afterRunsChanged() {
-    state.runPanelOpen = state.runs.length > 0;
-    if (state.runs.length > 0) {
-      renderRunPanelView();
-    } else if (layoutEls && layoutEls.runPane) {
-      runPanel = null;
-      layoutEls.runPane.replaceChildren();
-    }
-    refreshRunPaneVisibility();
-    syncRunBarBtn();
-    syncRunToolbar();
-    syncElapsedTimer();
-  }
-
-  /** 切换激活 tab（IDEA 里点 tab 切换输出视图）。 */
-  function handleSelectRun(id) {
-    if (disposed || !findRun(state.runs, id) || state.activeRunId === id) return;
-    // 切走前把当前输出区的滚动位置写回，切回时可恢复。
-    if (runPanel && typeof runPanel.captureScroll === "function") runPanel.captureScroll();
-    state.activeRunId = id;
-    renderRunPanelView();
+  /** 关闭某个终端 tab（终止会话 + 移除），并同步两个工具窗口与底栏/工具栏。 */
+  function handleCloseTerminal(id) {
+    if (!killTerminalById(id)) return;
+    rebuildTerminalWindows();
+    syncSidebar();
     syncRunToolbar();
   }
 
-  /** 停止某个 tab 的运行（IDEA 的 Stop）。 */
-  function handleStopRun(id) {
-    if (disposed || !stopRunById(id)) return;
-    syncElapsedTimer();
-    syncRunPanelStatus();
+  /** 关闭某窗口内除指定 tab 之外的其它 tab（同 mode）。 */
+  function closeOtherTerminals(id) {
+    const target = findTerminal(id);
+    if (!target) return;
+    const victims = state.terminals.filter((term) => term.mode === target.mode && term.id !== id);
+    for (const term of victims) {
+      try {
+        if (term.session && typeof term.session.kill === "function") term.session.kill();
+      } catch {
+        // 忽略：进程可能已自然退出
+      }
+    }
+    const removed = new Set(victims.map((term) => term.id));
+    state.terminals = state.terminals.filter((term) => !removed.has(term.id));
+    reconcileActiveTerminals(removed);
+    rebuildTerminalWindows();
+    syncSidebar();
     syncRunToolbar();
-    syncRunBarBtn();
   }
 
-  /** 清空某个 tab 的输出（IDEA console 的 Clear All）。 */
-  function handleClearRun(id) {
-    const run = findRun(state.runs, id);
-    if (!run) return;
-    run.output = "";
-    if (runPanel) runPanel.rebuild();
-  }
-
-  /**
-   * 关闭某个 tab（IDEA 的 Close：关闭标签页并终止进程）。
-   * @description 运行中先停止再移除，避免留下「看不见的进程」。
-   */
-  function handleCloseRun(id) {
-    const run = findRun(state.runs, id);
-    if (!run) return;
-    stopRunById(id);
-    removeRun(state.runs, id);
-    state.activeRunId = pickActiveRunId(state.runs, state.activeRunId === id ? null : state.activeRunId);
-    afterRunsChanged();
+  /** 关闭某窗口内的全部 tab（按 mode 区分，不动另一窗口）。 */
+  function closeAllTerminalsOfMode(mode) {
+    const victims = state.terminals.filter((term) => term && term.mode === mode);
+    for (const term of victims) {
+      try {
+        if (term.session && typeof term.session.kill === "function") term.session.kill();
+      } catch {
+        // 忽略：进程可能已自然退出
+      }
+    }
+    const removed = new Set(victims.map((term) => term.id));
+    state.terminals = state.terminals.filter((term) => !removed.has(term.id));
+    reconcileActiveTerminals(removed);
+    rebuildTerminalWindows();
+    syncSidebar();
+    syncRunToolbar();
   }
 
   /**
@@ -1656,15 +1757,18 @@ export function mount(container, api, _options = {}) {
     return result;
   }
 
-  /** 运行面板可见性：用户未收起且存在运行记录时才占位（IDEA：Run 窗口只在运行后出现）。 */
-  function refreshRunPaneVisibility() {
-    if (!layoutEls || !layoutEls.runPane) return;
-    layoutEls.runPane.hidden = !(state.runPanelOpen === true && state.runs.length > 0);
+  /** 底部工具窗口可见性：按 bottomView 互斥显示「终端」/「运行」窗口，null 时全部收起。 */
+  function refreshBottomVisibility() {
+    if (!layoutEls) return;
+    if (layoutEls.terminalWindowEl) layoutEls.terminalWindowEl.hidden = state.bottomView !== "terminal";
+    if (layoutEls.runWindowEl) layoutEls.runWindowEl.hidden = state.bottomView !== "run";
   }
 
-  /** 局部刷新运行面板状态（不重建输出区，避免打断滚动与选区）。 */
-  function syncRunPanelStatus() {
-    if (runPanel && typeof runPanel.syncStatus === "function") runPanel.syncStatus();
+  /** 按需首次渲染两个工具窗口（渲染后各自常驻，靠 hidden 切换，xterm 实例不销毁）。 */
+  function ensureBottomWindows() {
+    if (!layoutEls || !layoutEls.terminalWindowEl || !layoutEls.runWindowEl) return;
+    if (!terminalWindow) terminalWindow = renderToolWindow(layoutEls.terminalWindowEl, terminalWindowOptions());
+    if (!runWindow) runWindow = renderToolWindow(layoutEls.runWindowEl, runWindowOptions());
   }
 
   /** 同步工具栏运行控件（Run/Stop 按钮、命令下拉与运行计数）。 */
@@ -1687,178 +1791,271 @@ export function mount(container, api, _options = {}) {
     if (runToolbar && typeof runToolbar.dispose === "function") runToolbar.dispose();
     runToolbar = renderRunToolbar(wrap, {
       t,
-      getState: () => ({
-        commands: flattenCommands(state.projectCommands),
-        // 识别完成（无论是否命中生态）才算 ready，避免未扫描时误显示按钮。
-        ready: state.projectCommands !== null,
-        runningCount: runningCount(),
-      }),
+      getState: () => {
+        const commands = flattenCommands(state.projectCommands);
+        return {
+          commands,
+          // 识别完成（无论是否命中生态）才算 ready，避免未扫描时误显示按钮。
+          ready: state.projectCommands !== null,
+          isCommandRunning: (command) => runCountForCommand(command) > 0,
+        };
+      },
       onRun: handleRunCommand,
-      onStopAll: () => stopAllRuns(),
+      // Rerun：先停该命令的运行终端，再重新运行（IDEA 的 Rerun 语义）。
+      onRerun: (command) => {
+        stopCommandAndSync(command);
+        handleRunCommand(command);
+      },
+      // Stop：只停「当前选中命令」，不波及其它命令（修复「点一个 Stop 全停」）。
+      // 逐条 / 全部停止已移到「运行」工具窗口工具栏，顶栏不再提供 ⋮。
+      onStop: stopCommandAndSync,
     });
-  }
-
-  /** 有进行中的运行时启动每秒耗时刷新；全部结束则清除。 */
-  function syncElapsedTimer() {
-    if (runningCount() > 0) startElapsedTimer();
-    else stopElapsedTimer();
-  }
-
-  /** 运行中每秒刷新一次耗时显示（面板重建后定时器由调用方重建，避免泄漏）。 */
-  function startElapsedTimer() {
-    if (elapsedTimer) return;
-    elapsedTimer = setInterval(() => {
-      if (disposed) return;
-      syncRunPanelStatus();
-    }, 1000);
-  }
-
-  function stopElapsedTimer() {
-    if (elapsedTimer) {
-      clearInterval(elapsedTimer);
-      elapsedTimer = null;
-    }
-  }
-
-  /** 渲染运行面板（IDEA 式 tabs：每个 run 一个 tab，无运行时不占位）。 */
-  function renderRunPanelView() {
-    if (disposed || !layoutEls || !layoutEls.runPane) return;
-    if (!state.runs.length) {
-      runPanel = null;
-      layoutEls.runPane.replaceChildren();
-      refreshRunPaneVisibility();
-      return;
-    }
-    runPanel = renderRunPanel(layoutEls.runPane, {
-      t,
-      getRuns: () => state.runs,
-      getActiveId: () => state.activeRunId,
-      onSelectTab: handleSelectRun,
-      onRerun: handleRerunCommand,
-      onStop: handleStopRun,
-      onClear: handleClearRun,
-      onClose: handleCloseRun,
-      onMinimize: handleMinimizeRunPanel,
-      onCloseAll: handleCloseAllRuns,
-    });
-    refreshRunPaneVisibility();
   }
 
   /**
-   * 一键运行一条命令。
-   * @description 同一命令复用同一个 tab（IDEA：Rerun 复用同一 tab）；不同命令并行成多个 tab。
-   *   已在运行的同一命令先停掉再重跑，天然防重复进程。
-   * @param {{id?: string, cmd: string, labelFallback?: string, labelKey?: string|null}} command 命令对象
+   * 让底部工具窗口里的激活终端重新适配容器尺寸。
+   * @description 窗口从隐藏变为可见、或尺寸变化时，xterm 的 fit 需要重算；
+   *   不可见时 fit 会算出极小尺寸并触发 ConPTY 破坏性重绘，因此只在可见时调用。
    */
-  async function handleRunCommand(command) {
-    if (disposed || !command || !command.cmd) return;
+  function fitTerminalPanel() {
+    const win = state.bottomView === "run" ? runWindow : state.bottomView === "terminal" ? terminalWindow : null;
+    if (win && typeof win.fit === "function") win.fit();
+  }
+
+  /** 停止某个运行 tab（运行窗口工具栏 ■ / tab 右键）——停该 tab 所属命令。 */
+  function handleStopTerminal(id) {
+    const term = findTerminal(id);
+    if (term && term.commandId) stopCommandAndSync({ id: term.commandId });
+    else handleCloseTerminal(id);
+  }
+
+  /**
+   * 重新运行某个运行 tab（运行窗口工具栏 ⟳ / tab 右键）——**复用原 tab / 原 xterm 面板**重跑，
+   * 无论该进程当前是运行中还是已结束，都绝不新建 tab（用户诉求：重启在当前面板重启）。
+   * @description 若仍在运行：先终止旧进程（保留 tab 记录，仅 session 置空）；
+   *   随后清空该 tab 的旧输出，再用同一条 term 记录重新拉起 pty。
+   */
+  function handleRerunTerminal(id) {
+    const term = findTerminal(id);
+    if (!term || !term.commandId) return;
+    const command = flattenCommands(state.projectCommands).find((c) => c.id === term.commandId);
+    if (!command) return;
+    // 运行中才需要杀旧进程；已结束的会话 session 已为 null，不动。
+    if (term.exited !== true && term.session && typeof term.session.kill === "function") {
+      try {
+        term.session.kill();
+      } catch {
+        // 忽略：进程可能已自然退出
+      }
+    }
+    term.session = null;
+    // 复用原 tab：重置退出态（tab 上 ✓/✗ 消失、状态点复位、工具栏停止恢复可用）。
+    term.exited = false;
+    term.exitCode = null;
+    term.pendingCommand = command.cmd;
+    state.activeRunTerminalId = term.id;
+    state.bottomView = "run";
+    ensureBottomWindows();
+    // 清掉上一轮的输出，重跑从干净屏幕开始（清的是显示，不销毁 xterm 实例）。
+    if (runWindow && typeof runWindow.clear === "function") runWindow.clear(id);
+    rebuildTerminalWindows();
+    syncRunToolbar();
+    syncSidebar();
+    void createTerminalForId(term);
+  }
+
+  /** 复制某 tab 的标识（运行=命令原文，终端=标题）到系统剪贴板。 */
+  function copyTerminalTab(id) {
+    const term = findTerminal(id);
+    if (!term) return;
+    void copyToClipboard(term.title || "");
+  }
+
+  /** 终端窗口（mode B）组件配置。 */
+  function terminalWindowOptions() {
+    return {
+      t,
+      kind: "terminal",
+      getTerminals: terminalModeTerminals,
+      getActiveId: () => state.activeTerminalId,
+      createTerminal: createXtermView,
+      onSelectTab: handleSelectTerminal,
+      onNewTerminal: () => handleNewTerminal({ mode: "terminal" }),
+      onCloseTerminal: handleCloseTerminal,
+      onMinimize: handleMinimizeRunPanel,
+      onClear: (id) => terminalWindow && typeof terminalWindow.clear === "function" && terminalWindow.clear(id),
+      onScrollToBottom: (id) =>
+        terminalWindow && typeof terminalWindow.scrollToBottom === "function" && terminalWindow.scrollToBottom(id),
+      onCloseOthers: closeOtherTerminals,
+      onCloseAll: () => closeAllTerminalsOfMode("terminal"),
+      onCopyTab: copyTerminalTab,
+    };
+  }
+
+  /** 运行窗口（mode A）组件配置。 */
+  function runWindowOptions() {
+    return {
+      t,
+      kind: "run",
+      getTerminals: runModeTerminals,
+      getActiveId: () => state.activeRunTerminalId,
+      createTerminal: createXtermView,
+      onSelectTab: handleSelectRunTerminal,
+      onCloseTerminal: handleCloseTerminal,
+      onMinimize: handleMinimizeRunPanel,
+      onRerun: handleRerunTerminal,
+      onStop: handleStopTerminal,
+      onClear: (id) => runWindow && typeof runWindow.clear === "function" && runWindow.clear(id),
+      onScrollToBottom: (id) =>
+        runWindow && typeof runWindow.scrollToBottom === "function" && runWindow.scrollToBottom(id),
+      onStopAll: stopAllRunTerminals,
+      onCloseOthers: closeOtherTerminals,
+      onCloseAll: () => closeAllTerminalsOfMode("run"),
+      onCopyTab: copyTerminalTab,
+    };
+  }
+
+  /**
+   * 新建一个终端。
+   * @description 两种模式（用户已确认的双模式设计）：
+   *   - mode="run"（模式 A）：一次性运行，跑完 shell 退出并回传退出码，tab 显示 ✓/✗；只读。
+   *   - mode="terminal"（模式 B）：常驻交互终端，可连续敲命令，不要求状态回传。
+   *   入口约定：工具栏 Run / 右键「运行」/ 代码行 ▶ → 模式 A；面板 ＋ → 模式 B。
+   * @param {{command?: string, commandId?: string|null, mode?: "run"|"terminal", title?: string}|string} [options] 命令与模式
+   */
+  function handleNewTerminal(options) {
+    if (disposed) return;
     if (!isTerminalAvailable()) {
       setOperationStatus(false, t("run.terminalUnavailable", "当前宿主未提供终端能力"));
       return;
     }
-
-    const runId = command.id || command.cmd;
-    // 跨实例 / 双击连点去重：同一命令在窗口内的重复触发一律跳过（见 shouldSkipDuplicateStart）。
-    if (shouldSkipDuplicateStart(runId)) return;
-
-    let run = findRun(state.runs, runId);
-    // 同一命令已在运行（starting / running）：幂等忽略本次触发（覆盖窗口之外的连点）。
-    if (run && isActiveStatus(run.status)) return;
-    if (run) {
-      // 已结束（exited / stopped / failed）：视为重新运行，复位后复用同一 tab（IDEA：Rerun）。
-      resetRun(run);
+    const opts = typeof options === "string" ? { command: options } : options || {};
+    const command = typeof opts.command === "string" ? opts.command : "";
+    const mode = opts.mode === "run" ? "run" : "terminal";
+    const id = `term-${Date.now().toString(36)}-${(terminalToken += 1)}`;
+    const term = {
+      id,
+      // 命令归属 id（模式 A 用于 Run/Stop 按命令二态判定）；模式 B 为 null。
+      commandId: mode === "run" && typeof opts.commandId === "string" ? opts.commandId : null,
+      // 模式 A 用命令原文作标题（退出后追加 ✓/✗ + 退出码）；模式 B 统一叫「终端」。
+      title: opts.title || (mode === "run" ? command : t("run.terminal", "终端")),
+      mode,
+      session: null,
+      exited: false,
+      exitCode: null,
+      onInput: null,
+      onResize: null,
+      pendingCommand: command,
+      // pty 启动阶段令牌：重跑复用同一 tab 时用于作废旧 pty 的迟到 onData/onExit。
+      phase: 0,
+    };
+    state.terminals.push(term);
+    // 按 mode 打开对应工具窗口并激活新 tab：
+    //   模式 A（一次性运行）→ 运行窗口；模式 B（交互终端）→ 终端窗口。
+    if (mode === "run") {
+      state.activeRunTerminalId = id;
+      state.bottomView = "run";
     } else {
-      run = createRun({
-        id: runId,
-        cmd: command.cmd,
-        labelKey: command.labelKey,
-        labelFallback: command.labelFallback,
-      });
-      state.runs.push(run);
+      state.activeTerminalId = id;
+      state.bottomView = "terminal";
     }
-    state.activeRunId = run.id;
-    state.runPanelOpen = true;
-
-    // 本次启动令牌：同命令重跑或 tab 被关闭后，旧的启动结果必须作废并回收进程。
-    const token = ++runRequestId;
-    run.startToken = token;
-
-    // 立即渲染（用户点运行必须马上看到「启动中」的 tab 与输出区）。
-    renderRunPanelView();
-    syncRunBarBtn();
-    syncElapsedTimer();
+    // 确保两个工具窗口已渲染（各自常驻、靠 hidden 切换），再让 tab 列表与新终端对齐。
+    ensureBottomWindows();
+    rebuildTerminalWindows();
+    refreshBottomVisibility();
+    // 窗口由隐藏（收起）变为可见后，xterm 需按真实尺寸重算（隐藏期 fit 会得到 0 尺寸）。
+    fitTerminalPanel();
+    syncSidebar();
     syncRunToolbar();
+    void createTerminalForId(term);
+  }
 
-    const result = await startCommand(command.cmd, {
+  /** 为一条终端记录创建 pty 会话，并接好输入 / 尺寸 / 输出 / 退出。 */
+  async function createTerminalForId(term) {
+    if (!term || disposed) return;
+    // 本终端所属工具窗口的控制器（模式 A→运行窗口；模式 B→终端窗口），用其读写 xterm。
+    const win = term.mode === "run" ? runWindow : terminalWindow;
+    const sizes = win && typeof win.getSizes === "function" ? win.getSizes(term.id) : null;
+    const cols = sizes && sizes.cols > 0 ? sizes.cols : DEFAULT_COLS;
+    const rows = sizes && sizes.rows > 0 ? sizes.rows : DEFAULT_ROWS;
+
+    // 阶段令牌：每次（重新）启动本 tab 的 pty 时 +1 并捕获；旧 pty 迟到的 onData/onExit
+    //   令牌不匹配 → 丢弃。保证「重跑复用同一 tab」时上一轮的迟到输出不会污染新一轮。
+    term.phase = (term.phase || 0) + 1;
+    const phase = term.phase;
+
+    // 终端视图 → shell：键盘输入与尺寸变化
+    term.onInput = (data) => {
+      if (term.session) term.session.write(data);
+    };
+    term.onResize = (nextCols, nextRows) => {
+      if (term.session) term.session.resize(nextCols, nextRows);
+    };
+
+    // 模式 A：shell 走宿主同源解析链（终端设置 shellPath > detectTerminals()[0]），
+    // 不写死 shell——跨 Windows / macOS / Linux 跟随宿主配置；退出写法按 shell 家族选择
+    // （powershell 需 `exit $LASTEXITCODE`，cmd / posix / wsl 用裸 `exit` 继承退出码）。
+    // 模式 B 不指定 shellPath，走宿主默认检测，保持交互能力。
+    const runShell = term.mode === "run" ? await resolveRunShell() : null;
+
+    const result = await createPtySession({
       cwd: state.rootPath,
-      onData: (text) => {
-        if (disposed || run.startToken !== token) return;
-        // 与面板输出区共用同一上限与裁剪阈值：run.output 只保留尾部片段。
-        // 为什么必须裁：切换 tab 时 rebuild() 会用它做 output.textContent = full 全量重建 DOM，
-        //   若这里无界增长（长跑进程可达数 MB），每次切 tab 都要重新解析整块文本，越切越卡。
-        // 为什么用 TRIM_THRESHOLD_CHARS 而非每次比 MAX：每次追加都 slice 是 O(n)，会退化成 O(n²)；
-        //   累积到阈值再裁一次，把裁剪成本摊销到接近 O(1)/字符。
-        run.output += text;
-        if (run.output.length > TRIM_THRESHOLD_CHARS) {
-          run.output = run.output.slice(run.output.length - MAX_OUTPUT_CHARS);
-        }
-        if (runPanel && typeof runPanel.appendOutput === "function") runPanel.appendOutput(run.id, text);
+      cols,
+      rows,
+      // 仅模式 A 指定 shellPath；模式 B 传 undefined，走宿主默认检测。
+      shellPath: runShell ? runShell.shellPath : undefined,
+      onData: (data) => {
+        if (disposed || term.phase !== phase) return;
+        if (win && typeof win.write === "function") win.write(term.id, data);
       },
-      onExit: (exitCode, stopped) => {
-        if (disposed || run.startToken !== token) return;
-        run.status = stopped ? "stopped" : "exited";
-        run.exitCode = exitCode;
-        run.stop = null;
-        run.endTime = Date.now();
-        syncElapsedTimer();
-        syncRunPanelStatus();
+      onExit: (exitCode) => {
+        // 重跑已启动新一轮（phase 变化）：旧 pty 的退出事件作废，避免清掉新一轮的运行态。
+        if (term.phase !== phase) return;
+        term.exited = true;
+        term.exitCode = typeof exitCode === "number" ? exitCode : null;
+        term.session = null;
+        // 模式 A 退出后刷新运行窗口 tab（✓/✗ + 退出码 + 状态点/工具栏态）。
+        if (term.mode === "run") rebuildTerminalWindows();
         syncRunToolbar();
-        syncRunBarBtn();
+        syncSidebar();
       },
     });
 
-    // 已被重跑取代 / tab 已关闭 / 插件卸载：回收本次进程，避免孤儿进程，也不覆盖新状态。
-    const superseded = run.startToken !== token || !state.runs.includes(run);
-    if (disposed || superseded) {
-      try {
-        if (typeof result.stop === "function") result.stop();
-      } catch {
-        // 忽略
-      }
+    // 终端在创建期间被关闭 / 项目已切换：回收本次会话，避免孤儿进程。
+    if (disposed || !state.terminals.includes(term)) {
+      if (result.ok && typeof result.kill === "function") result.kill();
       return;
     }
     if (!result.ok) {
-      run.status = "failed";
-      run.exitCode = null;
-      run.stop = null;
-      run.endTime = Date.now();
-      const message = t("run.startFailed", "启动失败：{{error}}", { error: result.error || "" });
-      run.output += message + "\n";
-      if (runPanel && typeof runPanel.appendOutput === "function") runPanel.appendOutput(run.id, message + "\n");
       setOperationStatus(false, result.error || t("run.startFailed", "启动失败"));
-      syncElapsedTimer();
-      syncRunPanelStatus();
-      syncRunToolbar();
-      syncRunBarBtn();
       return;
     }
-    run.status = "running";
-    run.stop = typeof result.stop === "function" ? result.stop : null;
-    run.ptyId = result.ptyId || null;
-    syncElapsedTimer();
-    syncRunPanelStatus();
+    term.session = result;
+    // 带命令创建：把命令文本 + 回车写入 shell，等价于用户手动敲入并回车执行。
+    if (term.pendingCommand) {
+      const cmd = term.pendingCommand;
+      term.pendingCommand = "";
+      result.write(`${cmd}\r`);
+      // 模式 A：命令之后写入 shell 退出指令，让 shell 退出以回传真实退出码。
+      if (term.mode === "run" && runShell) result.write(`${runShell.exitCommand}\r`);
+    }
     syncRunToolbar();
-    syncRunBarBtn();
+    syncSidebar();
   }
 
   /**
-   * 重新运行某个 tab（IDEA 的 Rerun）：用同一条命令新建进程并复用同一 tab。
-   * @param {string} id 运行 id
+   * 运行一条命令（模式 A）：新建一个终端 tab 并把命令敲进去执行。
+   * @description 「同一命令要么运行要么停止」：该命令已有运行中的终端时**不再新建**
+   *   （按钮此时应为 Stop，正常不会走到这里；此守卫兜底右键「运行」与代码行 ▶ 的并发触发，
+   *   替代原先的 300ms 时间窗口去重——按真实运行状态判定更准，且不误伤快速重跑）。
+   * @param {{id?: string, cmd: string, labelFallback?: string, labelKey?: string|null}} command 命令对象
    */
-  function handleRerunCommand(id) {
-    const run = findRun(state.runs, id);
-    if (disposed || !run) return;
-    handleRunCommand({ id: run.id, cmd: run.cmd, labelKey: run.labelKey, labelFallback: run.labelFallback });
+  function handleRunCommand(command) {
+    if (disposed || !command || !command.cmd) return;
+    // 运行中拦截：同一命令已有未结束的运行终端 → 忽略（要么运行，要么停止）。
+    if (runCountForCommand(command) > 0) return;
+    // 模式 A：一次性运行，跑完 shell 退出 → onPtyExit 回传退出码 → 工具栏回到 Run。
+    handleNewTerminal({ command: command.cmd, commandId: command.id || null, mode: "run", title: command.cmd });
   }
 
   // 文件树空白区右键：命中具体条目时由行自身处理并 stopPropagation（见 tree-view.js），
@@ -2121,56 +2318,8 @@ export function mount(container, api, _options = {}) {
     }, 1600);
   }
 
-  // 视图选项下拉菜单（三点按钮触发）：同步到固定的菜单容器内
-  // 菜单只涉及按钮与下拉，重建其内容不会打断输入框 / 文本选区
-  function syncViewMenu(wrap) {
-    if (!wrap) return;
-    wrap.replaceChildren();
-
-    const moreBtn = el("button", "sfe-btn-icon" + (state.menuOpen ? " active" : ""));
-    moreBtn.type = "button";
-    moreBtn.title = t("action.viewOptions", "视图选项");
-    moreBtn.setAttribute("aria-haspopup", "true");
-    moreBtn.setAttribute("aria-expanded", state.menuOpen ? "true" : "false");
-    moreBtn.appendChild(createActionIcon("more", 15));
-    moreBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      state.menuOpen = !state.menuOpen;
-      renderToolbar();
-    });
-    wrap.appendChild(moreBtn);
-
-    if (state.menuOpen) {
-      const menu = el("div", "sfe-menu");
-      menu.addEventListener("click", (e) => e.stopPropagation());
-
-      const item = (key, label) => {
-        const on = !!state.viewSettings[key];
-        const row = el("button", "sfe-menu-item");
-        row.type = "button";
-        row.setAttribute("role", "menuitemcheckbox");
-        row.setAttribute("aria-checked", on ? "true" : "false");
-        row.appendChild(el("span", "sfe-menu-label", label));
-        row.appendChild(el("span", "sfe-switch" + (on ? " on" : "")));
-        row.addEventListener("click", () => {
-          toggleViewSetting(key);
-        });
-        return row;
-      };
-
-      menu.appendChild(item("respectGitignore", t("settings.respectGitignore", "按 .gitignore 过滤")));
-      menu.appendChild(item("onlyGitChanges", t("settings.onlyGitChanges", "只显示 Git 变更")));
-      if (
-        state.javaProject &&
-        Array.isArray(state.javaProject.sourceRoots) &&
-        state.javaProject.sourceRoots.length
-      ) {
-        menu.appendChild(item("javaPackageView", t("settings.javaPackageView", "Java 包结构视图")));
-      }
-
-      wrap.appendChild(menu);
-    }
-  }
+  // 视图开关菜单已拆除：视图选项（按 .gitignore 过滤 / Java 包结构视图）迁移到文件树右键菜单，
+  // 主视图切换（文件 / Git）迁移到左侧入口栏，故工具栏不再有三点菜单。
 
   // ------------------------------------------------------------------
   // 7. 渲染：骨架只构建一次，之后按分区局部更新
@@ -2191,7 +2340,46 @@ export function mount(container, api, _options = {}) {
 
     container.replaceChildren();
     const root = el("div", "sfe-root");
+    // layout 为横排：最左「竖排入口栏」+ 右侧主体（工具栏 / 主视图 / 底部工具窗口 / 底栏）。
     const layout = el("div", "sfe-container");
+
+    // ── 最左侧竖排入口栏（IDEA tool window 语义）：文件在【顶部】，运行 / 终端【贴底】 ──
+    const sidebar = el("div", "sfe-sidebar");
+    /** 侧栏按钮：图标 + title（选中态由 syncSidebar 就地切换 .active），追加到指定父节点。 */
+    const sidebarBtn = (parent, iconName, label, onClick) => {
+      const btn = el("button", "sfe-sidebar-btn");
+      btn.type = "button";
+      btn.title = label;
+      btn.setAttribute("aria-label", label);
+      btn.appendChild(createActionIcon(iconName, 16));
+      btn.addEventListener("click", onClick);
+      parent.appendChild(btn);
+      return btn;
+    };
+    // 顶部主视图二选一：文件 / Git 变更（必有其一激活，不可都关）。
+    const sidebarTop = el("div", "sfe-sidebar-top");
+    sidebar.appendChild(sidebarTop);
+    const fileViewBtn = sidebarBtn(sidebarTop, "folderOpen", t("sidebar.files", "文件"), () => switchMainView("files"));
+    const gitViewBtn = sidebarBtn(sidebarTop, "folderGit2", t("sidebar.git", "Git 变更"), () => switchMainView("git"));
+    // 底部按钮组（运行 / 终端）：靠 margin-top:auto 推到底部，与顶部主视图入口分开。
+    const sidebarBottom = el("div", "sfe-sidebar-bottom");
+    sidebar.appendChild(sidebarBottom);
+    // 运行：切到「运行」工具窗口；运行中叠加小圆点（与底栏一致）。
+    const runSideBtn = sidebarBtn(sidebarBottom, "play", t("sidebar.run", "运行"), () => selectBottomView("run"));
+    const runSideDot = el("span", "sfe-sidebar-dot");
+    runSideDot.hidden = true;
+    runSideBtn.appendChild(runSideDot);
+    // 终端：切到「终端」工具窗口。
+    const terminalSideBtn = sidebarBtn(
+      sidebarBottom,
+      "terminal",
+      t("sidebar.terminal", "终端"),
+      () => selectBottomView("terminal"),
+    );
+    layout.appendChild(sidebar);
+
+    // ── 主体：工具栏 / 主视图 / 底部工具窗口 / 底栏（纵排）──
+    const body = el("div", "sfe-body");
 
     const toolbar = el("div", "sfe-toolbar");
     const pathText = el("div", "sfe-toolbar-path");
@@ -2199,16 +2387,6 @@ export function mount(container, api, _options = {}) {
     const statusEl = el("span", "sfe-toolbar-status");
     statusEl.hidden = true;
     actions.appendChild(statusEl);
-
-    // 刷新按钮：重新拉取文件树与 Git 状态
-    const refreshBtn = el("button", "sfe-btn-icon");
-    refreshBtn.type = "button";
-    refreshBtn.title = t("action.refresh", "刷新目录");
-    refreshBtn.appendChild(createActionIcon("refresh", 13));
-    refreshBtn.addEventListener("click", () => {
-      refreshAll();
-    });
-    actions.appendChild(refreshBtn);
 
     // 运行控件：对标 IDEA 右上角 Run（▶ Run / ■ Stop 二态 + 命令下拉）。
     // 容器固定常驻，内容由 renderRunToolbar 按识别结果与运行状态同步，避免重建工具栏。
@@ -2222,51 +2400,48 @@ export function mount(container, api, _options = {}) {
     gitViewSwitchWrap.hidden = true;
     actions.appendChild(gitViewSwitchWrap);
 
-    // 三点下拉：常用视图开关（容器固定，内容按需同步）
-    const menuWrap = el("div", "sfe-menu-wrap");
-    actions.appendChild(menuWrap);
-
     toolbar.appendChild(pathText);
     toolbar.appendChild(actions);
-    layout.appendChild(toolbar);
+    body.appendChild(toolbar);
     const mainView = el("div", "sfe-main-view");
-    layout.appendChild(mainView);
-    // 项目运行面板：停靠在主视图下方（不随 mainView 重建而消失），默认隐藏，
-    // 由 refreshRunPaneVisibility 按「是否打开 + 是否有命令」控制显隐。
-    const runPane = el("div", "sfe-run-pane");
-    runPane.hidden = true;
-    layout.appendChild(runPane);
-    // 底栏状态栏（运行面板按钮 + 分支切换 + Git 同步 + ↑↓ 计数）：文件树与 Git 变更视图共用，
-    // 挂在 layout 上（不随 mainView 重建而消失），常驻可见。
+    body.appendChild(mainView);
+    // 底部工具窗口：两个独立窗口（终端 / 运行），都挂在主体下方，随主视图重建而不消失；
+    // 默认隐藏，由 refreshBottomVisibility 按 state.bottomView 互斥显隐（内容在首次打开时按需渲染）。
+    const runWindowEl = el("div", "sfe-tool-window sfe-run-window");
+    runWindowEl.hidden = true;
+    body.appendChild(runWindowEl);
+    const terminalWindowEl = el("div", "sfe-tool-window sfe-terminal-window");
+    terminalWindowEl.hidden = true;
+    body.appendChild(terminalWindowEl);
+    // 底栏状态栏（分支切换 + Git 同步 + ↑↓ 计数）：文件树与 Git 变更视图共用，
+    // 挂在主体上（不随 mainView 重建而消失），常驻可见。
+    // 注：终端/运行入口已移到左侧竖排入口栏，底栏不再有运行按钮。
     const syncBar = el("div", "sfe-sync-bar");
-    // 运行面板按钮：与 git 同步栏同一行，排在 ↑↓ 计数之后（CSS order:1）紧挨着，
-    // 不单独占一行。面板最小化后从这里恢复；有任务运行中时显示计数点。
-    const runBarBtn = el("button", "sfe-run-bar-btn");
-    runBarBtn.type = "button";
-    runBarBtn.hidden = true;
-    runBarBtn.appendChild(createActionIcon("terminal", 13));
-    const runBarDot = el("span", "sfe-run-bar-dot");
-    runBarDot.hidden = true;
-    runBarBtn.appendChild(runBarDot);
-    runBarBtn.addEventListener("click", toggleRunPanelFromBar);
-    syncBar.appendChild(runBarBtn);
-    layout.appendChild(syncBar);
+    body.appendChild(syncBar);
+    layout.appendChild(body);
     root.appendChild(layout);
     container.appendChild(root);
 
     layoutEls = {
       root,
       layout,
+      sidebar,
+      sidebarTop,
+      sidebarBottom,
+      fileViewBtn,
+      gitViewBtn,
+      runSideBtn,
+      runSideDot,
+      terminalSideBtn,
+      body,
       mainView,
-      runPane,
+      runWindowEl,
+      terminalWindowEl,
       syncBar,
-      runBarBtn,
-      runBarDot,
       pathText,
       statusEl,
       gitViewSwitchWrap,
       runToolbarWrap,
-      menuWrap,
       treePane: null,
       previewPane: null,
       gitPane: null,
@@ -2275,10 +2450,40 @@ export function mount(container, api, _options = {}) {
     return layoutEls;
   }
 
-  // 同步工具栏（路径、状态、三点菜单）
+  /**
+   * 切换主视图（文件 / Git 变更）——二选一，必有其一激活，不可都关。
+   * @description 手动切换后仅改 state.mainView 并重建主视图；mainView 不持久化，
+   *   每次重新打开面板从「文件」开始。
+   * @param {"files"|"git"} view 目标主视图
+   */
+  async function switchMainView(view) {
+    if (disposed || (view !== "files" && view !== "git")) return;
+    if (state.mainView === view) return;
+    state.mainView = view;
+    if (view === "files") {
+      // 离开 Git 变更视图：清空查看器状态，否则再切回时会残留上次打开的比对。
+      state.gitPreview = null;
+      state.gitSelected = null;
+    }
+    render();
+    // 首次进入 Git 变更视图且尚未拉取过状态时补齐数据。
+    if (view === "git" && !state.gitStatus) await refreshGitViewStatus();
+  }
+
+  /** 同步左侧入口栏选中态与运行中圆点。 */
+  function syncSidebar() {
+    if (!layoutEls) return;
+    if (layoutEls.fileViewBtn) layoutEls.fileViewBtn.classList.toggle("active", state.mainView === "files");
+    if (layoutEls.gitViewBtn) layoutEls.gitViewBtn.classList.toggle("active", state.mainView === "git");
+    if (layoutEls.runSideBtn) layoutEls.runSideBtn.classList.toggle("active", state.bottomView === "run");
+    if (layoutEls.terminalSideBtn) layoutEls.terminalSideBtn.classList.toggle("active", state.bottomView === "terminal");
+    if (layoutEls.runSideDot) layoutEls.runSideDot.hidden = runningCount() <= 0;
+  }
+
+  // 同步工具栏（路径、状态）
   function renderToolbar() {
     if (!layoutEls) return;
-    const { pathText, statusEl, menuWrap } = layoutEls;
+    const { pathText, statusEl } = layoutEls;
     const name = state.rootPath ? basename(state.rootPath) : "-";
     if (pathText.textContent !== name) pathText.textContent = name;
     if (pathText.title !== (state.rootPath || "")) pathText.title = state.rootPath || "";
@@ -2288,7 +2493,6 @@ export function mount(container, api, _options = {}) {
     } else {
       statusEl.hidden = true;
     }
-    syncViewMenu(menuWrap);
   }
 
   // 构建「差异 / 内容」分段控件（工具栏用，复用查看器分段控件的样式类）
@@ -2318,7 +2522,7 @@ export function mount(container, api, _options = {}) {
     if (!layoutEls || !layoutEls.gitViewSwitchWrap) return;
     const wrap = layoutEls.gitViewSwitchWrap;
     const gp = state.gitPreview;
-    if (!state.viewSettings.onlyGitChanges || !gp || !isRightPanelFullscreen()) {
+    if (state.mainView !== "git" || !gp || !isRightPanelFullscreen()) {
       if (wrap.firstChild) wrap.replaceChildren();
       wrap.hidden = true;
       return;
@@ -2334,12 +2538,13 @@ export function mount(container, api, _options = {}) {
     ensureLayout();
     renderToolbar();
     renderConfirmDialog();
-    // 工具栏运行控件（常驻工具栏，按识别结果与运行状态同步）。
+    // 运行控件（常驻工具栏，按识别结果与运行状态同步）。
     renderRunToolbarView();
-    // 运行面板挂在 layout 上（不随 mainView 重建），此处只同步其显隐，保证视图切换后仍正确。
-    refreshRunPaneVisibility();
-    // 底栏运行面板按钮（↑↓ 计数右侧）随运行集合与面板显隐同步。
-    syncRunBarBtn();
+    // 底部工具窗口 / 左侧入口栏挂在主体上（不随 mainView 重建），此处同步显隐与选中态。
+    refreshBottomVisibility();
+    syncSidebar();
+    // 窗口可见时让终端适配尺寸（视图切换可能改变容器宽度）。
+    fitTerminalPanel();
     const { mainView } = layoutEls;
     mainView.replaceChildren();
     // 视图切换会清空 mainView；旧底栏虽挂在 layout 上未丢失，但其中可能残留
@@ -2351,7 +2556,7 @@ export function mount(container, api, _options = {}) {
     layoutEls.gitPane = null;
     layoutEls.gitPreviewPane = null;
 
-    if (state.viewSettings.onlyGitChanges) {
+    if (state.mainView === "git") {
       buildGitView(mainView);
       renderGitPane();
       renderGitPreview();
@@ -2554,7 +2759,7 @@ export function mount(container, api, _options = {}) {
 
   // 局部：按当前视图刷新「正在使用的」查看器（复制按钮反馈用）
   function renderActiveViewer() {
-    if (state.viewSettings.onlyGitChanges) renderGitPreview();
+    if (state.mainView === "git") renderGitPreview();
     else renderPreview();
   }
 
@@ -2578,12 +2783,6 @@ export function mount(container, api, _options = {}) {
       if (contextMenu && !contextMenu.contains(e.target)) {
         closeContextMenu();
       }
-    }
-    if (!state.menuOpen) return;
-    const wrap = container.querySelector(".sfe-menu-wrap");
-    if (wrap && !wrap.contains(e.target)) {
-      state.menuOpen = false;
-      renderToolbar();
     }
   };
   document.addEventListener("click", closeMenuOnOutside, true);
@@ -2704,31 +2903,6 @@ export function mount(container, api, _options = {}) {
         refreshGitAll();
       }, 300);
     });
-
-    // 终端退出订阅：pty 的退出事件只在 window.snow 上暴露（插件 api 未提供事件）。
-    // 这是「用户在别处终止了进程」的兜底真值来源——按 ptyId 定位对应 run 并更新状态。
-    try {
-      const snow = typeof window !== "undefined" ? window.snow : null;
-      if (snow && typeof snow.onPtyExit === "function") {
-        unsubPtyExit = snow.onPtyExit((payload) => {
-          if (disposed || !payload) return;
-          const run = state.runs.find((r) => r && r.ptyId === payload.id);
-          // 未匹配到 run，或该 run 已由 startCommand 的订阅收尾：直接忽略，避免重复收尾。
-          if (!run || !isActiveStatus(run.status)) return;
-          const exitCode = typeof payload.exitCode === "number" ? payload.exitCode : null;
-          run.status = exitCode === null ? "stopped" : "exited";
-          run.exitCode = exitCode;
-          run.stop = null;
-          run.endTime = Date.now();
-          syncElapsedTimer();
-          syncRunPanelStatus();
-          syncRunToolbar();
-          syncRunBarBtn();
-        });
-      }
-    } catch (err) {
-      console.warn("[FileExplorer] 订阅终端退出事件失败", err);
-    }
   })();
 
   return () => {
@@ -2738,10 +2912,12 @@ export function mount(container, api, _options = {}) {
     if (gitDebounceTimer) clearTimeout(gitDebounceTimer);
     if (typeof unsubGit === "function") unsubGit();
     if (typeof unsubProjects === "function") unsubProjects();
-    if (typeof unsubPtyExit === "function") unsubPtyExit();
-    stopElapsedTimer();
     if (runToolbar && typeof runToolbar.dispose === "function") runToolbar.dispose();
     runToolbar = null;
+    if (terminalWindow && typeof terminalWindow.dispose === "function") terminalWindow.dispose();
+    terminalWindow = null;
+    if (runWindow && typeof runWindow.dispose === "function") runWindow.dispose();
+    runWindow = null;
     if (fullscreenObserver) fullscreenObserver.disconnect();
     if (tabPaneObserver) tabPaneObserver.disconnect();
     if (typeof window !== "undefined" && typeof window.removeEventListener === "function") {
@@ -2753,8 +2929,8 @@ export function mount(container, api, _options = {}) {
     }
     state.contextMenu = null;
     state.operationBusy = false;
-    // 卸载：终止仍在运行的全部进程，避免留下孤儿进程。
-    stopAllRuns({ silent: true });
+    // 卸载：终止仍在运行的全部终端进程，避免留下孤儿进程。
+    killAllTerminals();
     closeGitContextMenu(layoutEls && layoutEls.gitPane);
     container.replaceChildren();
   };

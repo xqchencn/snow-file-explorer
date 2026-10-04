@@ -4,6 +4,7 @@
  * 由构建脚本打包并压缩内联为根目录 index.css
  */
 
+@import "@xterm/xterm/css/xterm.css";
 @import "./styles/base.css";
 @import "./styles/tree.css";
 @import "./styles/viewer.css";

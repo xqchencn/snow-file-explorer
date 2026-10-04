@@ -31,7 +31,10 @@ import {
   ArrowDownUp,
   GitBranch,
   FolderOpen,
+  FolderGit2,
   Play,
+  RotateCw,
+  Package,
   Terminal,
   X,
   Eraser,
@@ -68,8 +71,12 @@ const ICON_MAP = {
   // 当前分支（同步栏分支下拉触发器）
   branch: GitBranch,
   folderOpen: FolderOpen,
-  // 项目运行：播放（启动命令）、终端（运行面板标题）、关闭（收起面板）、清空（输出区）
+  // Git 变更主视图入口（侧栏顶部，与「文件」二选一）
+  folderGit2: FolderGit2,
+  // 项目运行：播放（启动命令）、重新运行（Rerun）、配置图标（Package）、终端（运行面板标题）、关闭（收起面板）、清空（输出区）
   play: Play,
+  rerun: RotateCw,
+  package: Package,
   terminal: Terminal,
   close: X,
   eraser: Eraser,
@@ -77,7 +84,7 @@ const ICON_MAP = {
 
 /**
  * 创建动作图标 SVG 节点
- * @param {'chevronRight'|'chevronDown'|'refresh'|'sync'|'copy'|'check'|'eye'|'pencil'|'code'|'more'|'square'|'sparkles'|'gitCommit'|'minus'|'plus'|'undo'|'scissors'|'clipboardPaste'|'fileText'|'diff'|'unified'|'split'|'arrowUp'|'arrowDown'|'branch'|'folderOpen'|'play'|'terminal'|'close'|'eraser'} name 图标名称
+ * @param {'chevronRight'|'chevronDown'|'refresh'|'sync'|'copy'|'check'|'eye'|'pencil'|'code'|'more'|'square'|'sparkles'|'gitCommit'|'minus'|'plus'|'undo'|'scissors'|'clipboardPaste'|'fileText'|'diff'|'unified'|'split'|'arrowUp'|'arrowDown'|'branch'|'folderOpen'|'folderGit2'|'play'|'rerun'|'package'|'terminal'|'close'|'eraser'} name 图标名称
  * @param {number} [size=14] 图标大小
  * @returns {SVGSVGElement|HTMLElement}
  */

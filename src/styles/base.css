@@ -38,7 +38,7 @@
 
 .sfe-container {
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   height: 100%;
   min-height: 0;
   font-family: var(--app-font-family, var(--font-sans, inherit));
@@ -46,6 +46,100 @@
   color: var(--text-secondary);
   background: var(--bg-primary);
   user-select: none;
+}
+
+/* 主体（工具栏 / 主视图 / 底部工具窗口 / 底栏，纵排）：占据侧栏右侧剩余空间。 */
+.sfe-body {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* 最左侧竖排入口栏（对标 IDEA tool window 按钮）：文件（主视图）/ 运行 / 终端（底部工具窗口）。
+   它只是「入口」——点击决定底部显示哪个工具窗口；底部窗口的位置仍在底部。 */
+.sfe-sidebar {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+  width: 38px;
+  padding: 6px 0;
+  border-right: 1px solid var(--border-light);
+  background: var(--surface-island-muted, var(--bg-secondary));
+}
+
+.sfe-sidebar-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm, 4px);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.sfe-sidebar-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+/* 选中态：强调色图标 + 左缘竖条（IDEA 工具窗口同款选中语义） */
+.sfe-sidebar-btn.active {
+  color: var(--accent-color);
+  background: var(--bg-hover);
+}
+
+.sfe-sidebar-btn.active::before {
+  content: "";
+  position: absolute;
+  left: -6px;
+  top: 6px;
+  bottom: 6px;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--accent-color);
+}
+
+/* 运行中提示点：绝对定位于图标右上角（与底栏运行按钮的圆点一致） */
+.sfe-sidebar-dot {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent-green, var(--accent-color));
+}
+
+.sfe-sidebar-dot[hidden] {
+  display: none;
+}
+
+/* 侧栏顶部主视图入口组：文件 / Git 变更（二选一整组靠上）。 */
+.sfe-sidebar-top {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+
+/* 侧栏底部按钮组：运行 / 终端入口贴底（顶部主视图入口在顶部，中间留白）。
+   margin-top:auto 在 flex 纵排里把该组推到底部。 */
+.sfe-sidebar-bottom {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  margin-top: auto;
 }
 
 /* 顶部工具栏（项目路径与刷新按钮） */
@@ -91,30 +185,9 @@
 }
 
 /* 工具栏内隐藏元素：作者样式的 display 会覆盖 UA 的 [hidden]{display:none}，
-   必须显式声明，否则「该隐藏的却一直显示」（.sfe-toolbar-push / .sfe-toolbar-git-view 都依赖它） */
+   必须显式声明，否则「该隐藏的却一直显示」（.sfe-toolbar-git-view 依赖它） */
 .sfe-toolbar [hidden] {
   display: none;
-}
-
-.sfe-btn-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  padding: 0;
-  border: none;
-  border-radius: var(--radius-sm, 4px);
-  background: transparent;
-  color: var(--text-muted);
-  cursor: pointer;
-  flex-shrink: 0;
-  transition: background 0.1s ease, color 0.1s ease;
-}
-
-.sfe-btn-icon:hover {
-  background: var(--bg-hover);
-  color: var(--text-primary);
 }
 
 /* 主视图双栏 */
@@ -134,55 +207,6 @@
   flex-shrink: 0;
   border-top: 1px solid var(--border-light);
   background: var(--surface-island-muted, var(--bg-secondary));
-}
-
-/* 底栏运行面板按钮：排在 git 同步栏之后（order:1），紧挨 ↑↓ 计数（不再单独占一行）。
-   面板最小化后从这里恢复；有任务运行中时叠加小圆点，提示「后台仍在跑」。 */
-.sfe-run-bar-btn {
-  position: relative;
-  order: 1;
-  align-self: center;
-  flex-shrink: 0;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 20px;
-  margin: 0 8px 0 2px;
-  padding: 0;
-  border: none;
-  border-radius: var(--radius-sm, 4px);
-  background: transparent;
-  color: var(--text-muted);
-  cursor: pointer;
-}
-
-.sfe-run-bar-btn:hover {
-  background: var(--bg-hover);
-  color: var(--text-primary);
-}
-
-.sfe-run-bar-btn.active {
-  color: var(--accent-color);
-}
-
-.sfe-run-bar-btn[hidden] {
-  display: none;
-}
-
-/* 运行中提示点：绝对定位于图标右上角 */
-.sfe-run-bar-dot {
-  position: absolute;
-  top: 0;
-  right: 0;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--accent-green, var(--accent-color));
-}
-
-.sfe-run-bar-dot[hidden] {
-  display: none;
 }
 
 /* 空状态通配 */

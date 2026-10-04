@@ -104,27 +104,6 @@ export function removeRun(runs, id) {
 }
 
 /**
- * 创建「同命令启动去重」判定器（纯函数工厂，便于单测）。
- * @description 一次用户操作可能被派发成多次启动调用（双击 / 连点 / 事件重复 / 面板重复挂载），
- *   若每次都 startCommand 就会并发创建多个 pty，同一条命令被跑多遍（面板里命令与 exit 回显重复）。
- *   判定器按命令 id 记录最近一次「通过」的时间，窗口内的重复调用返回 true（调用方应跳过启动）；
- *   窗口之外的调用返回 false，视为明确的重新运行意图。
- *   注意：判定器是**有状态**的（内部 Map），但状态只与传入的 runId/now 有关，行为完全可预测、可单测。
- * @param {number} [windowMs=300] 去重窗口（毫秒）
- * @returns {(runId: string, now?: number) => boolean} 返回 true 表示本次启动应被跳过
- */
-export function createCommandDedup(windowMs = 300) {
-  const lastAt = new Map();
-  return function shouldSkipDuplicateStart(runId, now = Date.now()) {
-    if (!runId) return false;
-    const prev = lastAt.get(runId);
-    if (prev !== undefined && now - prev < windowMs) return true;
-    lastAt.set(runId, now);
-    return false;
-  };
-}
-
-/**
  * 取运行记录的展示标签（优先本地化 labelKey，否则回退原文）。
  * @param {Object} run 运行记录
  * @param {Function} [t] 翻译函数

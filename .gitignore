@@ -12,6 +12,7 @@ yarn-error.log*
 .pnpm-debug.log*
 .tmp-*
 .tmp*/
+tmp/
 
 # OS metadata
 .DS_Store

@@ -7,26 +7,24 @@ const STORAGE_KEY = "viewSettings";
 
 /**
  * 视图开关默认值
- * @type {{excludeMeta: boolean, respectGitignore: boolean, onlyGitChanges: boolean, javaPackageView: boolean}}
+ * @type {{excludeMeta: boolean, respectGitignore: boolean, javaPackageView: boolean}}
  */
 export const DEFAULT_VIEW_SETTINGS = Object.freeze({
   excludeMeta: true, // 排除 .git/.svn/.hg/CVS/.DS_Store/Thumbs.db
   respectGitignore: true, // 按 .gitignore 过滤
-  onlyGitChanges: false, // 仅显示 Git 变更视图（默认关闭）
   javaPackageView: true, // Java 项目默认使用紧凑包视图
 });
 
 /**
  * 归一化任意输入为合法设置对象（缺省即默认值）
  * @param {Object|null} saved 持久化数据
- * @returns {{excludeMeta: boolean, respectGitignore: boolean, onlyGitChanges: boolean, javaPackageView: boolean}}
+ * @returns {{excludeMeta: boolean, respectGitignore: boolean, javaPackageView: boolean}}
  */
 function normalize(saved) {
   const src = saved && typeof saved === "object" ? saved : {};
   return {
     excludeMeta: src.excludeMeta !== false,
     respectGitignore: src.respectGitignore !== false,
-    onlyGitChanges: src.onlyGitChanges === true,
     javaPackageView: src.javaPackageView !== false,
   };
 }
@@ -34,7 +32,7 @@ function normalize(saved) {
 /**
  * 读取视图开关设置（失败回退默认值）
  * @param {Object} api 宿主插件运行时 API
- * @returns {Promise<{excludeMeta: boolean, respectGitignore: boolean, onlyGitChanges: boolean, javaPackageView: boolean}>}
+ * @returns {Promise<{excludeMeta: boolean, respectGitignore: boolean, javaPackageView: boolean}>}
  */
 export async function loadViewSettings(api) {
   try {
@@ -51,7 +49,7 @@ export async function loadViewSettings(api) {
 /**
  * 保存视图开关设置（尽力而为，不抛异常）
  * @param {Object} api 宿主插件运行时 API
- * @param {{excludeMeta: boolean, respectGitignore: boolean, onlyGitChanges: boolean, javaPackageView: boolean}} settings 设置对象
+ * @param {{excludeMeta: boolean, respectGitignore: boolean, javaPackageView: boolean}} settings 设置对象
  */
 export function saveViewSettings(api, settings) {
   try {
