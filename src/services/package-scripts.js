@@ -1,0 +1,104 @@
+/**
+ * package.json scripts 行定位 (src/services/package-scripts.js)
+ *
+ * 职责：从 package.json 文本中找出 scripts 各条目所在的 1 基行号，
+ *   供预览区在对应行旁渲染「运行」图标（对标 IDEA editor gutter 的 npm script 运行按钮：
+ *   https://www.jetbrains.com/help/idea/installing-and-removing-external-software-using-node-package-manager.html
+ *   「click in the gutter next to the script, and select Run <script_name>」）。
+ *
+ * 设计要点（KISS / DRY / 可单测）：
+ *   - 纯函数，不触碰 DOM。
+ *   - 只返回 { name, line }：命令对象由调用方按 name 到已识别的命令列表里查（id = `npm:<name>`），
+ *     避免在此重复实现命令生成逻辑。
+ *   - 单行 JSON（整个 package.json 写在一行）无法在「某一行旁」放图标，返回空数组。
+ */
+
+/**
+ * 定位 scripts 对象的内容区间。
+ * @description 从 `"scripts"\s*:\s*\{` 之后开始做字符级深度扫描，跳过字符串内容，
+ *   返回与之匹配的 `}` 位置。
+ * @param {string} raw package.json 文本
+ * @returns {{start: number, end: number}|null} start 指向 `{` 之后，end 指向匹配的 `}`；未找到返回 null
+ */
+function scanScriptsBlock(raw) {
+  const match = /"scripts"\s*:\s*\{/.exec(raw);
+  if (!match) return null;
+  const start = match.index + match[0].length;
+  let depth = 1;
+  let inStr = false;
+  let esc = false;
+  for (let i = start; i < raw.length; i += 1) {
+    const ch = raw[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (ch === "\\") esc = true;
+      else if (ch === '"') inStr = false;
+      continue;
+    }
+    if (ch === '"') inStr = true;
+    else if (ch === "{") depth += 1;
+    else if (ch === "}") {
+      depth -= 1;
+      if (depth === 0) return { start, end: i };
+    }
+  }
+  return null;
+}
+
+/**
+ * 找出 package.json 中 scripts 各条目的 1 基行号。
+ * @param {string} text package.json 文本
+ * @returns {Array<{name: string, line: number}>} 按出现顺序返回；非 JSON / 无 scripts / 单行 JSON 返回 []
+ */
+export function findScriptLines(text) {
+  const raw = String(text == null ? "" : text);
+  if (!raw) return [];
+  const block = scanScriptsBlock(raw);
+  if (!block) return [];
+
+  // 定位 block.start 所在行与行内偏移
+  const lines = raw.split(/\r\n|\r|\n/);
+  let pos = 0;
+  let firstLine = 0;
+  let firstOffset = 0;
+  for (let i = 0; i < lines.length; i += 1) {
+    const len = lines[i].length;
+    if (pos + len >= block.start) {
+      firstLine = i;
+      firstOffset = block.start - pos;
+      break;
+    }
+    pos += len + 1; // +1 = 换行符
+  }
+
+  const out = [];
+  let depth = 0;
+  let inStr = false;
+  let esc = false;
+
+  for (let i = firstLine; i < lines.length; i += 1) {
+    const lineText = lines[i];
+    const from = i === firstLine ? firstOffset : 0;
+    // 行首位于 scripts 对象顶层（depth === 0）时，尝试匹配 `"name": "cmd"`
+    if (depth === 0) {
+      const matched = /^\s*"((?:[^"\\]|\\.)*)"\s*:\s*"(?:[^"\\]|\\.)*"\s*,?\s*$/.exec(lineText.slice(from));
+      if (matched) out.push({ name: matched[1].replace(/\\(.)/g, "$1"), line: i + 1 });
+    }
+    for (let j = from; j < lineText.length; j += 1) {
+      const ch = lineText[j];
+      if (inStr) {
+        if (esc) esc = false;
+        else if (ch === "\\") esc = true;
+        else if (ch === '"') inStr = false;
+        continue;
+      }
+      if (ch === '"') inStr = true;
+      else if (ch === "{") depth += 1;
+      else if (ch === "}") {
+        if (depth === 0) return out; // scripts 对象闭合
+        depth -= 1;
+      }
+    }
+  }
+  return out;
+}

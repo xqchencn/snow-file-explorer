@@ -124,11 +124,65 @@
   min-height: 0;
 }
 
-/* 底部状态栏容器：文件树与 Git 变更视图共用，常驻于 layout（不随主视图重建） */
+/* 底部状态栏容器：文件树与 Git 变更视图共用，常驻于 layout（不随主视图重建）。
+   单行布局：git 同步栏（分支 / 同步 / ↑↓ 计数）靠左，运行面板图标紧挨其后。 */
 .sfe-sync-bar {
+  position: relative;
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
+  align-items: center;
   flex-shrink: 0;
+  border-top: 1px solid var(--border-light);
+  background: var(--surface-island-muted, var(--bg-secondary));
+}
+
+/* 底栏运行面板按钮：排在 git 同步栏之后（order:1），紧挨 ↑↓ 计数（不再单独占一行）。
+   面板最小化后从这里恢复；有任务运行中时叠加小圆点，提示「后台仍在跑」。 */
+.sfe-run-bar-btn {
+  position: relative;
+  order: 1;
+  align-self: center;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 20px;
+  margin: 0 8px 0 2px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm, 4px);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.sfe-run-bar-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.sfe-run-bar-btn.active {
+  color: var(--accent-color);
+}
+
+.sfe-run-bar-btn[hidden] {
+  display: none;
+}
+
+/* 运行中提示点：绝对定位于图标右上角 */
+.sfe-run-bar-dot {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent-green, var(--accent-color));
+}
+
+.sfe-run-bar-dot[hidden] {
+  display: none;
 }
 
 /* 空状态通配 */

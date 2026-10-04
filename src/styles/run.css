@@ -1,0 +1,448 @@
+/* ==========================================================================
+   Snow App File Explorer - 项目运行样式 (styles/run.css)
+   100% 继承宿主主题变量，跟随明暗/自定义主题；不硬编码颜色。
+
+   两块 UI：
+     1. 工具栏运行控件（components/run-toolbar.js）——对标 IDEA 右上角 Run 控件
+     2. 运行面板（components/run-panel.js）——对标 IDEA 的 Run 工具窗口（多 tab）
+   ========================================================================== */
+
+/* ==========================================================================
+   1. 工具栏运行控件（右上角）——对标 IDEA 右上角 Run 控件
+   结构：主按钮（Run/Stop 二态 + 运行计数）+ 下拉触发器 + 命令下拉菜单
+   ========================================================================== */
+.sfe-run-toolbar {
+  display: inline-flex;
+  align-items: center;
+  position: relative;
+  flex-shrink: 0;
+}
+
+.sfe-run-toolbar[hidden] {
+  display: none;
+}
+
+/* 工具栏内的运行控件包裹层：与 .sfe-toolbar 的 [hidden] 规则保持一致 */
+.sfe-run-toolbar-wrap {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.sfe-toolbar .sfe-run-toolbar-wrap[hidden] {
+  display: none;
+}
+
+/* 主按钮：分段控件左半（圆角只在左侧） */
+.sfe-run-main {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  padding: 0 9px;
+  border: 1px solid var(--border-color, var(--border-light));
+  border-right: none;
+  border-radius: var(--radius-sm, 4px) 0 0 var(--radius-sm, 4px);
+  background: var(--bg-primary);
+  color: var(--accent-green, var(--accent-color));
+  font: inherit;
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.sfe-run-main:hover {
+  background: var(--bg-hover);
+}
+
+/* 运行中：主按钮变红并显示停止语义（点击即停止全部，天然防重复运行） */
+.sfe-run-main.running {
+  color: var(--accent-red, #d9534f);
+}
+
+.sfe-run-main-icon {
+  display: inline-flex;
+  align-items: center;
+}
+
+/* 运行计数：存在多个运行中的 run 时显示数量 */
+.sfe-run-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--accent-red, #d9534f);
+  color: var(--text-on-accent, #fff);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.sfe-run-count[hidden] {
+  display: none;
+}
+
+/* 下拉触发器：分段控件右半 */
+.sfe-run-dropdown-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--border-color, var(--border-light));
+  border-radius: 0 var(--radius-sm, 4px) var(--radius-sm, 4px) 0;
+  background: var(--bg-primary);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.sfe-run-dropdown-btn:hover,
+.sfe-run-dropdown-btn.active {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.sfe-run-dropdown-btn[hidden] {
+  display: none;
+}
+
+/* 命令下拉：绝对定位于控件下方，右对齐 */
+.sfe-run-dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 40;
+  min-width: 200px;
+  max-width: min(340px, calc(100vw - 8px));
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  border: 1px solid var(--border-color, var(--border-light));
+  border-radius: var(--radius-md, 6px);
+  background: var(--surface-island, var(--bg-secondary));
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+  backdrop-filter: blur(8px);
+}
+
+.sfe-run-dropdown[hidden] {
+  display: none;
+}
+
+.sfe-run-dropdown-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  padding: 6px 8px;
+  border: none;
+  border-radius: var(--radius-sm, 4px);
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sfe-run-dropdown-item:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.sfe-run-dropdown-label {
+  flex-shrink: 0;
+  font-weight: 600;
+}
+
+.sfe-run-dropdown-cmd {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+}
+
+/* ==========================================================================
+   2. 运行面板（停靠在主视图下方）——对标 IDEA 的 Run 工具窗口（多 tab）
+   结构：tab 栏（每个 run 一个 tab）→ 当前 tab 的 toolbar → 输出区
+   ========================================================================== */
+.sfe-run-pane {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  height: 260px;
+  min-height: 140px;
+  max-height: 55%;
+  overflow: hidden;
+  border-top: 1px solid var(--border-color, var(--border-light));
+  background: var(--surface-island, var(--bg-secondary));
+}
+
+/* 作者样式的 display 会覆盖 UA 的 [hidden]{display:none}，必须显式声明。 */
+.sfe-run-pane[hidden] {
+  display: none;
+}
+
+/* ── tab 栏：一次运行一个 tab（tab 名 = 运行配置名），右端收起按钮 ── */
+.sfe-run-tabs {
+  display: flex;
+  align-items: stretch;
+  flex-shrink: 0;
+  min-height: 30px;
+  border-bottom: 1px solid var(--border-light);
+  background: var(--surface-island-muted, var(--bg-secondary));
+}
+
+.sfe-run-tab-list {
+  display: flex;
+  align-items: stretch;
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.sfe-run-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 220px;
+  padding: 0 6px 0 10px;
+  border: none;
+  border-right: 1px solid var(--border-light);
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.sfe-run-tab:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+/* 激活 tab：底边用强调色标记（IDEA 同款选中语义） */
+.sfe-run-tab.active {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  box-shadow: inset 0 -2px 0 var(--accent-color);
+}
+
+/* 状态点：颜色随运行状态变化，一眼看出哪个 tab 在跑 / 已退出 */
+.sfe-run-tab-dot {
+  flex-shrink: 0;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-tertiary, var(--text-muted));
+}
+
+.sfe-run-tab.status-starting .sfe-run-tab-dot,
+.sfe-run-tab.status-running .sfe-run-tab-dot {
+  background: var(--accent-green, var(--accent-color));
+}
+
+.sfe-run-tab.status-exited .sfe-run-tab-dot {
+  background: var(--text-tertiary, var(--text-muted));
+}
+
+.sfe-run-tab.status-stopped .sfe-run-tab-dot {
+  background: var(--accent-amber, var(--bg-hover));
+}
+
+.sfe-run-tab.status-failed .sfe-run-tab-dot {
+  background: var(--accent-red, #d9534f);
+}
+
+.sfe-run-tab-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* tab 关闭按钮：悬停才显现（IDEA 同款克制） */
+.sfe-run-tab-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: var(--radius-sm, 4px);
+  color: var(--text-muted);
+  opacity: 0;
+  transition: opacity 0.12s ease, background 0.12s ease, color 0.12s ease;
+}
+
+.sfe-run-tab:hover .sfe-run-tab-close,
+.sfe-run-tab.active .sfe-run-tab-close {
+  opacity: 1;
+}
+
+.sfe-run-tab-close:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+/* 收起面板：不终止进程，仅隐藏（对齐 IDEA 关闭工具窗口） */
+.sfe-run-collapse {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  flex-shrink: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.sfe-run-collapse:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+/* ── 当前 tab 的 toolbar：徽章 + 命令 + 耗时 + 动作（Rerun/Stop/Clear） ── */
+.sfe-run-pane-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  padding: 5px 12px;
+  border-bottom: 1px solid var(--border-light);
+}
+
+.sfe-run-badge {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--bg-hover);
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+/* 运行中：宿主强调色（绿系语义由宿主 --accent-green 决定） */
+.sfe-run-badge.status-running,
+.sfe-run-badge.status-starting {
+  background: var(--accent-green, var(--accent-color));
+  color: var(--text-on-accent, #fff);
+}
+
+.sfe-run-badge.status-exited {
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+}
+
+.sfe-run-badge.status-stopped {
+  background: var(--accent-amber, var(--bg-hover));
+  color: var(--text-on-accent, #fff);
+}
+
+.sfe-run-badge.status-failed {
+  background: var(--accent-red, #d9534f);
+  color: var(--text-on-accent, #fff);
+}
+
+/* 当前执行的命令：等宽、可截断，明确「运行中」到底在跑什么 */
+.sfe-run-current {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+}
+
+.sfe-run-current[hidden] {
+  display: none;
+}
+
+/* 运行耗时：等宽、次要色，运行中实时刷新 */
+.sfe-run-elapsed {
+  flex-shrink: 0;
+  color: var(--text-tertiary, var(--text-muted));
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+}
+
+.sfe-run-elapsed[hidden] {
+  display: none;
+}
+
+/* 动作区：Rerun / Stop / Clear（靠右） */
+.sfe-run-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+.sfe-run-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border: 1px solid var(--border-color, var(--border-light));
+  border-radius: var(--radius-sm, 4px);
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+
+.sfe-run-action:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+  border-color: var(--accent-color);
+}
+
+.sfe-run-action[hidden] {
+  display: none;
+}
+
+/* ── 输出区：等宽、可滚动、可选中复制（面板整体 user-select:none，此处必须放开） ── */
+.sfe-run-output {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  padding: 8px 12px;
+  overflow: auto;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: var(--font-mono, monospace);
+  font-size: 11.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+  tab-size: 4;
+}
+
+/* 启动期占位提示：命令已发出但尚无输出时给出即时反馈（见 run-panel.js renderIdleHint）。
+   面板整体 user-select:none，输出区放开了选中；占位是状态文案而非输出，禁止选中。 */
+.sfe-run-output-hint {
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  user-select: none;
+  opacity: 0.85;
+}

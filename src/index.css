@@ -11,4 +11,5 @@
 @import "./styles/menu.css";
 @import "./styles/git-view.css";
 @import "./styles/diff.css";
+@import "./styles/run.css";
 @import "./styles/syntax.css";

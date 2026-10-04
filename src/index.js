@@ -68,6 +68,29 @@ import {
   abortCommitMessage,
 } from "./services/git-actions.js";
 import { parseUnifiedDiff } from "./services/diff.js";
+import { ensureProjectCommands, flattenCommands } from "./services/project-commands.js";
+import { startCommand, isTerminalAvailable } from "./services/terminal-runner.js";
+import {
+  createRun,
+  resetRun,
+  findRun,
+  removeRun,
+  isActiveStatus,
+  pickActiveRunId,
+  createCommandDedup,
+} from "./services/run-store.js";
+import { renderRunPanel, MAX_OUTPUT_CHARS, TRIM_THRESHOLD_CHARS } from "./components/run-panel.js";
+import { renderRunToolbar } from "./components/run-toolbar.js";
+
+/**
+ * 同一命令的启动去重判定器（模块级）。
+ * @description 为什么必须是模块级：插件面板可能被重复挂载（每次 mount 都有独立的 state.runs，
+ *   彼此不可见），单实例内的 status 守卫无法阻止同一命令被并发启动多次；双击 / 连点也会
+ *   连续进入 handleRunCommand。判定器按命令 id 记时间戳，窗口内的重复触发一律跳过，
+ *   确保「一次用户操作 = 一个进程」；窗口外的触发是明确的重新运行意图，不受影响。
+ *   判定逻辑见 run-store.js 的 createCommandDedup（纯函数，可单测）。
+ */
+const shouldSkipDuplicateStart = createCommandDedup(300);
 
 /**
  * 当前面板根目录的规范化键（小写 + 去尾部分隔符）
@@ -151,6 +174,17 @@ export function mount(container, api, _options = {}) {
   let gitDebounceTimer = null;
   let previewRequestId = 0;
   let saveRequestId = 0;
+  // 运行请求号：同一命令重跑时用它丢弃「已被取代」的启动结果，避免状态错乱与进程泄漏。
+  let runRequestId = 0;
+  // 运行面板控制器（renderRunPanel 的返回值）与终端事件解绑函数。
+  let runPanel = null;
+  // 工具栏运行控件控制器（renderRunToolbar 的返回值）。
+  let runToolbar = null;
+  // 运行耗时定时器：运行中每秒刷新一次耗时显示。
+  let elapsedTimer = null;
+  // 事件订阅：宿主 pty 退出事件只在 window.snow 上暴露（插件 api 未提供事件）。
+  // 用它兜住「用户在外部/宿主侧关闭进程」的情况，把状态置为真值。
+  let unsubPtyExit = null;
 
   // 翻译：api.t 不可用时回退到 defaultValue
   const t = (key, fallback, values) => {
@@ -164,6 +198,13 @@ export function mount(container, api, _options = {}) {
     rootPath: "",
     rootNodes: null,
     javaProject: null,
+    // 项目识别与运行：projectCommands 为懒加载的识别结果（含 rootPath 缓存键）；
+    // runs 为运行集合（IDEA 式多 tab：一条命令一个 tab），activeRunId 标记当前 tab。
+    projectCommands: null,
+    runs: [],
+    activeRunId: null,
+    // 运行面板是否已打开（用户点过「运行」或「在运行面板中运行」）；决定面板区块是否可见。
+    runPanelOpen: false,
     expanded: Object.create(null),
     selected: null,
     status: "",
@@ -239,6 +280,16 @@ export function mount(container, api, _options = {}) {
     state.rootPath = next;
     state.rootNodes = null;
     state.javaProject = null;
+    // 切换项目：先终止上一项目的全部运行进程（避免残留「看不见的进程」），再清空识别缓存与运行状态。
+    stopAllRuns({ silent: true });
+    state.projectCommands = null;
+    state.runs = [];
+    state.activeRunId = null;
+    state.runPanelOpen = false;
+    runPanel = null;
+    // 运行控件随新项目重建（命令集合必然变化）。
+    if (runToolbar && typeof runToolbar.dispose === "function") runToolbar.dispose();
+    runToolbar = null;
     state.expanded = Object.create(null);
     state.selected = null;
     state.contextMenu = null;
@@ -272,6 +323,8 @@ export function mount(container, api, _options = {}) {
     }
     await reloadGitignore();
     await refreshAll();
+    // 项目加载即识别一次（IDEA 同款：打开项目就能 Run，无需先点开某个文件）。
+    void ensureCommands();
   }
 
   // 刷新 Java 项目识别结果：与目录树并行，避免阻塞 Git 状态刷新。
@@ -1359,6 +1412,26 @@ export function mount(container, api, _options = {}) {
         disabled,
       );
       separator();
+      // 运行分组：命中几条命令就渲染几个菜单项（不折叠、不省略）。
+      // 识别结果懒加载：未就绪时显示占位并后台扫描，扫描完成后若菜单仍打开则重渲染。
+      const runCommands = flattenCommands(state.projectCommands);
+      if (runCommands.length) {
+        for (const command of runCommands) {
+          const label = command.labelKey ? t(command.labelKey, command.labelFallback) : command.labelFallback;
+          addItem(`${t("run.menuRun", "运行")} · ${label}`, () => {
+            closeContextMenu();
+            handleRunCommand(command);
+          }, disabled);
+        }
+      } else if (state.projectCommands) {
+        // 已扫描完成但无命令：展示禁用占位，不再重试（否则重渲染会无限触发扫描）。
+        addItem(t("run.noCommands", "未发现可运行的命令"), () => {}, true);
+      } else {
+        // 尚未扫描：占位 + 后台懒加载；完成后 ensureCommands 会在菜单仍打开时重渲染。
+        addItem(t("run.menuRunning", "运行（识别中…）"), () => {}, true);
+        void ensureCommands();
+      }
+      separator();
       addItem(t("action.rename", "重命名"), () => beginRename(entry), disabled);
       addItem(t("action.delete", "删除"), () => handleDelete(entry), disabled);
       separator();
@@ -1387,6 +1460,405 @@ export function mount(container, api, _options = {}) {
   function handleRefresh() {
     closeContextMenu();
     refreshAll();
+  }
+
+  // ------------------------------------------------------------------
+  // 5.0 项目运行：识别（懒加载）→ 右键 / 工具栏启动 → IDEA 式多 tab 输出 + 真实退出状态
+  // ------------------------------------------------------------------
+
+  /** 进行中的 run 数量（含启动中），工具栏主按钮与计时器据此切换。 */
+  function runningCount() {
+    return state.runs.filter((run) => isActiveStatus(run.status)).length;
+  }
+
+  /**
+   * 终止单个运行进程。
+   * @description stop() 会触发 startCommand 的 onExit（stopped=true），状态随之落到「已停止」。
+   * @param {string} id 运行 id
+   * @returns {boolean} 是否确实停止了进行中的进程
+   */
+  function stopRunById(id) {
+    const run = findRun(state.runs, id);
+    if (!run || !isActiveStatus(run.status)) return false;
+    try {
+      if (typeof run.stop === "function") run.stop();
+    } catch {
+      // 忽略：进程可能已自然退出
+    }
+    run.status = "stopped";
+    run.exitCode = null;
+    run.stop = null;
+    run.endTime = Date.now();
+    syncRunBarBtn();
+    return true;
+  }
+
+  /**
+   * 终止全部运行进程（切换项目 / 卸载 / 停止全部）。
+   * @param {{silent?: boolean}} [opts] silent 用于不需要立即重绘面板的场景
+   * @returns {boolean} 是否停止了至少一个进程
+   */
+  function stopAllRuns({ silent = false } = {}) {
+    let changed = false;
+    for (const run of state.runs) {
+      if (!isActiveStatus(run.status)) continue;
+      try {
+        if (typeof run.stop === "function") run.stop();
+      } catch {
+        // 忽略：进程可能已自然退出
+      }
+      run.status = "stopped";
+      run.exitCode = null;
+      run.stop = null;
+      run.endTime = Date.now();
+      changed = true;
+    }
+    if (changed) {
+      syncElapsedTimer();
+      if (!silent) {
+        syncRunPanelStatus();
+        refreshRunPaneVisibility();
+      }
+      syncRunBarBtn();
+      syncRunToolbar();
+    }
+    return changed;
+  }
+
+  /**
+   * 收起 / 最小化运行面板。
+   * @description 对齐 IDEA：关闭工具窗口不终止进程，仅隐藏；运行与输出保留，再次运行会重新展开。
+   *   底栏的运行面板图标可随时把面板拉回来。
+   */
+  function handleMinimizeRunPanel() {
+    state.runPanelOpen = false;
+    refreshRunPaneVisibility();
+    syncRunBarBtn();
+  }
+
+  /**
+   * 关闭运行面板（清空全部运行记录）。
+   * @description 仅在没有任何任务运行时允许；仍有任务运行时退化为「最小化」，绝不静默杀进程。
+   */
+  function handleCloseAllRuns() {
+    if (state.runs.some((run) => isActiveStatus(run.status))) {
+      handleMinimizeRunPanel();
+      return;
+    }
+    state.runs = [];
+    state.activeRunId = null;
+    state.runPanelOpen = false;
+    afterRunsChanged();
+  }
+
+  /** 底栏运行面板按钮：最小化时点击拉起；可见时点击最小化。 */
+  function toggleRunPanelFromBar() {
+    if (state.runPanelOpen) handleMinimizeRunPanel();
+    else {
+      state.runPanelOpen = true;
+      refreshRunPaneVisibility();
+      syncRunBarBtn();
+    }
+  }
+
+  /**
+   * 同步底栏运行面板按钮：有运行记录时显示（面板最小化后是唯一的恢复入口）；
+   * 有任务运行中时叠加一个小圆点，提示「后台仍在跑」。
+   */
+  function syncRunBarBtn() {
+    if (disposed || !layoutEls || !layoutEls.runBarBtn) return;
+    const btn = layoutEls.runBarBtn;
+    const hasRuns = state.runs.length > 0;
+    btn.hidden = !hasRuns;
+    btn.classList.toggle("active", state.runPanelOpen === true);
+    btn.title = state.runPanelOpen
+      ? t("run.minimize", "最小化运行面板")
+      : t("run.showPanel", "显示运行面板");
+    btn.setAttribute("aria-label", btn.title);
+    const dot = layoutEls.runBarDot;
+    if (dot) dot.hidden = runningCount() <= 0;
+  }
+
+  /** 运行集合变化后的统一收尾：面板显隐 / 重建、工具栏同步、计时器同步。 */
+  function afterRunsChanged() {
+    state.runPanelOpen = state.runs.length > 0;
+    if (state.runs.length > 0) {
+      renderRunPanelView();
+    } else if (layoutEls && layoutEls.runPane) {
+      runPanel = null;
+      layoutEls.runPane.replaceChildren();
+    }
+    refreshRunPaneVisibility();
+    syncRunBarBtn();
+    syncRunToolbar();
+    syncElapsedTimer();
+  }
+
+  /** 切换激活 tab（IDEA 里点 tab 切换输出视图）。 */
+  function handleSelectRun(id) {
+    if (disposed || !findRun(state.runs, id) || state.activeRunId === id) return;
+    // 切走前把当前输出区的滚动位置写回，切回时可恢复。
+    if (runPanel && typeof runPanel.captureScroll === "function") runPanel.captureScroll();
+    state.activeRunId = id;
+    renderRunPanelView();
+    syncRunToolbar();
+  }
+
+  /** 停止某个 tab 的运行（IDEA 的 Stop）。 */
+  function handleStopRun(id) {
+    if (disposed || !stopRunById(id)) return;
+    syncElapsedTimer();
+    syncRunPanelStatus();
+    syncRunToolbar();
+    syncRunBarBtn();
+  }
+
+  /** 清空某个 tab 的输出（IDEA console 的 Clear All）。 */
+  function handleClearRun(id) {
+    const run = findRun(state.runs, id);
+    if (!run) return;
+    run.output = "";
+    if (runPanel) runPanel.rebuild();
+  }
+
+  /**
+   * 关闭某个 tab（IDEA 的 Close：关闭标签页并终止进程）。
+   * @description 运行中先停止再移除，避免留下「看不见的进程」。
+   */
+  function handleCloseRun(id) {
+    const run = findRun(state.runs, id);
+    if (!run) return;
+    stopRunById(id);
+    removeRun(state.runs, id);
+    state.activeRunId = pickActiveRunId(state.runs, state.activeRunId === id ? null : state.activeRunId);
+    afterRunsChanged();
+  }
+
+  /**
+   * 懒加载项目识别：结果缓存进 state.projectCommands。
+   * @description 首次在项目加载时触发（与 IDEA 一致：项目一打开就能 Run）。
+   *   扫描完成后同步运行控件；识别结果不影响运行面板（面板只展示运行，不展示命令）。
+   * @returns {Promise<Object|null>}
+   */
+  async function ensureCommands() {
+    if (disposed || !state.rootPath) return null;
+    const rootPath = state.rootPath;
+    const before = state.projectCommands;
+    const result = await ensureProjectCommands(state, rootPath);
+    if (disposed || pathKey(rootPath) !== pathKey(state.rootPath)) return result;
+    // 命中缓存（引用未变）：不重渲染，避免打断右键菜单重命名等交互。
+    if (result === before) return result;
+    renderRunToolbarView();
+    // package.json 预览：命令就绪后重渲染，补上 gutter ▶（首次打开时命令可能尚未扫完）。
+    if (state.preview && state.preview.name === "package.json") renderPreview();
+    // 菜单仍打开且未处于重命名输入态时才重渲染（重命名中重建会清空输入框）。
+    if (state.contextMenu && state.contextMenu.entry && !state.contextMenu.renaming) renderContextMenu();
+    return result;
+  }
+
+  /** 运行面板可见性：用户未收起且存在运行记录时才占位（IDEA：Run 窗口只在运行后出现）。 */
+  function refreshRunPaneVisibility() {
+    if (!layoutEls || !layoutEls.runPane) return;
+    layoutEls.runPane.hidden = !(state.runPanelOpen === true && state.runs.length > 0);
+  }
+
+  /** 局部刷新运行面板状态（不重建输出区，避免打断滚动与选区）。 */
+  function syncRunPanelStatus() {
+    if (runPanel && typeof runPanel.syncStatus === "function") runPanel.syncStatus();
+  }
+
+  /** 同步工具栏运行控件（Run/Stop 按钮、命令下拉与运行计数）。 */
+  function syncRunToolbar() {
+    if (runToolbar && typeof runToolbar.sync === "function") runToolbar.sync();
+  }
+
+  /**
+   * 渲染 / 同步工具栏运行控件。
+   * @description 控制器只创建一次并复用（避免重复注册 document 监听）；骨架重建后自动重建。
+   */
+  function renderRunToolbarView() {
+    if (disposed || !layoutEls || !layoutEls.runToolbarWrap) return;
+    const wrap = layoutEls.runToolbarWrap;
+    // 骨架被重建（wrap 变空）时，旧控制器绑定的 DOM 已脱离文档，需重建。
+    if (runToolbar && wrap.childElementCount > 0) {
+      runToolbar.sync();
+      return;
+    }
+    if (runToolbar && typeof runToolbar.dispose === "function") runToolbar.dispose();
+    runToolbar = renderRunToolbar(wrap, {
+      t,
+      getState: () => ({
+        commands: flattenCommands(state.projectCommands),
+        // 识别完成（无论是否命中生态）才算 ready，避免未扫描时误显示按钮。
+        ready: state.projectCommands !== null,
+        runningCount: runningCount(),
+      }),
+      onRun: handleRunCommand,
+      onStopAll: () => stopAllRuns(),
+    });
+  }
+
+  /** 有进行中的运行时启动每秒耗时刷新；全部结束则清除。 */
+  function syncElapsedTimer() {
+    if (runningCount() > 0) startElapsedTimer();
+    else stopElapsedTimer();
+  }
+
+  /** 运行中每秒刷新一次耗时显示（面板重建后定时器由调用方重建，避免泄漏）。 */
+  function startElapsedTimer() {
+    if (elapsedTimer) return;
+    elapsedTimer = setInterval(() => {
+      if (disposed) return;
+      syncRunPanelStatus();
+    }, 1000);
+  }
+
+  function stopElapsedTimer() {
+    if (elapsedTimer) {
+      clearInterval(elapsedTimer);
+      elapsedTimer = null;
+    }
+  }
+
+  /** 渲染运行面板（IDEA 式 tabs：每个 run 一个 tab，无运行时不占位）。 */
+  function renderRunPanelView() {
+    if (disposed || !layoutEls || !layoutEls.runPane) return;
+    if (!state.runs.length) {
+      runPanel = null;
+      layoutEls.runPane.replaceChildren();
+      refreshRunPaneVisibility();
+      return;
+    }
+    runPanel = renderRunPanel(layoutEls.runPane, {
+      t,
+      getRuns: () => state.runs,
+      getActiveId: () => state.activeRunId,
+      onSelectTab: handleSelectRun,
+      onRerun: handleRerunCommand,
+      onStop: handleStopRun,
+      onClear: handleClearRun,
+      onClose: handleCloseRun,
+      onMinimize: handleMinimizeRunPanel,
+      onCloseAll: handleCloseAllRuns,
+    });
+    refreshRunPaneVisibility();
+  }
+
+  /**
+   * 一键运行一条命令。
+   * @description 同一命令复用同一个 tab（IDEA：Rerun 复用同一 tab）；不同命令并行成多个 tab。
+   *   已在运行的同一命令先停掉再重跑，天然防重复进程。
+   * @param {{id?: string, cmd: string, labelFallback?: string, labelKey?: string|null}} command 命令对象
+   */
+  async function handleRunCommand(command) {
+    if (disposed || !command || !command.cmd) return;
+    if (!isTerminalAvailable()) {
+      setOperationStatus(false, t("run.terminalUnavailable", "当前宿主未提供终端能力"));
+      return;
+    }
+
+    const runId = command.id || command.cmd;
+    // 跨实例 / 双击连点去重：同一命令在窗口内的重复触发一律跳过（见 shouldSkipDuplicateStart）。
+    if (shouldSkipDuplicateStart(runId)) return;
+
+    let run = findRun(state.runs, runId);
+    // 同一命令已在运行（starting / running）：幂等忽略本次触发（覆盖窗口之外的连点）。
+    if (run && isActiveStatus(run.status)) return;
+    if (run) {
+      // 已结束（exited / stopped / failed）：视为重新运行，复位后复用同一 tab（IDEA：Rerun）。
+      resetRun(run);
+    } else {
+      run = createRun({
+        id: runId,
+        cmd: command.cmd,
+        labelKey: command.labelKey,
+        labelFallback: command.labelFallback,
+      });
+      state.runs.push(run);
+    }
+    state.activeRunId = run.id;
+    state.runPanelOpen = true;
+
+    // 本次启动令牌：同命令重跑或 tab 被关闭后，旧的启动结果必须作废并回收进程。
+    const token = ++runRequestId;
+    run.startToken = token;
+
+    // 立即渲染（用户点运行必须马上看到「启动中」的 tab 与输出区）。
+    renderRunPanelView();
+    syncRunBarBtn();
+    syncElapsedTimer();
+    syncRunToolbar();
+
+    const result = await startCommand(command.cmd, {
+      cwd: state.rootPath,
+      onData: (text) => {
+        if (disposed || run.startToken !== token) return;
+        // 与面板输出区共用同一上限与裁剪阈值：run.output 只保留尾部片段。
+        // 为什么必须裁：切换 tab 时 rebuild() 会用它做 output.textContent = full 全量重建 DOM，
+        //   若这里无界增长（长跑进程可达数 MB），每次切 tab 都要重新解析整块文本，越切越卡。
+        // 为什么用 TRIM_THRESHOLD_CHARS 而非每次比 MAX：每次追加都 slice 是 O(n)，会退化成 O(n²)；
+        //   累积到阈值再裁一次，把裁剪成本摊销到接近 O(1)/字符。
+        run.output += text;
+        if (run.output.length > TRIM_THRESHOLD_CHARS) {
+          run.output = run.output.slice(run.output.length - MAX_OUTPUT_CHARS);
+        }
+        if (runPanel && typeof runPanel.appendOutput === "function") runPanel.appendOutput(run.id, text);
+      },
+      onExit: (exitCode, stopped) => {
+        if (disposed || run.startToken !== token) return;
+        run.status = stopped ? "stopped" : "exited";
+        run.exitCode = exitCode;
+        run.stop = null;
+        run.endTime = Date.now();
+        syncElapsedTimer();
+        syncRunPanelStatus();
+        syncRunToolbar();
+        syncRunBarBtn();
+      },
+    });
+
+    // 已被重跑取代 / tab 已关闭 / 插件卸载：回收本次进程，避免孤儿进程，也不覆盖新状态。
+    const superseded = run.startToken !== token || !state.runs.includes(run);
+    if (disposed || superseded) {
+      try {
+        if (typeof result.stop === "function") result.stop();
+      } catch {
+        // 忽略
+      }
+      return;
+    }
+    if (!result.ok) {
+      run.status = "failed";
+      run.exitCode = null;
+      run.stop = null;
+      run.endTime = Date.now();
+      const message = t("run.startFailed", "启动失败：{{error}}", { error: result.error || "" });
+      run.output += message + "\n";
+      if (runPanel && typeof runPanel.appendOutput === "function") runPanel.appendOutput(run.id, message + "\n");
+      setOperationStatus(false, result.error || t("run.startFailed", "启动失败"));
+      syncElapsedTimer();
+      syncRunPanelStatus();
+      syncRunToolbar();
+      syncRunBarBtn();
+      return;
+    }
+    run.status = "running";
+    run.stop = typeof result.stop === "function" ? result.stop : null;
+    run.ptyId = result.ptyId || null;
+    syncElapsedTimer();
+    syncRunPanelStatus();
+    syncRunToolbar();
+    syncRunBarBtn();
+  }
+
+  /**
+   * 重新运行某个 tab（IDEA 的 Rerun）：用同一条命令新建进程并复用同一 tab。
+   * @param {string} id 运行 id
+   */
+  function handleRerunCommand(id) {
+    const run = findRun(state.runs, id);
+    if (disposed || !run) return;
+    handleRunCommand({ id: run.id, cmd: run.cmd, labelKey: run.labelKey, labelFallback: run.labelFallback });
   }
 
   // 文件树空白区右键：命中具体条目时由行自身处理并 stopPropagation（见 tree-view.js），
@@ -1483,6 +1955,9 @@ export function mount(container, api, _options = {}) {
     // 让出当前任务，使浏览器先把「正在读取」绘制出来，再执行可能阻塞的全屏联动；
     // 否则全屏触发与 loading 渲染同处一个同步任务，绘制被推迟，点击后仍会先卡一下。
     await waitForNextFrame();
+
+    // 懒加载项目识别：后台扫描，不阻塞文件读取与 loading 渲染（结果用于右键「运行」菜单与运行面板）。
+    void ensureCommands();
 
     // 智能联动全屏：非全屏模式下点击具体文件自动全屏展开代码大视野
     if (!isRightPanelFullscreen()) {
@@ -1735,6 +2210,12 @@ export function mount(container, api, _options = {}) {
     });
     actions.appendChild(refreshBtn);
 
+    // 运行控件：对标 IDEA 右上角 Run（▶ Run / ■ Stop 二态 + 命令下拉）。
+    // 容器固定常驻，内容由 renderRunToolbar 按识别结果与运行状态同步，避免重建工具栏。
+    const runToolbarWrap = el("div", "sfe-run-toolbar-wrap");
+    runToolbarWrap.hidden = true;
+    actions.appendChild(runToolbarWrap);
+
     // 「差异 / 内容」切换容器：紧邻刷新按钮，仅在 Git 变更视图且已打开文件时显示
     // （容器固定，内容由 renderGitViewSwitchInToolbar 按需同步，避免重建工具栏）
     const gitViewSwitchWrap = el("div", "sfe-toolbar-git-view");
@@ -1750,9 +2231,25 @@ export function mount(container, api, _options = {}) {
     layout.appendChild(toolbar);
     const mainView = el("div", "sfe-main-view");
     layout.appendChild(mainView);
-    // 底部状态栏（分支切换 + Git 同步 + ↑↓ 计数）：文件树与 Git 变更视图共用，
+    // 项目运行面板：停靠在主视图下方（不随 mainView 重建而消失），默认隐藏，
+    // 由 refreshRunPaneVisibility 按「是否打开 + 是否有命令」控制显隐。
+    const runPane = el("div", "sfe-run-pane");
+    runPane.hidden = true;
+    layout.appendChild(runPane);
+    // 底栏状态栏（运行面板按钮 + 分支切换 + Git 同步 + ↑↓ 计数）：文件树与 Git 变更视图共用，
     // 挂在 layout 上（不随 mainView 重建而消失），常驻可见。
     const syncBar = el("div", "sfe-sync-bar");
+    // 运行面板按钮：与 git 同步栏同一行，排在 ↑↓ 计数之后（CSS order:1）紧挨着，
+    // 不单独占一行。面板最小化后从这里恢复；有任务运行中时显示计数点。
+    const runBarBtn = el("button", "sfe-run-bar-btn");
+    runBarBtn.type = "button";
+    runBarBtn.hidden = true;
+    runBarBtn.appendChild(createActionIcon("terminal", 13));
+    const runBarDot = el("span", "sfe-run-bar-dot");
+    runBarDot.hidden = true;
+    runBarBtn.appendChild(runBarDot);
+    runBarBtn.addEventListener("click", toggleRunPanelFromBar);
+    syncBar.appendChild(runBarBtn);
     layout.appendChild(syncBar);
     root.appendChild(layout);
     container.appendChild(root);
@@ -1761,10 +2258,14 @@ export function mount(container, api, _options = {}) {
       root,
       layout,
       mainView,
+      runPane,
       syncBar,
+      runBarBtn,
+      runBarDot,
       pathText,
       statusEl,
       gitViewSwitchWrap,
+      runToolbarWrap,
       menuWrap,
       treePane: null,
       previewPane: null,
@@ -1833,6 +2334,12 @@ export function mount(container, api, _options = {}) {
     ensureLayout();
     renderToolbar();
     renderConfirmDialog();
+    // 工具栏运行控件（常驻工具栏，按识别结果与运行状态同步）。
+    renderRunToolbarView();
+    // 运行面板挂在 layout 上（不随 mainView 重建），此处只同步其显隐，保证视图切换后仍正确。
+    refreshRunPaneVisibility();
+    // 底栏运行面板按钮（↑↓ 计数右侧）随运行集合与面板显隐同步。
+    syncRunBarBtn();
     const { mainView } = layoutEls;
     mainView.replaceChildren();
     // 视图切换会清空 mainView；旧底栏虽挂在 layout 上未丢失，但其中可能残留
@@ -1937,6 +2444,9 @@ export function mount(container, api, _options = {}) {
       onCopyPath: handlePreviewCopyPath,
       onCopyRelativePath: handlePreviewCopyRelativePath,
       onRefresh: handlePreviewRefresh,
+      // 运行入口（预览 package.json 时的 gutter ▶ 与右键「运行」分组共用同一份命令列表）
+      runCommands: () => flattenCommands(state.projectCommands),
+      onRunCommand: handleRunCommand,
       editable: state.preview.editable === true,
       saving: state.preview.saveState === "saving",
       t,
@@ -2158,6 +2668,8 @@ export function mount(container, api, _options = {}) {
     // 初始渲染只建立骨架；统一刷新会先完成 Java 项目识别，再加载根目录。
     render();
     await refreshAll();
+    // 项目加载即识别一次（IDEA 同款：打开项目就能 Run，无需先点开某个文件）。
+    void ensureCommands();
     if (disposed) return;
     // 跟随宿主项目切换：订阅 projects 域（live），activeDirectory 变化时全量切换到新项目。
     // 与宿主「打开文件夹」按钮天然一致，插件不自建多开与目录选择。
@@ -2192,6 +2704,31 @@ export function mount(container, api, _options = {}) {
         refreshGitAll();
       }, 300);
     });
+
+    // 终端退出订阅：pty 的退出事件只在 window.snow 上暴露（插件 api 未提供事件）。
+    // 这是「用户在别处终止了进程」的兜底真值来源——按 ptyId 定位对应 run 并更新状态。
+    try {
+      const snow = typeof window !== "undefined" ? window.snow : null;
+      if (snow && typeof snow.onPtyExit === "function") {
+        unsubPtyExit = snow.onPtyExit((payload) => {
+          if (disposed || !payload) return;
+          const run = state.runs.find((r) => r && r.ptyId === payload.id);
+          // 未匹配到 run，或该 run 已由 startCommand 的订阅收尾：直接忽略，避免重复收尾。
+          if (!run || !isActiveStatus(run.status)) return;
+          const exitCode = typeof payload.exitCode === "number" ? payload.exitCode : null;
+          run.status = exitCode === null ? "stopped" : "exited";
+          run.exitCode = exitCode;
+          run.stop = null;
+          run.endTime = Date.now();
+          syncElapsedTimer();
+          syncRunPanelStatus();
+          syncRunToolbar();
+          syncRunBarBtn();
+        });
+      }
+    } catch (err) {
+      console.warn("[FileExplorer] 订阅终端退出事件失败", err);
+    }
   })();
 
   return () => {
@@ -2201,6 +2738,10 @@ export function mount(container, api, _options = {}) {
     if (gitDebounceTimer) clearTimeout(gitDebounceTimer);
     if (typeof unsubGit === "function") unsubGit();
     if (typeof unsubProjects === "function") unsubProjects();
+    if (typeof unsubPtyExit === "function") unsubPtyExit();
+    stopElapsedTimer();
+    if (runToolbar && typeof runToolbar.dispose === "function") runToolbar.dispose();
+    runToolbar = null;
     if (fullscreenObserver) fullscreenObserver.disconnect();
     if (tabPaneObserver) tabPaneObserver.disconnect();
     if (typeof window !== "undefined" && typeof window.removeEventListener === "function") {
@@ -2212,6 +2753,8 @@ export function mount(container, api, _options = {}) {
     }
     state.contextMenu = null;
     state.operationBusy = false;
+    // 卸载：终止仍在运行的全部进程，避免留下孤儿进程。
+    stopAllRuns({ silent: true });
     closeGitContextMenu(layoutEls && layoutEls.gitPane);
     container.replaceChildren();
   };

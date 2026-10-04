@@ -34,7 +34,7 @@
   },
   "styles": ["index.css"],
   "privacy": {
-    "scopes": ["filesystem"],
-    "note": "允许在用户明确操作后通过 filesystem scope 编辑和保存文件、重命名以及删除文件和目录。"
+    "scopes": ["filesystem", "terminal"],
+    "note": "允许在用户明确操作后通过 filesystem scope 编辑和保存文件、重命名以及删除文件和目录；通过 terminal scope 在用户点击运行命令后启动无头终端进程并读取其输出与退出状态。"
   }
 }

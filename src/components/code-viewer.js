@@ -12,10 +12,52 @@ import { createActionIcon } from "../icons/action-icons.js";
 import { resolveMarkdownAssetPath, resolveProxiedImageSrc } from "../services/markdown-asset.js";
 import { extname } from "../services/file-service.js";
 import { renderDiffView } from "./diff-view.js";
+import { findScriptLines } from "../services/package-scripts.js";
 
-const NL = String.fromCharCode(10);
 const VIEWER_CONTEXT_MENU_BINDING = "__sfeViewerContextMenuBinding";
 const VIEWER_CONTEXT_MENU_CLEANUP = "__sfeViewerContextMenuCleanup";
+
+/**
+ * 构造行内「运行」按钮（对标 IDEA editor gutter 的 npm script 运行图标）。
+ * @param {Object} command 命令对象（{ id, cmd, labelFallback }）
+ * @param {Function} onRunCommand 运行回调 (command) => void
+ * @param {Function} t 翻译函数
+ * @returns {HTMLElement}
+ */
+function createGutterRunButton(command, onRunCommand, t) {
+  const btn = el("button", "sfe-file-viewer-gutter-run");
+  btn.type = "button";
+  btn.title = `${t("run.gutterRun", "运行")}: ${command.cmd || command.labelFallback || ""}`;
+  btn.setAttribute("aria-label", btn.title);
+  btn.appendChild(createActionIcon("play", 10));
+  btn.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (typeof onRunCommand === "function") onRunCommand(command);
+  });
+  return btn;
+}
+
+/**
+ * 若当前预览是 package.json，返回「行号（1 基）→ 命令」映射，供行号槽渲染 ▶。
+ * @description 命令从调用方注入的 runCommands() 里按 `npm:<scriptName>` 查，
+ *   与工具栏/右键菜单共用同一份识别结果（DRY）。
+ * @param {Object|null} preview 预览状态
+ * @param {Function} [runCommands] 读取扁平命令列表
+ * @returns {Map<number, Object>}
+ */
+function buildScriptCommandMap(preview, runCommands) {
+  const map = new Map();
+  if (!preview || preview.kind !== "text" || preview.name !== "package.json") return map;
+  if (typeof runCommands !== "function") return map;
+  const commands = runCommands();
+  if (!Array.isArray(commands) || !commands.length) return map;
+  for (const { name, line } of findScriptLines(preview.text)) {
+    const command = commands.find((c) => c && c.id === `npm:${name}`);
+    if (command) map.set(line, command);
+  }
+  return map;
+}
 
 /** 关闭预览区右键菜单及 document 级监听，避免预览重绘后菜单残留。 */
 function closeViewerContextMenu(bodyEl) {
@@ -109,7 +151,7 @@ function replaceViewerSelection(selection, text) {
 /** 构建预览区菜单；粘贴项只有剪贴板确实有文本时才启用。 */
 function openViewerContextMenu(bodyEl, x, y, target, opts) {
   clearViewerContextMenu(bodyEl);
-  const { editable, onRefresh, onRevealFile, onCopyPath, onCopyRelativePath, t } = opts;
+  const { editable, onRefresh, onRevealFile, onCopyPath, onCopyRelativePath, runCommands, onRunCommand, t } = opts;
   const selection = getViewerSelection(target);
   const hasFileActions =
     typeof onRevealFile === "function" ||
@@ -118,7 +160,9 @@ function openViewerContextMenu(bodyEl, x, y, target, opts) {
   const isEditableText = editable === true && !!selection.target;
   // 刷新：重新从磁盘读取当前文件，仅只读态提供（编辑态会丢弃未保存修改，必须禁用）。
   const canRefresh = editable !== true && typeof onRefresh === "function";
-  if (!selection.text && !hasFileActions && !isEditableText && !canRefresh) return;
+  // 运行分组：注入命令来源后才出现（预览 package.json 等场景）。
+  const canRun = typeof runCommands === "function" && typeof onRunCommand === "function";
+  if (!selection.text && !hasFileActions && !isEditableText && !canRefresh && !canRun) return;
 
   const doc = bodyEl.ownerDocument;
   const menu = el("div", "sfe-context-menu sfe-viewer-context-menu");
@@ -199,6 +243,19 @@ function openViewerContextMenu(bodyEl, x, y, target, opts) {
     addSeparator();
     addItem("refresh", t("action.refresh", "刷新"), "refresh", onRefresh);
   }
+  // 运行分组：列出该项目全部可运行命令（npm scripts），命中几条渲染几条（对齐 IDEA 右键 Run）。
+  if (canRun) {
+    const commands = runCommands();
+    if (Array.isArray(commands) && commands.length) {
+      addSeparator();
+      for (const command of commands) {
+        const label = command.labelKey ? t(command.labelKey, command.labelFallback) : command.labelFallback;
+        addItem(`run:${command.id}`, `${t("run.menuRun", "运行")} · ${label}`, "play", () =>
+          onRunCommand(command)
+        );
+      }
+    }
+  }
 
   if (!menu.childElementCount) return;
   bodyEl[VIEWER_CONTEXT_MENU_CLEANUP] = cleanup;
@@ -248,6 +305,8 @@ export function renderCodeViewer(
     onCopyPath,
     onCopyRelativePath,
     onRefresh,
+    runCommands,
+    onRunCommand,
     editable = false,
     saving = false,
     t,
@@ -259,6 +318,10 @@ export function renderCodeViewer(
     bodyEl.__sfeVList.destroy();
     bodyEl.__sfeVList = null;
   }
+  // 解绑上一次预览绑定的 contextmenu 监听：bodyEl 是同一个容器，重复渲染若不先解绑，
+  //   监听会逐次累积（每次打开 package.json 都会再加一层），右键一次会弹出多个菜单。
+  const prevBinding = bodyEl[VIEWER_CONTEXT_MENU_BINDING];
+  if (typeof prevBinding === "function") prevBinding();
   bodyEl.replaceChildren();
   bindViewerContextMenu(bodyEl, {
     preview,
@@ -268,6 +331,8 @@ export function renderCodeViewer(
     onRevealFile,
     onCopyPath,
     onCopyRelativePath,
+    runCommands,
+    onRunCommand,
     t,
   });
 
@@ -434,6 +499,8 @@ export function renderCodeViewer(
       const scroll = el("div", "sfe-file-viewer-code-scroll");
       const rawText = String(preview.text || "");
       const linesArray = rawText.split(/\r\n|\r|\n/);
+      // package.json 的 scripts 行 → 命令映射（行号槽 / 虚拟行内渲染 ▶，两分支共用）
+      const scriptCommandMap = buildScriptCommandMap(preview, runCommands);
 
       // 大文件已被高亮熔断降级为纯文本，逐行渲染不会切坏跨行 token；
       // 虚拟列表只渲染「可视区 + 缓冲」的行，DOM 数量与总行数解耦，因此无需截断内容。
@@ -446,6 +513,9 @@ export function renderCodeViewer(
           renderRow: (lineText, index) => {
             const row = el("div", "sfe-file-viewer-line");
             row.appendChild(el("span", "sfe-file-viewer-line-no", String(index + 1)));
+            // package.json 的 scripts 行内追加 ▶（与整块高亮模式一致的 gutter 运行入口）
+            const command = scriptCommandMap.get(index + 1);
+            if (command) row.appendChild(createGutterRunButton(command, onRunCommand, t));
             row.appendChild(el("span", "sfe-file-viewer-line-text", lineText));
             return row;
           },
@@ -456,13 +526,17 @@ export function renderCodeViewer(
         const pre = el("pre", "sfe-file-viewer-code");
         const total = linesArray.length;
 
-        // 行号槽（整列 sticky 于横向滚动时为代码让位）
+        // 行号槽（整列 sticky 于横向滚动时为代码让位）。
+        // package.json：命中 scripts 的行在行号后追加 ▶（对标 IDEA editor gutter 的运行图标）；
+        //   行号槽由整块文本改为逐行元素，代码正文仍整块高亮（不切碎跨行 Prism token）。
         const gutter = el("div", "sfe-file-viewer-line-numbers");
-        let gutterText = "";
         for (let i = 1; i <= total; i++) {
-          gutterText += i + (i < total ? NL : "");
+          const row = el("div", "sfe-file-viewer-gutter-row");
+          row.appendChild(el("span", "sfe-file-viewer-gutter-no", String(i)));
+          const command = scriptCommandMap.get(i);
+          if (command) row.appendChild(createGutterRunButton(command, onRunCommand, t));
+          gutter.appendChild(row);
         }
-        gutter.textContent = gutterText;
         pre.appendChild(gutter);
 
         // 代码高亮内容

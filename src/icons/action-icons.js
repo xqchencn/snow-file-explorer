@@ -31,6 +31,10 @@ import {
   ArrowDownUp,
   GitBranch,
   FolderOpen,
+  Play,
+  Terminal,
+  X,
+  Eraser,
 } from 'lucide';
 
 const ICON_MAP = {
@@ -64,11 +68,16 @@ const ICON_MAP = {
   // 当前分支（同步栏分支下拉触发器）
   branch: GitBranch,
   folderOpen: FolderOpen,
+  // 项目运行：播放（启动命令）、终端（运行面板标题）、关闭（收起面板）、清空（输出区）
+  play: Play,
+  terminal: Terminal,
+  close: X,
+  eraser: Eraser,
 };
 
 /**
  * 创建动作图标 SVG 节点
- * @param {'chevronRight'|'chevronDown'|'refresh'|'sync'|'copy'|'check'|'eye'|'pencil'|'code'|'more'|'square'|'sparkles'|'gitCommit'|'minus'|'plus'|'undo'|'scissors'|'clipboardPaste'|'fileText'|'diff'|'unified'|'split'|'arrowUp'|'arrowDown'|'branch'|'folderOpen'} name 图标名称
+ * @param {'chevronRight'|'chevronDown'|'refresh'|'sync'|'copy'|'check'|'eye'|'pencil'|'code'|'more'|'square'|'sparkles'|'gitCommit'|'minus'|'plus'|'undo'|'scissors'|'clipboardPaste'|'fileText'|'diff'|'unified'|'split'|'arrowUp'|'arrowDown'|'branch'|'folderOpen'|'play'|'terminal'|'close'|'eraser'} name 图标名称
  * @param {number} [size=14] 图标大小
  * @returns {SVGSVGElement|HTMLElement}
  */
