@@ -1,185 +1,198 @@
-# Snow App 文件浏览器插件 (File Explorer Plugin)
+# Snow App 文件浏览器
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Format: ESM](https://img.shields.io/badge/Module-ESM-yellow.svg)](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Guide/Modules)
-[![Build Tool: esbuild](https://img.shields.io/badge/Bundler-esbuild-orange.svg)](https://esbuild.github.io/)
-[![Linter: ESLint](https://img.shields.io/badge/Linter-ESLint_9-4B32C3.svg)](https://eslint.org/)
+[![Latest Release](https://img.shields.io/github/v/release/xqchencn/snow-file-explorer?display_name=tag)](https://github.com/xqchencn/snow-file-explorer/releases)
 
-专为 [Snow App](https://github.com/MayDay-wpf/snow-app) 打造的原生桌面级侧边栏文件浏览扩展。提供深度的项目文件树导航、彩色文件图标库、实时 Git 状态色彩追踪、全语言语法高亮代码查看器、图片即时预览及多语言国际化支持。
+Snow App 的本地项目文件浏览器插件。它跟随 Snow App 当前打开的项目，提供文件树、代码与图片预览、Markdown 预览、Git 变更管理、交互式终端和项目命令运行。
 
----
+## 适用版本
 
-## 🌟 核心特性 (Key Features)
+- 需要已安装并支持插件的 [Snow App](https://github.com/MayDay-wpf/snow-app)。
+- 插件操作的是 Snow App 当前激活项目目录，不在插件内单独选择项目。
+- Git 功能需要当前项目是 Git 仓库，并且本机已正确配置 Git；提交和推送仍遵循仓库自身的权限与远端配置。
 
-- **现代化工业级打包与物理隔离架构**:
-  - 开发源码（`src/`）与生产分发包（`dist/`）彻底分离。
-  - 基于 `esbuild` 实现 AST 分析、Tree Shaking 与自包含 ESM 单文件打包与深度压缩。
-  - **发布物完全自包含与可独立安装**：`dist/` 目录内直接完备打包包含 `plugin.json`、自包含 `index.js`、合并内联 `index.css` 及完整 `locales/`，无任何未解析的外部或相对模块说明符，可直接被宿主即时安装加载。
-- **Git 变更状态全周期追踪**:
-  - 自动适配 `window.snow.gitStatus` 与 `window.snow.onGitStatusChanged`。
-  - 目录树中实时渲染文件改动徽章（`M` 已修改、`U` 未跟踪、`A` 新增、`D` 已删除、`R` 重命名）并跟随宿主色彩规范高亮条目名称。
-- **彩色文件图标体系**:
-  - 采用 `material-icon-theme`（VSCode 官方文件图标主题）彩色 SVG 图标：按需裁剪 588 个彩色图标，1381 条扩展名映射 + 2148 条特殊文件名映射（如 `package.json`、`Dockerfile`、`.gitignore`）。按文件名 → 扩展名逐级匹配，末级回退通用文件/文件夹图标。**全程零手写 SVG**。
-- **全语言语法高亮引擎**:
-  - 覆盖 Prism 全部 **297 种语言**词法分析（核心 4 种内置 + 293 种按依赖拓扑序注册），443 条扩展名/别名映射。
-  - 高亮样式经真实多语言样本实测覆盖 **112 个 Prism token 类别**（`title`/`key`/`selector`/`parameter`/`bold`/`italic`/`arrow`/`unit` 等全数着色），杜绝"分词了却没颜色"。
-  - 独创超大文件（> 250,000 字符）极速熔断通道，避免卡死宿主界面并全面防御 XSS 注入。
-  - 纯粹继承宿主 `ThemePalette` CSS 变量（`--accent-color`, `--bg-primary`, `--text-primary` 等），全生命周期跟随宿主明暗/自选主题无缝响应。
-- **代码视窗与多媒体预览**:
-  - 自动生成行号栏，右上方提供悬浮式一键复制按钮与即时状态反馈。
-  - 支持常见的图片格式（PNG, JPG, SVG, WebP, GIF, ICO, AVIF）无损原样渲染。
-- **Markdown 文档预览**:
-  - `.md` / `.markdown` / `.mdx` / `.mkd` 默认进入富文本预览模式，可在「预览 / 代码」之间一键切换。
-  - 基于 `marked` 解析 + `DOMPurify` 白名单净化，剥离脚本、`on*` 事件属性与危险标签，防御 Markdown 注入型 XSS。
-  - 文档内相对路径图片经宿主文件接口读取为内联 data URL 展示（进程内缓存，重复渲染零重复 IO）。
-- **国际化 (i18n) 完整覆盖**:
-  - 原生内置简体中文（`zh-CN`）、繁体中文（`zh-TW`）与英文（`en`）。
+## 安装
 
----
+### 推荐：安装 GitHub Release
 
-## 📁 目录规范 (Architecture & Structure)
+1. 打开本项目的 [Releases](https://github.com/xqchencn/snow-file-explorer/releases) 页面，下载最新版本的 `snow-file-explorer-vX.Y.Z.zip`。
+2. 将压缩包内容解压到下面的插件目录，并确保 `plugin.json` 直接位于插件目录根部：
 
-```
-file-explorer/
-├── package.json              # npm 工程依赖与脚本定义
-├── eslint.config.js          # ESLint 9 Flat Config 静态规范检测
-├── build.js                  # 工业级 esbuild 打包脚本 (产物完全交付至 dist/)
-├── tools/
-│   └── generate.mjs          # 代码生成器：从 prismjs / material-icon-theme 权威数据产出生成文件
-├── plugin.json               # 根目录清单模板（版本/作者/许可由 package.json 注入，单一维护源）
-├── locales/                  # 国际化源多语言包 (zh-CN, zh-TW, en)
-├── tests/                    # Node.js 22 内置测试器自动化测试套件（目录结构镜像 src/）
-│   ├── bundle.test.js        # dist/ 独立完整性、清单闭环与宿主加载契约集成测试
-│   └── src/
-│       ├── components/       # 与 src/components/ 一一对应
-│       │   ├── highlighter.test.js
-│       │   ├── markdown-renderer.test.js
-│       │   ├── code-viewer.test.js
-│       │   └── git-view.test.js
-│       ├── services/         # 与 src/services/ 一一对应
-│       │   ├── file-service.test.js
-│       │   ├── markdown-asset.test.js
-│       │   ├── file-filter.test.js
-│       │   ├── diff.test.js
-│       │   └── git-service.test.js
-│       └── utils/
-│           └── dom.test.js
-├── src/                      # 纯净开发源码目录 (与产物物理隔离)
-│   ├── index.js              # 插件挂载入口源码 (生命周期与组件编排)
-│   ├── index.css             # 样式聚合入口源码 (@import 模块化样式)
-│   ├── components/
-│   │   ├── tree-view.js      # 目录树组件 (递归展开、Git 状态与条目计数)
-│   │   ├── code-viewer.js    # 代码查看器 (行号栏、复制、图片展示、Markdown 预览/代码切换)
-│   │   ├── diff-view.js      # 轻量 unified diff 渲染 (统一/分栏双模式)
-│   │   ├── git-view.js       # Git 变更面板 (提交框 + 已暂存/变更分区列表)
-│   │   ├── markdown-renderer.js # Markdown 渲染 (marked 解析 + DOMPurify 净化)
-│   │   ├── highlighter.js    # 基于 PrismJS 封装的高性能高亮器
-│   │   └── prism-langs.js    # 【生成文件】Prism 297 语言注册与扩展名映射
-│   ├── services/
-│   │   ├── file-service.js   # window.snow 文件系统接口适配与排序
-│   │   ├── file-filter.js    # 元数据排除与 .gitignore 解析/匹配
-│   │   ├── markdown-asset.js # Markdown 识别、相对图片路径解析与本地图片读取
-│   │   ├── diff.js           # unified diff 解析纯函数 (hunk/行号/分栏配对)
-│   │   ├── git-service.js    # window.snow Git 状态与事件订阅适配
-│   │   ├── git-actions.js    # Git 写操作 (暂存/提交/推送/丢弃/AI 生成)
-│   │   └── settings.js       # 视图开关与偏好持久化 (api.storage)
-│   ├── icons/
-│   │   ├── action-icons.js   # 基于 lucide 标准库的界面交互图标
-│   │   ├── file-icons.js     # 文件图标解析 (文件名/扩展名 → 彩色 SVG)
-│   │   └── icon-data.js      # 【生成文件】Material Icon Theme 彩色图标 (588 个)
-│   ├── utils/
-│   │   └── dom.js            # el 元素构造、humanSize、escapeHtml、剪贴板
-│   └── styles/
-│       ├── base.css          # Snow App 调色板 CSS 变量纯净绑定
-│       ├── tree.css          # 文件树条目、Git 状态色彩与徽章样式
-│       ├── viewer.css        # 代码查看器行号与浮动按钮布局
-│       ├── diff.css          # unified/split diff 渲染样式
-│       ├── git-view.css      # Git 变更面板与提交框样式
-│       ├── menu.css          # 工具栏下拉菜单与开关样式
-│       ├── markdown.css      # Markdown 预览排版与模式切换控件样式
-│       └── syntax.css        # Prism Token 映射宿主主题调色体系
-└── dist/                     # 【独立分发包】完全自包含、可直接安装的完整插件
-    ├── plugin.json           # 由 build.js 生成（版本/作者/许可取自 package.json）
-    ├── index.js              # 自包含压缩 ESM 运行时入口 (~1265 KB，含 Prism 297 语言 + Material Icons + Lucide)
-    ├── index.css             # 深度合并压缩后的独立样式文件 (~29 KB)
-    └── locales/              # 随包完整多语言资源
-        ├── en.json
-        ├── zh-CN.json
-        └── zh-TW.json
+   **Windows**
+
+   ```text
+   %USERPROFILE%\\.snowapp\\plugins\\com.github.xqchencn.snow-file-explorer
+   ```
+
+   **macOS / Linux**
+
+   ```text
+   ~/.snowapp/plugins/com.github.xqchencn.snow-file-explorer
+   ```
+
+3. 完全重启 Snow App，或在宿主的插件管理界面重新加载插件。
+4. 在 Snow App 侧边栏打开“文件浏览器”。
+
+解压完成后的目录结构应类似下面这样：
+
+```text
+com.github.xqchencn.snow-file-explorer/
+├── plugin.json
+├── index.js
+├── index.css
+└── locales/
+    ├── en.json
+    ├── zh-CN.json
+    └── zh-TW.json
 ```
 
----
+> 不要把整个 `dist` 文件夹再套一层放进去。`plugin.json` 如果位于 `...\\snow-file-explorer\\dist\\plugin.json`，宿主将无法按预期加载插件。
 
-## 🛠️ 本地开发与指令 (Development & Commands)
+### 开发者：从本地构建安装
 
-本工程采用现代专业 npm 工具链驱动：
+适合需要试用未发布代码的情况：
 
 ```powershell
-# 1. 切换至插件工程目录（位于本仓库的 file-explorer/ 子目录）
-cd file-explorer
-
-# 2. 生成代码（升级 prismjs / material-icon-theme 依赖后重新生成生成文件）
-npm run generate
-
-# 3. 静态代码规范检查 (ESLint)
-npm run lint
-
-# 4. 运行自动化测试套件 (包含 dist/ 独立可安装包完整性校验)
-#    测试文件目录结构镜像 src/，例如 src/services/diff.js → tests/src/services/diff.test.js
-#    `node --test` 会自动递归发现 tests/ 下所有 *.test.js，无需额外配置
-npm test
-
-# 5. 执行生产打包压缩 (输出全部发布内容至 dist/)
+npm install
 npm run build
 ```
 
----
-
-## 🚀 插件安装与分发 (Installation Guide)
-
-### 方法一：通过 Snow App 内置 MCP 工具 `config-set` 部署（推荐开发者使用）
-
-在 Snow App 聊天或控制台直接调用 `config-set` 工具，将 `dist/` 目录绑定为插件源：
+然后在 Snow App 中通过插件管理能力安装本仓库的 `dist` 目录。使用 `config-set` 时，参数如下：
 
 ```json
 {
   "scope": "plugins",
   "key": "com.github.xqchencn.snow-file-explorer",
   "value": {
-    "sourceDir": "<本仓库 file-explorer/dist 的绝对路径>"
+    "sourceDir": "D:/path/to/snow-file-explorer/dist"
   }
 }
 ```
 
-宿主后端会自动验证 `dist/plugin.json`，并将完整的插件分发物复制安装至系统目录：
-`~/.snowapp/plugins/com.github.xqchencn.snow-file-explorer`。
+将 `sourceDir` 换成你本机 `dist` 的绝对路径。宿主会校验 `dist/plugin.json`，并复制完整插件包到自己的插件目录。
 
-### 方法二：手动安装分发包
+## 快速上手
 
-1. 执行 `npm run build` 生成 `dist/`。
-2. 将 `dist/` 文件夹复制并重命名为 `com.github.xqchencn.snow-file-explorer`。
-3. 放置于宿主插件目录中：
-   - Windows: `C:\Users\<用户名>\.snowapp\plugins\com.github.xqchencn.snow-file-explorer`
-   - macOS / Linux: `~/.snowapp/plugins/com.github.xqchencn.snow-file-explorer`
-4. 重启或刷新 Snow App 即可在侧边栏启用“文件浏览器”。
+1. 在 Snow App 中打开一个项目。
+2. 打开侧边栏的“文件浏览器”。插件会自动加载当前项目根目录。
+3. 左侧入口栏上方在“文件”和“Git 变更”之间切换；下方可打开“运行”和“终端”。
+4. 在文件树中点击文件查看内容；点击文件夹展开或收起。
+5. 单击 Git 变更文件查看差异，使用右侧查看器在完整文件、统一差异和分栏差异之间阅读变更。
 
----
+## 功能说明
 
-## 📄 宿主约束与开发规范 (Host Constraints)
+### 文件树
 
-1. **Blob URL ESM 导入约束**:
-   - 宿主 Electron 渲染进程通过 `new Blob([source], { type: "text/javascript" })` 创建 `blob:` URL 并使用动态 `import()` 加载插件入口。
-   - `blob:` URL 非分层协议 scheme，Chromium 无法在运行时解析相对路径说明符（如 `import './foo.js'`）。
-   - **因此，dist/index.js 必须通过 esbuild 打包成单文件自包含 ESM，严禁包含相对 import。**
-2. **样式注入约束**:
-   - 宿主通过 `injectPluginStyles` 将样式文本直接挂载入 `<style>` 标签，`<style>` 标签无法解析 CSS 相对 `@import`。
-   - **因此，dist/index.css 必须在构建阶段由 esbuild 自动合并所有样式模块并深度压缩。**
-3. **源码修改纪律**:
-   - 开发与维护修改严格在 `src/` 和 `locales/` 下进行，严禁直接手改 `dist/`。
+- 按文件名显示彩色文件图标，并按目录层级浏览项目。
+- 右键文件或文件夹可执行：打开、复制路径、复制相对路径、在资源管理器中打开、重命名和删除。
+- 右键文件树空白区域可以刷新视图，以及切换以下视图选项：
+  - **按 `.gitignore` 过滤**：默认开启，隐藏 Git 忽略规则匹配的条目。
+  - **Java 包结构视图**：默认开启；识别到 Java 项目时，将连续的包目录折叠成更易读的结构。
+- 文件树会显示 Git 状态标记，例如已修改、未跟踪、新增、删除和重命名。
 
----
+### 文件预览与编辑
 
-## 📜 许可证 (License)
+- 支持代码文本预览、自动行号和语法高亮。
+- 支持 PNG、JPG、SVG、WebP、GIF、ICO、AVIF 等常见图片预览。
+- `.md`、`.markdown`、`.mdx` 和 `.mkd` 默认使用 Markdown 预览，可在“预览”和“代码”之间切换。
+- Markdown 中的相对路径图片会从当前项目读取并显示。
+- 宿主提供写入能力时，可以通过编辑、保存按钮修改文本文件；如果宿主只提供读取能力，界面会显示为只读。
+- 代码查看器中的“复制”只复制当前文件内容；文件树右键菜单中的“复制”则用于复制路径或条目操作，请按菜单文字区分。
 
-[MIT License](LICENSE) © 2026 xqchen
+### Git 变更
 
+切换到“Git 变更”后，可以：
+
+- 查看已暂存和未暂存的文件变更。
+- 点击文件查看差异，支持统一视图和分栏视图。
+- 单个文件或整个目录暂存、取消暂存。
+- 在提交框输入提交信息，点击“提交”或“提交并推送”。
+- 使用“AI 生成提交信息”生成提交说明；生成过程中可以停止。
+- 丢弃文件更改。
+
+“丢弃更改”不可撤销。提交、推送和同步的具体结果取决于本地 Git 状态、远端地址、认证方式以及网络连接。
+
+顶部同步指示器用于查看本地与远端是否存在待推送或待拉取的提交。它不是 Git 仓库初始化工具；当前目录不是 Git 仓库时，面板会直接显示相应提示。
+
+### 运行与终端
+
+插件将两个工具窗口分开：
+
+- **运行**：从项目配置中识别可运行命令。通过运行工具栏或 `package.json` 脚本行内的运行按钮启动一次性任务；运行窗口显示输出、退出码，并可停止当前命令。
+- **终端**：打开真正可交互的终端，可以在光标处输入命令并连续操作；支持多个终端标签页。
+
+运行命令会使用 Snow App 的终端设置和当前项目目录。项目没有可识别的入口或宿主没有终端能力时，运行入口会提示原因，而不是猜测命令。
+
+运行工具栏常用操作：重新运行、停止当前命令、滚动到底部、清空输出。终端标签页支持新建、关闭，以及右键关闭其他标签页或全部标签页。
+
+### 国际化
+
+插件内置简体中文、繁体中文和英文。显示语言跟随 Snow App 宿主设置。
+
+## 权限与数据边界
+
+插件清单声明了 `filesystem` 和 `terminal` 两类能力：
+
+- `filesystem`：读取当前项目，且仅在用户明确执行打开、保存、重命名、删除等操作时进行相应文件操作。
+- `terminal`：仅在用户启动运行命令或终端会话后启动进程，并读取输出和退出状态。
+
+插件不上传项目文件，也不在插件内保存项目副本。Git 提交、推送以及 AI 提交信息生成是否可用，仍受 Snow App 宿主能力、Git 配置和网络环境影响。
+
+## 常见问题
+
+### 安装后侧边栏没有“文件浏览器”
+
+检查插件目录名称是否为 `com.github.xqchencn.snow-file-explorer`，并确认 `plugin.json`、`index.js`、`index.css` 位于该目录根部。之后完全重启 Snow App。
+
+### 显示“未检测到当前项目目录”
+
+插件跟随宿主的当前激活项目。请先在 Snow App 中打开或切换到一个项目，再刷新文件浏览器面板。
+
+### Git 面板显示“当前目录不是 Git 仓库”
+
+确认当前项目根目录或其上级目录包含 `.git`，并在外部终端执行 `git status` 验证仓库本身可用。插件不会替你初始化仓库。
+
+### 文件可以看但不能保存
+
+这是宿主文件写入能力的限制，不是预览失败。确认 Snow App 当前版本允许插件使用文件写入，并检查插件权限或宿主日志。
+
+### 运行按钮没有可用命令
+
+运行入口来自项目中可识别的配置和入口文件。先确认项目配置存在、文件已保存，并检查宿主是否提供终端能力；需要持续交互时请使用“终端”窗口。
+
+### Release 下载的压缩包无法安装
+
+重新检查压缩包内层级：解压后应直接看到 `plugin.json`。不要把 GitHub 源码压缩包当作插件安装包，也不要把 `dist` 目录作为额外的中间层。
+
+## 从 tag 发布新版本（维护者）
+
+GitHub Actions 会在推送符合 `v*.*.*` 的 tag 时自动发布。发布前只改 `package.json` 的版本号，例如：
+
+```powershell
+# package.json version 为 1.0.4 时
+ git tag v1.0.4
+ git push origin v1.0.4
+```
+
+工作流会依次执行依赖安装、ESLint、生产构建和测试，然后：
+
+1. 将 `dist` 内容打成 `snow-file-explorer-v1.0.4.zip`；
+2. 生成同名 `.sha256` 校验文件；
+3. 创建或更新对应的 GitHub Release，并上传两个文件。
+
+tag 去掉开头的 `v` 后必须与 `package.json.version` 完全一致，否则工作流会在构建前失败。仓库的 Actions 需要允许 `contents: write`，工作流已声明所需权限，不需要额外的发布密钥。
+
+## 本地开发命令
+
+```powershell
+npm install       # 安装依赖
+npm run lint      # 检查源码
+npm run build     # 生成 dist 独立安装包
+npm test          # 运行测试（需要先生成 dist）
+```
+
+源码修改应放在 `src/` 和 `locales/`，不要直接编辑 `dist/`。`dist/` 是构建产物，下一次 `npm run build` 会完整重建它。
+
+## 许可证
+
+本项目采用 [MIT License](LICENSE)。
