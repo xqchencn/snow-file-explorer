@@ -142,11 +142,11 @@
   margin-top: auto;
 }
 
-/* 顶部工具栏（项目路径与刷新按钮） */
+/* 顶部工具栏（文件夹名 + 同步指示器靠左，操作区靠右） */
 .sfe-toolbar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
   gap: 8px;
   padding: 6px 12px;
   flex-shrink: 0;
@@ -155,7 +155,7 @@
 }
 
 .sfe-toolbar-path {
-  flex: 1;
+  flex: 0 1 auto;
   min-width: 0;
   font-size: 11px;
   font-weight: 600;
@@ -170,6 +170,8 @@
   align-items: center;
   gap: 6px;
   flex-shrink: 0;
+  /* 操作区推到最右：文件夹名 + 同步箭头留在左侧，紧挨在一起。 */
+  margin-left: auto;
 }
 
 .sfe-toolbar-status {
@@ -197,16 +199,60 @@
   min-height: 0;
 }
 
-/* 底部状态栏容器：文件树与 Git 变更视图共用，常驻于 layout（不随主视图重建）。
-   单行布局：git 同步栏（分支 / 同步 / ↑↓ 计数）靠左，运行面板图标紧挨其后。 */
-.sfe-sync-bar {
-  position: relative;
-  display: flex;
-  flex-direction: row;
+/* 顶栏同步指示器（文件夹名右侧）：一组上下箭头（sync 图标），无数字。
+   有未推送 / 未拉取时变绿色，全部同步回默认色；同步中绿色↔默认色交替闪烁。
+   隐藏态由 .sfe-toolbar [hidden] 统一处理（按钮作者样式 display 会覆盖 UA hidden）。 */
+.sfe-toolbar-sync {
+  display: inline-flex;
   align-items: center;
   flex-shrink: 0;
-  border-top: 1px solid var(--border-light);
-  background: var(--surface-island-muted, var(--bg-secondary));
+}
+
+.sfe-git-sync-indicator {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm, 4px);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.sfe-git-sync-indicator:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+/* 有未推送 / 未拉取（待同步）：绿色高亮。 */
+.sfe-git-sync-indicator.dirty {
+  color: var(--accent-green, var(--accent-color));
+}
+
+/* 同步进行中：颜色在绿色与默认色之间来回交替（循环闪烁），并禁用避免重复触发。 */
+.sfe-git-sync-indicator.syncing {
+  cursor: default;
+  animation: sfe-sync-blink 0.9s ease-in-out infinite alternate;
+}
+
+@keyframes sfe-sync-blink {
+  from {
+    color: var(--accent-green, var(--accent-color));
+  }
+  to {
+    color: var(--text-muted);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sfe-git-sync-indicator.syncing {
+    animation: none;
+    color: var(--accent-green, var(--accent-color));
+  }
 }
 
 /* 空状态通配 */

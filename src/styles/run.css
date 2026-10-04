@@ -180,11 +180,10 @@
 
 /* 分组标题：多 package.json 时按包（文件夹）分组，根目录 / 子包路径小字标注。 */
 .sfe-run-dropdown-group {
-  padding: 6px 8px 2px;
-  font-size: 10px;
+  padding: 7px 8px 3px;
+  font-size: 11px;
   font-weight: 600;
-  letter-spacing: 0.4px;
-  text-transform: uppercase;
+  /* 原样显示包名，不做大小写转换（原本大写就大写、原本小写就小写）。 */
   color: var(--text-muted);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -233,9 +232,11 @@
   font-weight: 600;
 }
 
-/* 行内运行按钮：默认隐藏，悬停 / 选中行时出现（IDEA 同款） */
+/* 行内运行按钮：常驻占位（visibility 而非 display），保证下拉宽度不随 hover 变化；
+   悬停 / 选中行时才可见（IDEA 同款）。 */
 .sfe-run-dropdown-run {
-  display: none;
+  display: inline-flex;
+  visibility: hidden;
   align-items: center;
   justify-content: center;
   width: 20px;
@@ -251,7 +252,7 @@
 
 .sfe-run-dropdown-item:hover .sfe-run-dropdown-run,
 .sfe-run-dropdown-item.active .sfe-run-dropdown-run {
-  display: inline-flex;
+  visibility: visible;
 }
 
 .sfe-run-dropdown-run:hover {

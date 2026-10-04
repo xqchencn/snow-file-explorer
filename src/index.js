@@ -31,7 +31,8 @@ import { renderMarkdownHtml } from "./components/markdown-renderer.js";
 import { renderTreeView } from "./components/tree-view.js";
 import { loadJavaPackageTree } from "./services/java-project.js";
 import { renderCodeViewer } from "./components/code-viewer.js";
-import { renderGitCommitBar, renderGitList, renderGitSyncBar, resetGitSyncBar, closeGitContextMenu } from "./components/git-view.js";
+import { renderGitCommitBar, renderGitList, closeGitContextMenu } from "./components/git-view.js";
+import { renderGitSyncIndicator } from "./components/git-sync-indicator.js";
 import {
   isMarkdownPath,
   normalizePath,
@@ -58,12 +59,9 @@ import {
   gitUnstageAll,
   gitCommit,
   gitPush,
-  gitPull,
   gitSync,
   gitDiscardChanges,
   gitFileDiff,
-  gitBranches,
-  gitCheckout,
   generateCommitMessage,
   abortCommitMessage,
 } from "./services/git-actions.js";
@@ -170,6 +168,8 @@ export function mount(container, api, _options = {}) {
   let runWindow = null;
   // 工具栏运行控件控制器（renderRunToolbar 的返回值）。
   let runToolbar = null;
+  // 顶栏同步指示器控制器（renderGitSyncIndicator 的返回值）。
+  let gitSyncIndicator = null;
 
   // 翻译：api.t 不可用时回退到 defaultValue
   const t = (key, fallback, values) => {
@@ -216,8 +216,6 @@ export function mount(container, api, _options = {}) {
     gitBusy: null,
     // 同步按钮的进行态：与 gitBusy 区分，负责远端 pull / 本地 push 的完整同步链路
     gitSyncBusy: null,
-    // 分支切换进行态（禁用分支下拉，避免并发 checkout）
-    gitBranchBusy: null,
     gitGenerating: false,
     gitStreamId: null,
     gitSelected: null,
@@ -282,6 +280,7 @@ export function mount(container, api, _options = {}) {
     // 运行控件随新项目重建（命令集合必然变化）。
     if (runToolbar && typeof runToolbar.dispose === "function") runToolbar.dispose();
     runToolbar = null;
+    // 同步指示器状态随新项目刷新（getState 读 state，控制器可复用，无需销毁）。
     state.expanded = Object.create(null);
     state.selected = null;
     state.contextMenu = null;
@@ -375,7 +374,7 @@ export function mount(container, api, _options = {}) {
     if (prevSig === nextSig && prevSig !== "") return;
     // 底部同步栏（当前分支名 + ↑/↓ 计数）依赖 gitStatus，文件树视图下同样要刷新，
     // 否则该视图底栏会一直停在「无分支 / 无计数」的初始态。
-    renderGitPaneSync();
+    syncGitIndicator();
     if (state.mainView !== "git") return;
     renderGitPane();
   }
@@ -404,7 +403,7 @@ export function mount(container, api, _options = {}) {
         const { busy, fn } = gitActionQueue.shift();
         state.gitBusy = busy;
         renderGitPaneCommit();
-        renderGitPaneSync();
+        syncGitIndicator();
         try {
           await fn();
         } catch (err) {
@@ -416,7 +415,7 @@ export function mount(container, api, _options = {}) {
       if (!disposed) {
         state.gitBusy = null;
         renderGitPaneCommit();
-        renderGitPaneSync();
+        syncGitIndicator();
       }
     }
   }
@@ -488,18 +487,18 @@ export function mount(container, api, _options = {}) {
       state.gitCommitMessage = "";
       state.gitBusy = "push";
       renderGitPaneCommit();
-      renderGitPaneSync();
+      syncGitIndicator();
       await gitPush(state.rootPath, remote, branch || undefined, !status.upstream);
       await refreshGitAll();
     });
   }
 
-  // 执行真正的 Git 同步：先拉取远端，再根据拉取后的状态推送本地提交。
-  // 同步编排集中在服务层，入口只负责忙碌态、最终刷新和异常兜底。
+  // 同步：顶栏文件夹名右侧的同步指示器点击触发（pull → 刷新 → push）。
+  // 切换分支 / 逐条拉取推送已移除（宿主内置 Git 面板已提供，插件不再重复）。
   async function handleSync() {
-    if (state.gitSyncBusy || state.gitBusy || state.gitBranchBusy || disposed || !state.rootPath) return;
+    if (state.gitSyncBusy || state.gitBusy || disposed || !state.rootPath) return;
     state.gitSyncBusy = "sync";
-    renderGitPaneSync();
+    syncGitIndicator();
     try {
       const status = state.gitStatus || (await getGitStatus(state.rootPath));
       const result = await gitSync(state.rootPath, status, async () => {
@@ -518,73 +517,9 @@ export function mount(container, api, _options = {}) {
     } finally {
       if (!disposed) {
         state.gitSyncBusy = null;
-        renderGitPaneSync();
+        syncGitIndicator();
       }
     }
-  }
-
-  // 拉取远端更新（底部同步栏的 ↓ 计数区点击触发）
-  function handlePull() {
-    if (!state.rootPath || state.gitSyncBusy || state.gitBranchBusy) return;
-    const status = state.gitStatus || {};
-    const branch = status.currentBranch || "";
-    const remote = status.upstream ? String(status.upstream).split("/")[0] : undefined;
-    runGitAction("pull", async () => {
-      await gitPull(state.rootPath, remote, branch || undefined);
-      await refreshGitAll();
-    });
-  }
-
-  // 推送本地提交到远端（底部同步栏的 ↑ 计数区点击触发）
-  function handlePush() {
-    if (!state.rootPath || state.gitSyncBusy || state.gitBranchBusy) return;
-    const status = state.gitStatus || {};
-    const branch = status.currentBranch || "";
-    const remote = status.upstream ? String(status.upstream).split("/")[0] : undefined;
-    runGitAction("push", async () => {
-      await gitPush(state.rootPath, remote, branch || undefined, !status.upstream);
-      await refreshGitAll();
-    });
-  }
-
-  // 切换分支（底部同步栏的分支下拉选中后触发）
-  // 破坏性操作：先二次确认（切换分支会改变工作区内容，未提交改动可能受影响）。
-  // 独立于 gitBusy：避免复用 runGitAction 的忙碌名导致按钮语义混乱；完成后统一刷新。
-  function handleCheckoutBranch(branch) {
-    const name = branch && branch.name;
-    if (!state.rootPath || !name || state.gitBranchBusy || state.gitBusy) return;
-    const from = String((state.gitStatus && state.gitStatus.currentBranch) || "").trim();
-    openConfirmDialog({
-      title: t("git.switchBranch", "切换分支"),
-      message: t("git.checkoutConfirm", "确定切换到分支「{{name}}」？未提交的改动可能受影响（当前：{{from}}）", {
-        name,
-        from: from || "-",
-      }),
-      confirmLabel: t("git.switchBranch", "切换分支"),
-      onConfirm: async () => {
-        if (state.gitBranchBusy || state.gitBusy) return;
-        state.gitBranchBusy = name;
-        renderGitPaneSync();
-        try {
-          const res = await gitCheckout(state.rootPath, name);
-          if (res && res.success === false) {
-            console.warn("[FileExplorer] 切换分支失败:", res.message);
-            return;
-          }
-          state.gitSelected = null;
-          state.gitPreview = null;
-          await refreshGitAll();
-          renderGitPreview();
-        } catch (err) {
-          console.warn("[FileExplorer] 切换分支异常:", err);
-        } finally {
-          if (!disposed) {
-            state.gitBranchBusy = null;
-            renderGitPaneSync();
-          }
-        }
-      },
-    });
   }
 
   // 设置提交按钮模式（提交 / 提交并推送），并持久化
@@ -1480,26 +1415,6 @@ export function mount(container, api, _options = {}) {
         },
         disabled,
       );
-      separator();
-      // 运行分组：命中几条命令就渲染几个菜单项（不折叠、不省略）。
-      // 识别结果懒加载：未就绪时显示占位并后台扫描，扫描完成后若菜单仍打开则重渲染。
-      const runCommands = flattenCommands(state.projectCommands);
-      if (runCommands.length) {
-        for (const command of runCommands) {
-          const label = command.labelKey ? t(command.labelKey, command.labelFallback) : command.labelFallback;
-          addItem(`${t("run.menuRun", "运行")} · ${label}`, () => {
-            closeContextMenu();
-            handleRunCommand(command);
-          }, disabled);
-        }
-      } else if (state.projectCommands) {
-        // 已扫描完成但无命令：展示禁用占位，不再重试（否则重渲染会无限触发扫描）。
-        addItem(t("run.noCommands", "未发现可运行的命令"), () => {}, true);
-      } else {
-        // 尚未扫描：占位 + 后台懒加载；完成后 ensureCommands 会在菜单仍打开时重渲染。
-        addItem(t("run.menuRunning", "运行（识别中…）"), () => {}, true);
-        void ensureCommands();
-      }
       separator();
       addItem(t("action.rename", "重命名"), () => beginRename(entry), disabled);
       addItem(t("action.delete", "删除"), () => handleDelete(entry), disabled);
@@ -2455,6 +2370,8 @@ export function mount(container, api, _options = {}) {
 
     const toolbar = el("div", "sfe-toolbar");
     const pathText = el("div", "sfe-toolbar-path");
+    // 同步指示器：紧跟文件夹名（pathText）之后的上下箭头，无数字，有未同步则着色、同步中动画。
+    const syncIndicatorWrap = el("div", "sfe-toolbar-sync");
     const actions = el("div", "sfe-toolbar-actions");
     const statusEl = el("span", "sfe-toolbar-status");
     statusEl.hidden = true;
@@ -2473,6 +2390,7 @@ export function mount(container, api, _options = {}) {
     actions.appendChild(gitViewSwitchWrap);
 
     toolbar.appendChild(pathText);
+    toolbar.appendChild(syncIndicatorWrap);
     toolbar.appendChild(actions);
     body.appendChild(toolbar);
     const mainView = el("div", "sfe-main-view");
@@ -2485,11 +2403,6 @@ export function mount(container, api, _options = {}) {
     const terminalWindowEl = el("div", "sfe-tool-window sfe-terminal-window");
     terminalWindowEl.hidden = true;
     body.appendChild(terminalWindowEl);
-    // 底栏状态栏（分支切换 + Git 同步 + ↑↓ 计数）：文件树与 Git 变更视图共用，
-    // 挂在主体上（不随 mainView 重建而消失），常驻可见。
-    // 注：终端/运行入口已移到左侧竖排入口栏，底栏不再有运行按钮。
-    const syncBar = el("div", "sfe-sync-bar");
-    body.appendChild(syncBar);
     layout.appendChild(body);
     root.appendChild(layout);
     container.appendChild(root);
@@ -2509,8 +2422,8 @@ export function mount(container, api, _options = {}) {
       mainView,
       runWindowEl,
       terminalWindowEl,
-      syncBar,
       pathText,
+      syncIndicatorWrap,
       statusEl,
       gitViewSwitchWrap,
       runToolbarWrap,
@@ -2619,9 +2532,6 @@ export function mount(container, api, _options = {}) {
     fitTerminalPanel();
     const { mainView } = layoutEls;
     mainView.replaceChildren();
-    // 视图切换会清空 mainView；旧底栏虽挂在 layout 上未丢失，但其中可能残留
-    // 已脱离文档的分支下拉节点，重建前先移除旧底栏骨架，避免复用脱离的 DOM。
-    resetGitSyncBar(layoutEls.syncBar);
     renderGitViewSwitchInToolbar();
     layoutEls.treePane = null;
     layoutEls.previewPane = null;
@@ -2632,13 +2542,13 @@ export function mount(container, api, _options = {}) {
       buildGitView(mainView);
       renderGitPane();
       renderGitPreview();
-      renderGitPaneSync();
+      syncGitIndicator();
       return;
     }
     buildFileView(mainView);
     renderTree();
     renderPreview();
-    renderGitPaneSync();
+    syncGitIndicator();
   }
 
   // 构建文件树视图骨架（左树 + 右预览）
@@ -2780,17 +2690,9 @@ export function mount(container, api, _options = {}) {
        onCopyAbsolutePath: handleGitCopyAbsolutePath,
        // 右键菜单「刷新」：与文件树刷新共用同一入口
        onRefresh: handleRefresh,
-       // 底部同步栏：左侧分支切换 + Git 同步（点击执行 pull / push），右侧 ↓/↑ 计数（0 灰、>0 彩色，点击分别拉取/推送）
-      syncBusy: state.gitSyncBusy,
-      branchBusy: state.gitBranchBusy,
-      onSync: handleSync,
-      onPull: handlePull,
-      onPush: handlePush,
-      loadBranches: gitBranches,
-      onCheckout: handleCheckoutBranch,
-      t,
-    };
-  }
+       t,
+     };
+   }
 
   // 局部：Git 提交框 + 变更列表
   function renderGitPane() {
@@ -2806,11 +2708,21 @@ export function mount(container, api, _options = {}) {
     renderGitCommitBar(layoutEls.gitPane, gitViewOptions());
   }
 
-  // 局部：仅底部同步栏（分支 / 同步进行态 / 未推送未拉取计数变化）
-  // 底栏挂在 layout.syncBar 上，文件树与 Git 变更视图共用。
-  function renderGitPaneSync() {
-    if (disposed || !layoutEls || !layoutEls.syncBar) return;
-    renderGitSyncBar(layoutEls.syncBar, gitViewOptions());
+  // 同步顶栏的 Git 同步指示器（文件夹名右侧的上下箭头，无数字）。
+  // 控制器只创建一次并复用；骨架重建（wrap 变空）后自动重建。
+  function syncGitIndicator() {
+    if (disposed || !layoutEls || !layoutEls.syncIndicatorWrap) return;
+    const wrap = layoutEls.syncIndicatorWrap;
+    if (gitSyncIndicator && wrap.childElementCount > 0) {
+      gitSyncIndicator.sync();
+      return;
+    }
+    if (gitSyncIndicator && typeof gitSyncIndicator.dispose === "function") gitSyncIndicator.dispose();
+    gitSyncIndicator = renderGitSyncIndicator(wrap, {
+      t,
+      getState: () => ({ gitStatus: state.gitStatus, gitBusy: state.gitBusy, gitSyncBusy: state.gitSyncBusy }),
+      onSync: handleSync,
+    });
   }
 
   // 局部：Git 右侧文件查看器（差异 / 内容）
@@ -2995,6 +2907,8 @@ export function mount(container, api, _options = {}) {
     if (typeof unsubProjects === "function") unsubProjects();
     if (runToolbar && typeof runToolbar.dispose === "function") runToolbar.dispose();
     runToolbar = null;
+    if (gitSyncIndicator && typeof gitSyncIndicator.dispose === "function") gitSyncIndicator.dispose();
+    gitSyncIndicator = null;
     if (terminalWindow && typeof terminalWindow.dispose === "function") terminalWindow.dispose();
     terminalWindow = null;
     if (runWindow && typeof runWindow.dispose === "function") runWindow.dispose();

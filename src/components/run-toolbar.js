@@ -22,16 +22,23 @@ function commandLabel(t, command) {
 }
 
 /**
- * 比较两组命令是否等价（id + 命令文本 + 所属分组）。
+ * 比较两组命令是否等价（id + 命令文本 + 显示标签 + 所属分组）。
  * @description 调用方每次都传入 flattenCommands() 生成的新数组，引用永不相等；
  *   若直接比引用会导致每次 sync 都重建下拉，破坏展开态与选中项。此处按内容比较。
- *   分组名也要比：多 package.json 分组切换后（如切项目）组标题必须重绘。
+ *   分组名 / 显示标签也要比：多 package.json 分组切换后（如切项目）标题与条目必须重绘。
  */
 function sameCommands(a, b) {
   if (a === b) return true;
   if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
   for (let i = 0; i < a.length; i += 1) {
-    if (a[i].id !== b[i].id || a[i].cmd !== b[i].cmd || a[i].group !== b[i].group) return false;
+    if (
+      a[i].id !== b[i].id ||
+      a[i].cmd !== b[i].cmd ||
+      a[i].label !== b[i].label ||
+      a[i].group !== b[i].group
+    ) {
+      return false;
+    }
   }
   return true;
 }
@@ -156,13 +163,15 @@ export function renderRunToolbar(container, options) {
     // 多 package.json：命令按包（文件夹）分组，组名变化处插入分组标题（父包已由数据层排在前）。
     let lastGroup;
     for (const command of commands) {
-      const label = commandLabel(t, command);
-      // 分组标题：根包（group=null）显示「根目录」，子包显示其相对目录路径。
+      // 分组标题：根包（group=null）显示「根目录」，子包显示其目录路径（原样，不做大小写转换）。
       const group = command.group || null;
       if (group !== lastGroup) {
         dropdownMenu.appendChild(el("div", "sfe-run-dropdown-group", group || t("run.groupRoot", "根目录")));
         lastGroup = group;
       }
+      // 条目显示纯 script 名（所属包已由分组标题表达，条目里不再重复路径）。
+      const label = commandLabel(t, command);
+      const itemLabel = command.label || label;
       // 用 div 而非 button：行内要再放一个 ▶ 按钮，button 不能嵌套 button。
       const item = el("div", "sfe-run-dropdown-item");
       item.setAttribute("role", "button");
@@ -173,11 +182,11 @@ export function renderRunToolbar(container, options) {
       const icon = el("span", "sfe-run-dropdown-icon");
       icon.appendChild(createActionIcon("package", 12));
       item.appendChild(icon);
-      item.appendChild(el("span", "sfe-run-dropdown-label", label));
-      // 行内运行按钮：点击即运行该配置（不改变「行体点击 = 选择」的语义）。
+      item.appendChild(el("span", "sfe-run-dropdown-label", itemLabel));
+      // 行内运行按钮：常驻占位（默认不可见，hover / 选中行时显现），保证下拉宽度不随 hover 变化。
       const runBtn = el("button", "sfe-run-dropdown-run");
       runBtn.type = "button";
-      runBtn.title = t("run.toolbar.runTip", "运行 {{label}}", { label });
+      runBtn.title = t("run.toolbar.runTip", "运行 {{label}}", { label: itemLabel });
       runBtn.setAttribute("aria-label", runBtn.title);
       runBtn.appendChild(createActionIcon("play", 11));
       runBtn.addEventListener("click", (event) => {

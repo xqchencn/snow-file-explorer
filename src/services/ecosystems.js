@@ -68,7 +68,9 @@ export function readNodeScripts(packageJson, opts = {}) {
       // id 带上包路径前缀，避免多个包的同名 script 冲突。
       id: prefix ? `npm:${prefix}:${name}` : `npm:${name}`,
       labelKey: null,
-      // 子包的标签带包路径，便于多包时区分（如 `sub/dev`）。
+      // label：下拉项显示的**纯 script 名**（所属包由分组标题表达，条目里不重复路径）。
+      label: name,
+      // labelFallback：带包路径的完整名（工具栏当前配置按钮 / 右键菜单需区分多包同名命令）。
       labelFallback: prefix ? `${prefix}/${name}` : name,
       cmd: prefix ? `npm --prefix ${prefix} run ${name}` : `npm run ${name}`,
     });

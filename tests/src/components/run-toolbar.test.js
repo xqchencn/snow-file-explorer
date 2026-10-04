@@ -209,10 +209,11 @@ test("运行控件: dispose 解绑 document 监听（不抛异常）", () => {
 });
 
 test("运行控件: 多包命令按文件夹分组，组名变化处显示分组标题（父包在前）", () => {
-  const ROOT = { id: "npm:dev", labelKey: null, labelFallback: "dev", cmd: "npm run dev", dir: "", group: null };
+  const ROOT = { id: "npm:dev", labelKey: null, label: "dev", labelFallback: "dev", cmd: "npm run dev", dir: "", group: null };
   const API = {
     id: "npm:api:start",
     labelKey: null,
+    label: "start",
     labelFallback: "api/start",
     cmd: "npm --prefix api run start",
     dir: "api",
@@ -226,6 +227,11 @@ test("运行控件: 多包命令按文件夹分组，组名变化处显示分组
   assert.deepEqual(
     [...wrap.querySelectorAll(".sfe-run-dropdown-group")].map((n) => n.textContent),
     ["根目录", "api"]
+  );
+  // 条目只显示纯 script 名（包由分组标题表达，条目里不重复路径）
+  assert.deepEqual(
+    [...wrap.querySelectorAll(".sfe-run-dropdown-label")].map((n) => n.textContent),
+    ["dev", "start"]
   );
   // 分组标题不是可点命令项
   assert.equal(wrap.querySelectorAll(".sfe-run-dropdown-item").length, 2);
