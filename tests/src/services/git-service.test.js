@@ -9,6 +9,7 @@ import {
   buildGitFileTree,
   countGitTreeFiles,
   collectGitTreeFiles,
+  collectGitFolderPaths,
   flattenGitTree,
   gitStatusSignature,
   gitSyncCounts,
@@ -136,6 +137,20 @@ test('Git 变更: collectGitTreeFiles 收集子树全部文件（供目录级暂
   assert.deepEqual(collectGitTreeFiles(null), []);
 });
 
+test('Git 变更: 已暂存目录默认折叠路径可从文件列表稳定派生', () => {
+  const files = [
+    { path: 'src/a.js', status: 'M' },
+    { path: 'src/deep/b.js', status: 'A' },
+    { path: 'README.md', status: 'M' },
+  ];
+  assert.deepEqual([...collectGitFolderPaths(files)].sort(), ['src', 'src/deep']);
+
+  const rows = flattenGitTree(buildGitFileTree(files), collectGitFolderPaths(files));
+  assert.deepEqual(rows.map((row) => (row.kind === 'folder' ? `D:${row.node.path}` : `F:${row.file.path}`)), [
+    'D:src',
+    'F:README.md',
+  ]);
+});
 test('Git 变更: flattenGitTree 折叠目录时跳过子树', () => {
   const tree = buildGitFileTree([
     { path: 'src/a.js', status: 'M' },

@@ -248,6 +248,24 @@ test('Git 变更列表: 文件右键菜单复刻宿主顺序并排除终端入�
   document.body.removeChild(pane);
 });
 
+test('Git 变更列表: 状态字母跟在文件名之后（与文件树一致，不占行首）', () => {
+  const pane = document.createElement('div');
+  document.body.appendChild(pane);
+  const file = { path: 'src/a.js', status: 'M', indexStatus: ' ', workdirStatus: 'M' };
+  renderGitList(pane, makeOpts({ gitStatus: { isRepo: true, files: [file] } }));
+
+  const row = pane.querySelector('.sfe-git-row:not(.sfe-git-folder-row)');
+  const nameWrap = row.querySelector('.sfe-git-name');
+  const status = nameWrap.querySelector('.sfe-git-status');
+  assert.ok(status, '状态字母应渲染');
+  // 名称容器内顺序：图标 → 文件名 → 状态字母
+  assert.equal(nameWrap.lastElementChild, status, '状态字母应排在文件名之后');
+  assert.match(status.previousElementSibling.className, /sfe-git-name-text/, '状态字母前面应是文件名');
+  // 行首第一个元素是名称容器，不能是状态字母
+  assert.notEqual(row.firstElementChild, status, '状态字母不应再占行首');
+  document.body.removeChild(pane);
+});
+
 test('Git 变更列表: 删除文件禁用打开和资源管理器菜单，但保留 Git 操作', () => {
   const pane = document.createElement('div');
   document.body.appendChild(pane);

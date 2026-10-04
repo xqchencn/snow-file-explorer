@@ -74,6 +74,7 @@ function iconButton(className, iconName, title, size = 14) {
  * @param {Function} [options.onCloseOthers] 关闭其它 tab：(id) => void
  * @param {Function} [options.onCloseAll] 关闭全部 tab：() => void
  * @param {Function} [options.onCopyTab] 复制该 tab 的标识（命令 / 标题）：(id) => void
+ * @param {Function} [options.onCopySelection] 仅 kind=run：复制当前 tab 的选中文本：(id, text) => void
  * @param {Function} [options.onPasteText] 终端右键「粘贴」的剪贴板文本来源：() => Promise<string>
  * @returns {{rebuild: Function, syncActive: Function, write: Function, getSizes: Function, fit: Function, focus: Function, clear: Function, scrollToBottom: Function, dispose: Function}}
  */
@@ -96,6 +97,7 @@ export function renderToolWindow(container, options) {
     onCloseOthers,
     onCloseAll,
     onCopyTab,
+    onCopySelection,
     onPasteText,
   } = options;
   const isRun = kind === "run";
@@ -129,17 +131,20 @@ export function renderToolWindow(container, options) {
   tabsBar.appendChild(minimizeBtn);
   container.appendChild(tabsBar);
 
-  // ── 工具栏：仅运行窗口有（重跑 / 停止 / 滚动到底 / 清空 / ⋮）──
+  // ── 工具栏：仅运行窗口有（重跑 / 停止 / 复制选中文本 / 滚动到底 / 清空 / ⋮）──
   let toolbarRefs = null;
   if (isRun) {
     const bar = el("div", "sfe-run-toolbar-bar");
     const rerunBtn = iconButton("sfe-run-tb-btn rerun", "rerun", t("run.window.rerun", "重新运行"), 14);
     const stopBtn = iconButton("sfe-run-tb-btn stop", "square", t("run.window.stop", "停止"), 13);
+    // 复制选中文本：只在当前 tab 有选区时可用（选区变化经 onSelectionChange 实时刷新）。
+    const copyBtn = iconButton("sfe-run-tb-btn copy", "copy", t("run.copySelection", "复制选中文本"), 13);
     const scrollBtn = iconButton("sfe-run-tb-btn", "arrowDown", t("run.scrollToEnd", "滚动到底"), 14);
     const clearBtn = iconButton("sfe-run-tb-btn", "eraser", t("run.clear", "清空输出"), 13);
     const moreBtn = iconButton("sfe-run-tb-btn more", "more", t("run.toolbar.more", "更多"), 14);
     rerunBtn.addEventListener("click", () => withActive((id) => onRerun && onRerun(id)));
     stopBtn.addEventListener("click", () => withActive((id) => onStop && onStop(id)));
+    copyBtn.addEventListener("click", () => copySelection());
     scrollBtn.addEventListener("click", () => withActive((id) => onScrollToBottom && onScrollToBottom(id)));
     clearBtn.addEventListener("click", () => withActive((id) => onClear && onClear(id)));
     moreBtn.addEventListener("click", (event) => {
@@ -148,11 +153,12 @@ export function renderToolWindow(container, options) {
     });
     bar.appendChild(rerunBtn);
     bar.appendChild(stopBtn);
+    bar.appendChild(copyBtn);
     bar.appendChild(scrollBtn);
     bar.appendChild(clearBtn);
     bar.appendChild(moreBtn);
     container.appendChild(bar);
-    toolbarRefs = { rerun: rerunBtn, stop: stopBtn, scroll: scrollBtn, clear: clearBtn };
+    toolbarRefs = { rerun: rerunBtn, stop: stopBtn, copy: copyBtn, scroll: scrollBtn, clear: clearBtn };
   }
 
   // ── 终端容器：每个终端一个 host（激活者显示，其余隐藏；xterm 实例常驻不销毁）──
@@ -194,6 +200,28 @@ export function renderToolWindow(container, options) {
   function withActive(fn) {
     const active = activeTerminal();
     if (active) fn(active.id, active);
+  }
+
+  /** 当前激活终端的 xterm 视图（无则 null）。 */
+  function activeView() {
+    const active = activeTerminal();
+    const entry = active ? views.get(active.id) : null;
+    return entry ? entry.view : null;
+  }
+
+  /** 当前激活终端是否有选中文本（决定「复制选中文本」按钮可用态）。 */
+  function activeHasSelection() {
+    const view = activeView();
+    return !!(view && typeof view.hasSelection === "function" && view.hasSelection());
+  }
+
+  /** 复制当前激活终端的选中文本（无选区则忽略）。 */
+  function copySelection() {
+    const active = activeTerminal();
+    const view = activeView();
+    if (!active || !view) return;
+    const text = typeof view.getSelection === "function" ? view.getSelection() : "";
+    if (text && typeof onCopySelection === "function") onCopySelection(active.id, text);
   }
 
   // ───────────────────────── 浮动菜单 ─────────────────────────
@@ -440,13 +468,14 @@ export function renderToolWindow(container, options) {
     }
   }
 
-  /** 同步运行窗口工具栏按钮的可用态：停止仅在该 tab 运行中可用，其余需有激活 tab。 */
+  /** 同步运行窗口工具栏按钮的可用态：停止仅在该 tab 运行中可用；复制选中文本仅有选区时可用；其余需有激活 tab。 */
   function syncToolbar() {
     if (!toolbarRefs) return;
     const active = activeTerminal();
     const running = !!active && active.exited !== true;
     toolbarRefs.rerun.disabled = !active;
     toolbarRefs.stop.disabled = !running;
+    if (toolbarRefs.copy) toolbarRefs.copy.disabled = !activeHasSelection();
     toolbarRefs.scroll.disabled = !active;
     toolbarRefs.clear.disabled = !active;
   }
@@ -469,6 +498,8 @@ export function renderToolWindow(container, options) {
         },
         // 终端内容区右键：复制 / 粘贴 / 全选 + 关闭项（由组件弹菜单）。
         onContextMenu: (x, y) => openTerminalMenu(term.id, x, y),
+        // 选区变化：刷新「复制选中文本」按钮的可用态（仅运行窗口有该按钮）。
+        onSelectionChange: () => syncToolbar(),
       });
       views.set(term.id, { view, host });
     }

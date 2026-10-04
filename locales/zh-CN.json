@@ -95,6 +95,7 @@
   "run.stopAndClose": "停止并关闭",
   "run.close": "收起运行面板",
   "run.clear": "清空输出",
+  "run.copySelection": "复制选中文本",
   "run.collapse": "收起运行面板",
   "run.minimize": "最小化终端面板",
   "run.showPanel": "显示终端面板",

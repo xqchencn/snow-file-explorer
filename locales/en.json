@@ -95,6 +95,7 @@
   "run.stopAndClose": "Stop and close",
   "run.close": "Collapse run panel",
   "run.clear": "Clear output",
+  "run.copySelection": "Copy selection",
   "run.collapse": "Collapse run panel",
   "run.minimize": "Minimize terminal panel",
   "run.showPanel": "Show terminal panel",

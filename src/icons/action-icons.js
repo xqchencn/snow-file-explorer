@@ -39,6 +39,7 @@ import {
   X,
   Eraser,
 } from 'lucide';
+import { ICON_SVGS } from "./icon-data.js";
 
 const ICON_MAP = {
   chevronRight: ChevronRight,
@@ -83,18 +84,37 @@ const ICON_MAP = {
 };
 
 /**
- * 创建动作图标 SVG 节点
- * @param {'chevronRight'|'chevronDown'|'refresh'|'sync'|'copy'|'check'|'eye'|'pencil'|'code'|'more'|'square'|'sparkles'|'gitCommit'|'minus'|'plus'|'undo'|'scissors'|'clipboardPaste'|'fileText'|'diff'|'unified'|'split'|'arrowUp'|'arrowDown'|'branch'|'folderOpen'|'folderGit2'|'play'|'rerun'|'package'|'terminal'|'close'|'eraser'} name 图标名称
+ * 创建动作图标 SVG 节点。
+ * @description 运行配置图标（go / wails / nodejs 等）复用 icon-data.js 的彩色 SVG（与文件树同一来源），
+ *   其余走 lucide 动作图标。这样 Go / Wails / Node 图标不重复定义、来源统一。
+ * @param {string} name 图标名称（lucide 动作图标名，或 icon-data 中的图标 id 如 go / wails / nodejs）
  * @param {number} [size=14] 图标大小
  * @returns {SVGSVGElement|HTMLElement}
  */
 export function createActionIcon(name, size = 14) {
-  const iconDef = ICON_MAP[name] || ChevronRight;
-  // 注意：lucide createElement 只识别 width/height 等 SVG 属性，不识别 size（React 专有）。
-  // 传 size 会被当作无效属性忽略，导致图标始终按默认 24×24 渲染而溢出容器。
-  return createElement(iconDef, {
-    width: size,
-    height: size,
-    "stroke-width": 1.8,
-  });
+  // lucide 动作图标优先（chevronRight / play / copy…），避免 icon-data 同名 key 覆盖。
+  const iconDef = ICON_MAP[name];
+  if (iconDef) {
+    // 注意：lucide createElement 只识别 width/height 等 SVG 属性，不识别 size（React 专有）。
+    // 传 size 会被当作无效属性忽略，导致图标始终按默认 24×24 渲染而溢出容器。
+    return createElement(iconDef, {
+      width: size,
+      height: size,
+      "stroke-width": 1.8,
+    });
+  }
+  // 否则取 icon-data 的彩色品牌图标（go / wails / nodejs…），与文件树共用同一份 SVG。
+  const svgMarkup = ICON_SVGS[name];
+  if (svgMarkup) {
+    const wrap = document.createElement("span");
+    wrap.style.cssText = `display:inline-flex;align-items:center;justify-content:center;width:${size}px;height:${size}px;flex-shrink:0;`;
+    wrap.innerHTML = svgMarkup;
+    const svg = wrap.querySelector("svg");
+    if (svg) {
+      svg.setAttribute("width", size);
+      svg.setAttribute("height", size);
+    }
+    return wrap;
+  }
+  return createElement(ChevronRight, { width: size, height: size, "stroke-width": 1.8 });
 }

@@ -368,7 +368,7 @@ html:has(.app-shell.right-panel-fullscreen) .sfe-git-preview-pane {
   background: var(--bg-active);
 }
 
-/* 状态字母徽章 */
+/* 状态字母徽章（位于文件名之后、行内按钮之前） */
 .sfe-git-status {
   display: inline-flex;
   align-items: center;
@@ -380,6 +380,9 @@ html:has(.app-shell.right-panel-fullscreen) .sfe-git-preview-pane {
   font-weight: 700;
   font-family: var(--font-mono, monospace);
   flex-shrink: 0;
+  /* 贴到名称容器右侧（按钮之前）：长文件名先被省略号挤短，状态字母始终可见。
+     行内按钮不 shrink、且靠行 gap 与名称容器分隔，因此不会有重叠。 */
+  margin-left: auto;
 }
 
 .sfe-git-status.sfe-git-add {

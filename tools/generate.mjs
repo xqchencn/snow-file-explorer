@@ -136,6 +136,16 @@ for (const id of iconIds) {
   iconSvgs[id] = svg;
 }
 
+// 附加品牌图标：material-icon-theme 未收录的生态（如 Wails），
+// 作为额外图标并入 ICON_SVGS，使所有文件/运行图标统一从本生成文件取。
+// Go（go）与 Node（nodejs）material-icon-theme 已内置，无需在此重复。
+const EXTRA_ICONS = {
+  // Wails 官方 logo（simple-icons，品牌红 #DF0000）
+  wails:
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="#DF0000" d="m19.67 5.252-7.856 5.039-.369-.459-8.69-.283 1.891 1.904 5.221.106 1.63 1.656-5.878.662 1.77 1.783 5.34-1.185.003-.006.993 1.168-3.079 3.11 7.399.001-1.582-5.002 2.209 3.14H24l-5.385-2.415h4.121l-5.384-2.418h4.117L16.297 9.73l1.088-1.443 4.09-1.076-3.467.248 1.662-2.207zm-3.635 2.322-6.039.43 1.455 1.826 1.813-.476 2.771-1.78zm-.252 2.84-.86 1.145-.001-.002.154-.205.707-.938zM0 12.2l5.615 1.033-1.017-1.027L0 12.2z"/></svg>',
+};
+for (const [id, svg] of Object.entries(EXTRA_ICONS)) iconSvgs[id] = svg;
+
 let iconCode = `/**
  * Material Icon Theme 彩色文件图标数据 (src/icons/icon-data.js)
  * 【生成文件 · 禁止手改】由 tools/generate.mjs 基于 material-icon-theme 官方数据产出。

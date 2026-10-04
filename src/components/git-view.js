@@ -457,13 +457,15 @@ function renderFileRow(opts) {
   row.style.paddingLeft = 12 + depth * 14 + "px";
   row.title = file.path + " · " + t("git.clickHint", "单击查看差异");
 
-  const meta = gitStatusMeta(file.status);
-  row.appendChild(el("span", "sfe-git-status " + meta.className, meta.letter));
-
   const { name } = splitGitPath(file.path);
   const nameWrap = el("span", "sfe-git-name");
   nameWrap.appendChild(createFileIconNode(name, false, false));
   nameWrap.appendChild(el("span", "sfe-git-name-text" + (file.status === "D" ? " deleted" : ""), name));
+  // 状态字母与文件树一致：紧跟文件名之后（而非行首）。
+  // 放在 flex:1 的名称容器内、文件名之后：状态字母 flex-shrink:0 始终可见，
+  // 容器右侧余量 + 行内 gap 把行内按钮（暂存/丢弃）隔开，二者不会重叠。
+  const meta = gitStatusMeta(file.status);
+  nameWrap.appendChild(el("span", "sfe-git-status " + meta.className, meta.letter));
   row.appendChild(nameWrap);
 
   // 单击：就地更新选中样式并打开该文件的 Git 差异（不重建本列表 DOM）。

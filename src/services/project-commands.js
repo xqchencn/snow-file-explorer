@@ -3,17 +3,26 @@
  *
  * 职责：
  *   1. 纯函数 detectProjectCommands：由「已发现的包」列表生成可运行命令（无 IO，可单测）。
- *   2. 异步扫描 scanProjectCommands：递归扫工作区里的 package.json（多级目录 + 多个包），
- *      跳过大目录（node_modules/.git 等），懒加载并缓存结果。
+ *   2. 异步扫描 scanProjectCommands：递归扫工作区里的包标记（package.json / go.mod / Taskfile / wails.json），
+ *      跳过大目录（node_modules/.git/target 等）与独立 go 测试模块，懒加载并缓存结果。
  *
  * 设计要点：
- *   - 从「根目录命中即整体识别」改为「每个 package.json 就是一个包」：
- *       每条命令在所属 package.json 目录执行，使用 packageManager 字段 / 锁文件推断出的包管理器。
- *   - 命令 id 带包路径和包管理器，避免多个包或多个管理器的同名 script 冲突。
+ *   - 从「根目录命中即整体识别」改为「每个标记文件就是一个包」：
+ *     每条命令在所属目录执行；Node 用 packageManager 推断出的包管理器，
+ *     Go/Wails 用 Taskfile 任务名或原生 CLI / 通用 go 子命令。
+ *   - 命令 id 带包路径与来源，避免多个包或多种来源的同名命令冲突。
+ *   - 排序：父包在前；同一层级内服务端（Go/Wails）展示在前端（Node）之前（见 ECOSYSTEM_PRIORITY）。
  */
 
 import { readDirectoryEntries } from "./file-service.js";
-import { readNodeScripts, nodeEntryFallback, detectPackageManager } from "./ecosystems.js";
+import {
+  readNodeScripts,
+  nodeEntryFallback,
+  detectPackageManager,
+  readWails2Commands,
+  readWails3Commands,
+  readGoCommands,
+} from "./ecosystems.js";
 
 /** 递归扫描时跳过的目录名（海量 / 无关 / 生成物）。 */
 const SCAN_SKIP_DIRS = new Set([
@@ -37,6 +46,20 @@ const SCAN_SKIP_DIRS = new Set([
 const MAX_PACKAGES = 50;
 /** 递归扫描最大深度。 */
 const MAX_SCAN_DEPTH = 6;
+
+/**
+ * 扫描时跳过的 go 测试模块目录名（仅非根目录生效）。
+ * @description go-desktop/tests、gyt-treatment/tests 等是「隔离测试模块」（自带 go.mod + replace ..），
+ *   不是可运行的产品入口；若当作 module 会生成无意义的 `go test` 噪声，故跳过。
+ */
+const GO_TEST_DIRS = new Set(["tests", "test"]);
+
+/**
+ * 生态排序优先级：数值小的排在前。
+ * @description 用户规矩——**服务端（Go / Wails）展示在前端（Node）之前**。
+ *   仅在「同一目录层级」内比较，父包在前的既有层级规则不受影响。
+ */
+const ECOSYSTEM_PRIORITY = { go: 0, node: 1 };
 
 /**
  * 规范化根目录键：统一分隔符、小写、去尾部分隔符。
@@ -77,9 +100,26 @@ export async function ensureProjectCommands(state, rootPath, opts = {}) {
 }
 
 /**
+ * 生成 Go / Wails 生态的运行命令。
+ * @description 按项目类型分流：
+ *   1. Wails v3（go.mod 依赖 wails/v3）→ 标准 `task dev` / `task package` / `task build`；
+ *   2. Wails v2（有 wails.json）→ `wails dev` / `wails build`；
+ *   3. 纯 Go → 通用 `go build/test/vet`（+ 入口 run）。
+ * @param {{entries?: Array, cmdDirs?: string[], hasWails2?: boolean, hasWails3?: boolean}} pkg go 条目
+ * @param {string} prefix 相对根目录的 POSIX 路径（根目录 ""）
+ * @returns {Array} 与 Node 命令同构的命令数组
+ */
+function buildGoCommands(pkg, prefix) {
+  if (pkg.hasWails3) return readWails3Commands({ prefix });
+  if (pkg.hasWails2) return readWails2Commands({ prefix });
+  return readGoCommands(pkg.entries, { prefix, cmdDirs: pkg.cmdDirs });
+}
+
+/**
  * 纯函数：由「已发现的包」列表生成命令集合。
- * @description 每个包由 packageJson 内容 + 相对根目录的路径前缀（+ 该包目录条目，供根包入口兜底）描述。
- * @param {Array<{dir: string, packageJson: Object|null, entries?: Array, packageManager?: string}>} packages 包列表
+ * @description 每个包由标记类型（node / go）+ 相对根目录的路径前缀描述；
+ *   node 包用 packageJson 内容，go 包用目录条目 + Taskfile 任务名。
+ * @param {Array<{dir: string, ecosystem?: string, packageJson?: Object|null, entries?: Array, packageManager?: string, taskNames?: string[], hasWails2?: boolean, hasWails3?: boolean}>} packages 包列表
  * @returns {{ecosystems: Array, packages: Array, scannedAt: number}}
  */
 export function detectProjectCommands(packages) {
@@ -91,6 +131,22 @@ export function detectProjectCommands(packages) {
     if (!pkg) continue;
     const dir = typeof pkg.dir === "string" ? pkg.dir : "";
     const prefix = dir.replace(/^\/+|\/+$/g, "");
+
+    if (pkg.ecosystem === "go") {
+      const commands = buildGoCommands(pkg, prefix);
+      ecosystems.push({
+        kind: "go",
+        id: prefix ? `go:${prefix}` : "go",
+        label: prefix ? `Go · ${prefix}` : "Go",
+        markers: ["go.mod"],
+        dir: prefix,
+        entry: null,
+        commands,
+      });
+      summary.push({ id: prefix || "go", dir: prefix, ecosystem: "go", commandCount: commands.length });
+      continue;
+    }
+
     const packageManager = detectPackageManager(pkg.packageJson, pkg.entries, pkg.packageManager || "npm");
     const commands = readNodeScripts(pkg.packageJson, { prefix, packageManager });
     // 仅根包在无 scripts 时兜底为 `node <entry>`（子包不走，避免相对 cwd 的入口命令歧义）。
@@ -98,6 +154,7 @@ export function detectProjectCommands(packages) {
     const finalCommands = commands.length ? commands : entryFallback;
 
     ecosystems.push({
+      kind: "node",
       id: prefix ? `node:${prefix}` : "node",
       label: prefix ? `Node · ${prefix}` : "Node.js",
       markers: ["package.json"],
@@ -106,14 +163,14 @@ export function detectProjectCommands(packages) {
       entry: null,
       commands: finalCommands,
     });
-    summary.push({ id: prefix || "node", dir: prefix, packageManager, commandCount: finalCommands.length });
+    summary.push({ id: prefix || "node", dir: prefix, ecosystem: "node", packageManager, commandCount: finalCommands.length });
   }
 
   return { ecosystems, packages: summary, scannedAt: Date.now() };
 }
 
 /**
- * 递归扫描工作区，发现所有 package.json 并解析为包列表。
+ * 递归扫描工作区，发现所有包标记并解析为包列表（Node package.json / Go 项目）。
  * @param {string} rootPath 工作区根目录绝对路径
  * @returns {Promise<{rootPath: string, ecosystems: Array, packages: Array, scannedAt: number}>}
  */
@@ -125,17 +182,61 @@ export async function scanProjectCommands(rootPath) {
   const canRead = snow && typeof snow.readFileContent === "function";
   const packages = [];
 
-  const readPackageJson = async (entry) => {
-    if (!canRead || !entry.path) return null;
+  /** 读取文本文件内容；读取失败或二进制返回 null（识别只在读得到文本时才产命令）。 */
+  const readText = async (entry) => {
+    if (!canRead || !entry || !entry.path) return null;
     try {
       const result = await snow.readFileContent(entry.path);
-      if (result && typeof result.content === "string" && !result.isBinary) {
-        return JSON.parse(result.content);
-      }
+      if (result && typeof result.content === "string" && !result.isBinary) return result.content;
     } catch {
-      // 解析 / 读取失败：仅保留包标记，不产命令
+      // 读取失败：不产命令
     }
     return null;
+  };
+
+  /** 读取并解析 package.json；解析失败返回 null（仅保留包标记，不产命令）。 */
+  const readPackageJson = async (entry) => {
+    const text = await readText(entry);
+    if (text == null) return null;
+    try {
+      return JSON.parse(text);
+    } catch {
+      return null;
+    }
+  };
+
+  /** 该目录是否为 Go module：有 go.mod，或（根目录/无 package.json 时）有 Taskfile / wails.json。 */
+  const isGoModule = (entries) => {
+    const has = (name) => entries.some((e) => e && e.name === name && e.isDirectory !== true);
+    return has("go.mod") || has("Taskfile.yml") || has("Taskfile.yaml") || has("wails.json");
+  };
+
+  /** 收集 go 包识别信息：探测 wails 版本（wails.json / go.mod 依赖）与 cmd/ 入口候选。 */
+  const buildGoPackage = async (dirRel, entries) => {
+    const findFile = (name) => entries.find((e) => e && e.name === name && e.isDirectory !== true);
+    const goModText = (await readText(findFile("go.mod"))) || "";
+    // 标准布局的入口候选：cmd/ 下的子目录名（每个通常是一个 main 包）。
+    // 根无 main.go 时生成 `go run ./cmd/<name>`；根有 main.go 时走 `go run .`（见 readGoCommands）。
+    const cmdEntry = entries.find((e) => e && e.name === "cmd" && e.isDirectory === true);
+    let cmdDirs = [];
+    if (cmdEntry) {
+      try {
+        const cmdChildren = await readDirectoryEntries(cmdEntry.path);
+        cmdDirs = (Array.isArray(cmdChildren) ? cmdChildren : [])
+          .filter((e) => e && e.isDirectory === true && e.name)
+          .map((e) => e.name);
+      } catch {
+        cmdDirs = [];
+      }
+    }
+    return {
+      dir: dirRel,
+      ecosystem: "go",
+      entries,
+      hasWails2: Boolean(findFile("wails.json")),
+      hasWails3: /wailsapp\/wails\/v3/.test(goModText),
+      cmdDirs,
+    };
   };
 
   const walk = async (dirPath, relNames, depth, inheritedManager = "npm") => {
@@ -148,12 +249,18 @@ export async function scanProjectCommands(rootPath) {
     }
     if (!Array.isArray(entries)) return;
 
+    // 独立的 go 测试模块（xxx/tests 自带 go.mod）：不是产品入口，整体跳过（不下探、不产命令）。
+    const lastSeg = relNames[relNames.length - 1];
+    if (relNames.length > 0 && GO_TEST_DIRS.has(lastSeg) && isGoModule(entries)) return;
+
     const pkgEntry = entries.find((e) => e && e.name === "package.json" && e.isDirectory !== true);
     const packageJson = pkgEntry ? await readPackageJson(pkgEntry) : null;
     // workspace 子包默认继承根包管理器；子包自己的 packageManager / 锁文件可以显式覆盖。
     const packageManager = pkgEntry
       ? detectPackageManager(packageJson, entries, inheritedManager)
       : inheritedManager;
+    // 同一目录可同时是 Node 包与 Go module（如 wails 项目根目录既有 package.json 又有 go.mod），
+    // 两个生态都要收集，不能用 else——否则有 package.json 就漏掉 Go/Wails。
     if (pkgEntry) {
       packages.push({
         dir: joinRel(relNames),
@@ -161,6 +268,9 @@ export async function scanProjectCommands(rootPath) {
         packageManager,
         entries,
       });
+    }
+    if (isGoModule(entries)) {
+      packages.push(await buildGoPackage(joinRel(relNames), entries));
     }
 
     const subDirs = entries.filter((e) => e && e.isDirectory === true && !SCAN_SKIP_DIRS.has(e.name));
@@ -191,6 +301,10 @@ export async function scanProjectCommands(rootPath) {
       entries: rootEntries,
     });
   }
+  // 根目录也可能同时是 Go module（wails 项目根既有 package.json 又有 go.mod）：两个生态都收。
+  if (isGoModule(rootEntries)) {
+    packages.push(await buildGoPackage("", rootEntries));
+  }
   for (const sub of rootEntries.filter((e) => e && e.isDirectory === true && !SCAN_SKIP_DIRS.has(e.name))) {
     if (packages.length >= MAX_PACKAGES) break;
     await walk(sub.path, [sub.name], 1, rootPackageManager);
@@ -202,6 +316,8 @@ export async function scanProjectCommands(rootPath) {
 
 /**
  * 包目录 → 分组显示名：根包返回 null（由渲染层用「根目录」本地化文案），子包返回目录路径。
+ * @description 分组名只用目录路径：同一目录下若同时存在 Go（服务端）与 Node（前端）两组命令，
+ *   会归入同一分组标题，靠排序（服务端在前）区分先后，不额外插入生态标题行。
  * @param {string} dir 相对根目录的 POSIX 路径（根包为 ""）
  * @returns {string|null}
  */
@@ -210,18 +326,23 @@ function nodeGroupLabel(dir) {
 }
 
 /**
- * 比较两个包目录：先比层级（父包在前），同层按字典序。
- * @description 多 package.json 时命令必须按包分组且父包先于子包；
- *   目录遍历顺序天然满足（父目录先访问），但缓存 / 后续合并不保证，故显式排序。
- * @param {string} a 包目录（根包 ""）
- * @param {string} b 包目录
+ * 比较两个生态分组：先比目录层级（父包在前），再比服务端/前端优先级（服务端在前），最后按字典序。
+ * @description 多标记文件时命令按包（目录）分组且父包先于子包；用户规矩要求同一层级内
+ *   服务端（Go/Wails）展示在前端（Node）之前。目录遍历顺序不保证，故显式排序。
+ * @param {{dir?: string, kind?: string}} a 生态项
+ * @param {{dir?: string, kind?: string}} b 生态项
  * @returns {number}
  */
-function compareGroupDir(a, b) {
-  const depthA = a ? a.split("/").length : 0;
-  const depthB = b ? b.split("/").length : 0;
+function compareEcosystem(a, b) {
+  const dirA = (a && a.dir) || "";
+  const dirB = (b && b.dir) || "";
+  const depthA = dirA ? dirA.split("/").length : 0;
+  const depthB = dirB ? dirB.split("/").length : 0;
   if (depthA !== depthB) return depthA - depthB;
-  return a < b ? -1 : a > b ? 1 : 0;
+  const priorityA = ECOSYSTEM_PRIORITY[(a && a.kind) || ""] ?? 2;
+  const priorityB = ECOSYSTEM_PRIORITY[(b && b.kind) || ""] ?? 2;
+  if (priorityA !== priorityB) return priorityA - priorityB;
+  return dirA < dirB ? -1 : dirA > dirB ? 1 : 0;
 }
 
 /**
@@ -234,7 +355,7 @@ function compareGroupDir(a, b) {
 export function flattenCommands(projectCommands) {
   const out = [];
   const ecosystems = projectCommands && Array.isArray(projectCommands.ecosystems) ? projectCommands.ecosystems : [];
-  const ordered = [...ecosystems].sort((x, y) => compareGroupDir(x.dir || "", y.dir || ""));
+  const ordered = [...ecosystems].sort(compareEcosystem);
   for (const eco of ordered) {
     const dir = eco.dir || "";
     const group = nodeGroupLabel(dir);

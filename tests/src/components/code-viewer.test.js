@@ -830,6 +830,48 @@ test('Git 右侧查看器: 差异视图右键弹出文件操作菜单（只读�
   assert.deepEqual(calls, ['refresh']);
 });
 
+test('代码预览: 根目录 package.json 的 scripts 行显示运行按钮并复用对应命令', () => {
+  const host = document.createElement('div');
+  let received = null;
+  const command = {
+    id: 'npm:dev',
+    label: 'dev',
+    labelFallback: 'dev',
+    cmd: 'npm run dev',
+    dir: '',
+    group: null,
+  };
+
+  renderCodeViewer(host, {
+    rootPath: 'D:/repo',
+    preview: {
+      kind: 'text',
+      name: 'package.json',
+      path: 'D:/repo/package.json',
+      text: '{\n  "scripts": {\n    "dev": "vite"\n  }\n}',
+      highlightedHtml: '{}',
+      isMarkdown: false,
+      truncated: false,
+    },
+    runCommands: () => [command],
+    onRunCommand: (value) => {
+      received = value;
+    },
+    onCopy: () => {},
+    t,
+  });
+
+  const buttons = host.querySelectorAll('.sfe-file-viewer-gutter-run');
+  assert.equal(buttons.length, 1, '根目录 scripts.dev 应生成一个行内运行按钮');
+  const icon = buttons[0].querySelector('svg');
+  assert.ok(icon, '运行按钮内部应存在 SVG 图标');
+  assert.equal(icon.getAttribute('width'), '14');
+  assert.equal(icon.getAttribute('height'), '14');
+
+  buttons[0].click();
+  assert.equal(received, command, '点击按钮应传入对应的根目录命令');
+});
+
 test('代码预览: 二级 package.json 按所属包目录显示 pnpm 脚本运行按钮', () => {
   const host = document.createElement('div');
   let received = null;
@@ -866,6 +908,96 @@ test('代码预览: 二级 package.json 按所属包目录显示 pnpm 脚本运�
   assert.ok(button, '二级 package.json 的脚本行应显示运行按钮');
   button.click();
   assert.equal(received, command);
+});
+
+test('代码预览: Go 源文件 func main() 行显示运行按钮（module 根 go run .）', () => {
+  const host = document.createElement('div');
+  let received = null;
+  const command = {
+    id: 'go:run',
+    label: 'go run .',
+    labelFallback: 'go run .',
+    cmd: 'go run .',
+    icon: 'go',
+    dir: '',
+  };
+  renderCodeViewer(host, {
+    rootPath: 'D:/go/demo',
+    preview: {
+      kind: 'text',
+      name: 'main.go',
+      path: 'D:/go/demo/main.go',
+      text: 'package main\n\nimport "fmt"\n\nfunc main() {\n\tfmt.Println("hi")\n}\n',
+      highlightedHtml: '<span>...</span>',
+      isMarkdown: false,
+      truncated: false,
+    },
+    copied: false,
+    runCommands: () => [command],
+    onRunCommand: (value) => {
+      received = value;
+    },
+    onCopy: () => {},
+    t,
+  });
+
+  const button = host.querySelector('.sfe-file-viewer-gutter-run');
+  assert.ok(button, 'func main() 行应显示运行按钮');
+  button.click();
+  assert.equal(received, command);
+});
+
+test('代码预览: Go 的 cmd/<name>/main.go 匹配 go run ./cmd/<name>（非 go run .）', () => {
+  const host = document.createElement('div');
+  let received = null;
+  const runDot = { id: 'go:run', label: 'go run .', cmd: 'go run .', icon: 'go', dir: 'server' };
+  const runCmd = { id: 'go:cmd/server', label: 'go run ./cmd/server', cmd: 'go run ./cmd/server', icon: 'go', dir: 'server' };
+  renderCodeViewer(host, {
+    rootPath: 'D:/go/liyong',
+    preview: {
+      kind: 'text',
+      name: 'main.go',
+      path: 'D:/go/liyong/server/cmd/server/main.go',
+      text: 'package main\n\nfunc main() {}\n',
+      highlightedHtml: '',
+      isMarkdown: false,
+      truncated: false,
+    },
+    copied: false,
+    runCommands: () => [runDot, runCmd],
+    onRunCommand: (value) => {
+      received = value;
+    },
+    onCopy: () => {},
+    t,
+  });
+
+  const button = host.querySelector('.sfe-file-viewer-gutter-run');
+  assert.ok(button, 'cmd/<name>/main.go 应显示运行按钮');
+  button.click();
+  assert.equal(received, runCmd, '应匹配 go run ./cmd/server 而非 go run .');
+});
+
+test('代码预览: Go 文件无 func main() 不显示运行按钮', () => {
+  const host = document.createElement('div');
+  renderCodeViewer(host, {
+    rootPath: 'D:/go/demo',
+    preview: {
+      kind: 'text',
+      name: 'util.go',
+      path: 'D:/go/demo/util.go',
+      text: 'package main\n\nfunc helper() {}\n',
+      highlightedHtml: '',
+      isMarkdown: false,
+      truncated: false,
+    },
+    copied: false,
+    runCommands: () => [{ id: 'go:run', label: 'go run .', cmd: 'go run .', icon: 'go', dir: '' }],
+    onRunCommand: () => {},
+    onCopy: () => {},
+    t,
+  });
+  assert.equal(host.querySelector('.sfe-file-viewer-gutter-run'), null);
 });
 
 test('预览区右键菜单: 运行分组按包显示组标题（根目录 / 子包路径，父包在前）', () => {

@@ -231,8 +231,7 @@ html:has(.app-shell.right-panel-fullscreen) .sfe-preview-pane {
   white-space: pre;
 }
 
-/* 行内「运行」按钮（对标 IDEA editor gutter 的 npm script 运行图标）：
-   常驻可见但克制（低透明度），悬停高亮；行高受限故用紧凑尺寸。 */
+/* 行内「运行」按钮：复用右上角 Run 控件的未运行样式（透明底、绿色 Play 图标）。 */
 .sfe-file-viewer-gutter-run {
   display: inline-flex;
   align-self: center;
@@ -245,16 +244,13 @@ html:has(.app-shell.right-panel-fullscreen) .sfe-preview-pane {
   border: none;
   border-radius: var(--radius-sm, 4px);
   background: transparent;
-  color: var(--text-muted);
+  color: var(--accent-green, var(--accent-color));
   cursor: pointer;
-  opacity: 0.55;
-  transition: opacity 0.12s ease, background 0.12s ease, color 0.12s ease;
+  transition: background 0.12s ease, color 0.12s ease;
 }
 
 .sfe-file-viewer-gutter-run:hover {
-  opacity: 1;
   background: var(--bg-hover);
-  color: var(--accent-green, var(--accent-color));
 }
 
 /* 语法代码内容主体（对标官方 .file-viewer-code-content） */

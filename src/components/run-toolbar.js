@@ -180,7 +180,7 @@ export function renderRunToolbar(container, options) {
       // dataset 标记命令 id：供 syncSelection() 高亮当前选中配置（不重建 DOM）。
       item.dataset.commandId = command.id;
       const icon = el("span", "sfe-run-dropdown-icon");
-      icon.appendChild(createActionIcon("package", 12));
+      icon.appendChild(createActionIcon(command.icon || "package", 12));
       item.appendChild(icon);
       item.appendChild(el("span", "sfe-run-dropdown-label", itemLabel));
       // 行内运行按钮：常驻占位（默认不可见，hover / 选中行时显现），保证下拉宽度不随 hover 变化。
@@ -240,8 +240,8 @@ export function renderRunToolbar(container, options) {
     const activeRunning = isRunning(activeCommand);
     const label = commandLabel(t, activeCommand);
 
-    // 配置选择器：常显当前配置名；运行中在图标上叠一个绿点（IDEA 同款）。
-    configIcon.replaceChildren(createActionIcon("package", 13));
+    // 配置选择器：常显当前配置名；图标按命令来源生态（node / go / wails）区分；运行中叠绿点（IDEA 同款）。
+    configIcon.replaceChildren(createActionIcon(activeCommand.icon || "package", 13));
     configIcon.classList.toggle("running", activeRunning);
     configName.textContent = label;
     configBtn.title = t("run.toolbar.selectCommand", "选择运行配置");

@@ -87,10 +87,11 @@ function writeClipboard(text) {
  * @param {(cols: number, rows: number) => void} [options.onResize] 尺寸变化回调
  * @param {boolean} [options.readOnly] 只读（模式 A 一次性运行）：禁止键盘输入
  * @param {(x: number, y: number) => void} [options.onContextMenu] 右键回调（由调用方弹菜单）
+ * @param {Function} [options.onSelectionChange] 选区变化回调（供调用方刷新「复制选中文本」按钮可用态）
  * @returns {{write: Function, fit: Function, focus: Function, clear: Function, scrollToBottom: Function, hasSelection: Function, getSelection: Function, paste: Function, selectAll: Function, cols: number, rows: number, dispose: Function}}
  */
 export function createXtermView(host, options = {}) {
-  const { onData, onResize, readOnly = false, onContextMenu } = options;
+  const { onData, onResize, readOnly = false, onContextMenu, onSelectionChange } = options;
 
   const term = new Terminal({
     cursorBlink: readOnly !== true,
@@ -131,6 +132,10 @@ export function createXtermView(host, options = {}) {
   });
   const resizeSub = term.onResize(({ cols, rows }) => {
     if (typeof onResize === "function") onResize(cols, rows);
+  });
+  // 选区变化（用户拖选 / 全选 / 清选区）：通知调用方刷新依赖选区的按钮可用态。
+  const selectionSub = term.onSelectionChange(() => {
+    if (typeof onSelectionChange === "function") onSelectionChange();
   });
 
   // 右键：拦截浏览器默认菜单，交给调用方弹出自定义菜单（复制/粘贴/清空/关闭…）。
@@ -218,6 +223,7 @@ export function createXtermView(host, options = {}) {
         if (typeof host.removeEventListener === "function") host.removeEventListener("contextmenu", handleContextMenu);
         dataSub.dispose();
         resizeSub.dispose();
+        selectionSub.dispose();
         term.dispose();
       } catch {
         // 忽略：重复释放

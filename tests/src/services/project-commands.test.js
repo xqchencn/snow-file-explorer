@@ -1,7 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { detectProjectCommands, flattenCommands, scanProjectCommands } from "../../../src/services/project-commands.js";
-import { resolveNodeEntry, readNodeScripts, nodeEntryFallback, detectPackageManager } from "../../../src/services/ecosystems.js";
+import {
+  resolveNodeEntry,
+  readNodeScripts,
+  nodeEntryFallback,
+  detectPackageManager,
+  readWails3Commands,
+  readWails2Commands,
+  readGoCommands,
+} from "../../../src/services/ecosystems.js";
 
 function file(name, path) {
   return { name, path, isDirectory: false };
@@ -214,6 +222,211 @@ test("scanProjectCommands：workspace 子包继承根目录 packageManager 并�
     assert.equal(command.packageManager, "pnpm");
     assert.equal(command.cmd, "pnpm run dev");
     assert.equal(command.dir, "apps/web");
+  } finally {
+    if (previous === undefined) delete globalThis.window;
+    else globalThis.window = previous;
+  }
+});
+
+/* ─────────────────────── Go / Wails 生态 ─────────────────────── */
+
+test("readGoCommands：build/run 定位 main 包入口，test/vet 保持模块级", () => {
+  // 无 main 入口（纯库）：build 也退化为模块级，无 run。
+  assert.deepEqual(
+    readGoCommands([]).map((c) => c.cmd),
+    ["go build ./...", "go test ./...", "go vet ./..."]
+  );
+  // 根有 main.go：build/run 定位到 "."，test/vet 仍为 ./...
+  assert.deepEqual(
+    readGoCommands([file("main.go", "D:/g/main.go")]).map((c) => c.cmd),
+    ["go build .", "go run .", "go test ./...", "go vet ./..."]
+  );
+  // 根无 main.go（入口在 cmd/<name>）：build/run 定位到 ./cmd/<name>，test/vet 仍为 ./...
+  assert.deepEqual(
+    readGoCommands([directory("cmd", "D:/g/cmd")], { cmdDirs: ["server"] }).map((c) => c.cmd),
+    ["go build ./cmd/server", "go run ./cmd/server", "go test ./...", "go vet ./..."]
+  );
+  // 无 main.go 且无 cmdDirs：不给 run，build 退化为模块级
+  assert.deepEqual(
+    readGoCommands([directory("cmd", "D:/g/cmd")]).map((c) => c.cmd),
+    ["go build ./...", "go test ./...", "go vet ./..."]
+  );
+  // 图标用 Go（而非 npm）
+  assert.ok(readGoCommands([]).every((c) => c.icon === "go"));
+});
+
+test("readWails3Commands：固定 wails3 task dev/package/build 三命令，图标用 Wails", () => {
+  const cmds = readWails3Commands({ prefix: "" });
+  assert.deepEqual(
+    cmds.map((c) => c.cmd),
+    ["wails3 task dev", "wails3 task package", "wails3 task build"]
+  );
+  assert.deepEqual(
+    cmds.map((c) => c.id),
+    ["wails3:dev", "wails3:package", "wails3:build"]
+  );
+  assert.ok(cmds.every((c) => c.icon === "wails"));
+});
+
+test("readWails2Commands：wails dev/build，图标用 Wails", () => {
+  const cmds = readWails2Commands();
+  assert.deepEqual(
+    cmds.map((c) => c.cmd),
+    ["wails dev", "wails build"]
+  );
+  assert.ok(cmds.every((c) => c.icon === "wails"));
+});
+
+test("detectProjectCommands：wails3 项目固定 wails3 task dev/package/build", () => {
+  const result = detectProjectCommands([
+    { dir: "", ecosystem: "go", entries: [], hasWails3: true },
+  ]);
+  const eco = result.ecosystems[0];
+  assert.equal(eco.kind, "go");
+  assert.equal(eco.id, "go");
+  assert.deepEqual(
+    eco.commands.map((c) => c.cmd),
+    ["wails3 task dev", "wails3 task package", "wails3 task build"]
+  );
+});
+
+test("detectProjectCommands：纯 Go 定位 main 包入口（build/run）+ 模块级 test/vet", () => {
+  const result = detectProjectCommands([
+    { dir: "server", ecosystem: "go", entries: [directory("cmd", "D:/g/server/cmd")], cmdDirs: ["server"] },
+  ]);
+  const eco = result.ecosystems[0];
+  assert.equal(eco.id, "go:server");
+  assert.deepEqual(
+    eco.commands.map((c) => c.cmd),
+    ["go build ./cmd/server", "go run ./cmd/server", "go test ./...", "go vet ./..."]
+  );
+});
+
+test("detectProjectCommands：wails2 项目（wails.json）走 wails dev/build", () => {
+  const result = detectProjectCommands([{ dir: "", ecosystem: "go", entries: [], hasWails2: true }]);
+  assert.deepEqual(
+    result.ecosystems[0].commands.map((c) => c.cmd),
+    ["wails dev", "wails build"]
+  );
+});
+
+test("排序规矩：同一目录下服务端（Go）展示在前端（Node）之前", () => {
+  const result = detectProjectCommands([
+    pkg("", { scripts: { dev: "vite" } }), // Node 先传入，仍应排后
+    { dir: "", ecosystem: "go", entries: [], hasWails3: true },
+  ]);
+  const flat = flattenCommands(result);
+  assert.deepEqual(
+    flat.map((c) => c.cmd),
+    ["wails3 task dev", "wails3 task package", "wails3 task build", "npm run dev"]
+  );
+  assert.equal(flat[0].ecosystem, "go");
+});
+
+test("排序规矩：父包层级优先于生态优先级（根 Node 仍排在子目录 Go 之前）", () => {
+  const result = detectProjectCommands([
+    pkg("", { scripts: { dev: "vite" } }),
+    { dir: "backend", ecosystem: "go", entries: [] },
+  ]);
+  const flat = flattenCommands(result);
+  assert.equal(flat[0].cmd, "npm run dev");
+  assert.equal(flat[0].dir, "");
+  assert.equal(flat[1].dir, "backend");
+});
+
+test("scanProjectCommands：根 Go module + frontend 子包，Go 居前且跳过独立 tests 模块", async () => {
+  const root = "D:/go/ClamAV-LMD-GUI";
+  const frontend = `${root}/frontend`;
+  const tests = `${root}/tests`;
+  const directories = new Map([
+    [
+      root,
+      [
+        file("go.mod", `${root}/go.mod`),
+        file("Taskfile.yml", `${root}/Taskfile.yml`),
+        file("main.go", `${root}/main.go`),
+        directory("frontend", frontend),
+        directory("tests", tests),
+      ],
+    ],
+    [frontend, [file("package.json", `${frontend}/package.json`)]],
+    // 独立 go 测试模块（自带 go.mod）：不应被识别为 go 包
+    [tests, [file("go.mod", `${tests}/go.mod`)]],
+  ]);
+  const contents = new Map([
+    [`${root}/go.mod`, "module clamav-lmd-gui\n\ngo 1.26.5\n\nrequire github.com/wailsapp/wails/v3 v3.0.0-alpha.99\n"],
+    [`${root}/Taskfile.yml`, "version: '3'\n\ntasks:\n  dev:\n    cmds:\n      - wails3 dev\n  build:\n    cmds:\n      - x\n"],
+    [`${frontend}/package.json`, JSON.stringify({ name: "frontend", scripts: { dev: "vite", build: "vite build" } })],
+    [`${tests}/go.mod`, "module github.com/chencn/go-desktop/tests\n\ngo 1.26.5\n"],
+  ]);
+  const previous = globalThis.window;
+  globalThis.window = {
+    snow: {
+      readDirectoryEntries: async (dirPath) => directories.get(dirPath) || [],
+      readFileContent: async (filePath) => ({ content: contents.get(filePath) || "", isBinary: false }),
+    },
+  };
+  try {
+    const result = await scanProjectCommands(root);
+    const flat = flattenCommands(result);
+    // 根 Go（wails3）：固定 wails3 task dev/package/build，排在最前
+    assert.deepEqual(flat[0].cmd, "wails3 task dev");
+    assert.equal(flat[0].dir, "");
+    assert.deepEqual(
+      flat.filter((c) => c.dir === "").map((c) => c.cmd),
+      ["wails3 task dev", "wails3 task package", "wails3 task build"]
+    );
+    // 独立测试模块被跳过
+    assert.ok(!flat.some((c) => c.dir === "tests" || c.dir.startsWith("tests/")));
+    // frontend 前端命令存在且排在根 Go 之后
+    const frontendIdx = flat.findIndex((c) => c.dir === "frontend");
+    const rootGoIdx = flat.findIndex((c) => c.dir === "" && c.cmd === "wails3 task dev");
+    assert.ok(frontendIdx > rootGoIdx);
+    assert.deepEqual(
+      flat.filter((c) => c.dir === "frontend").map((c) => c.cmd),
+      ["npm run dev", "npm run build"]
+    );
+  } finally {
+    if (previous === undefined) delete globalThis.window;
+    else globalThis.window = previous;
+  }
+});
+
+test("scanProjectCommands：根目录同时有 package.json 与 go.mod → Node 与 Wails 两个生态都识别", async () => {
+  const root = "D:/go/gyt-treatment";
+  const directories = new Map([
+    [
+      root,
+      [
+        file("package.json", `${root}/package.json`),
+        file("go.mod", `${root}/go.mod`),
+        file("Taskfile.yml", `${root}/Taskfile.yml`),
+        file("main.go", `${root}/main.go`),
+      ],
+    ],
+  ]);
+  const contents = new Map([
+    [`${root}/package.json`, JSON.stringify({ name: "gyt-treatment-shared", private: true, scripts: { dev: "vite" } })],
+    [`${root}/go.mod`, "module nzygyt.com/gyt-treatment\n\ngo 1.26.5\n\nrequire github.com/wailsapp/wails/v3 v3.0.0-beta.20\n"],
+    [`${root}/Taskfile.yml`, "version: '3'\n\ntasks:\n  dev:\n    cmds:\n      - wails3 dev\n"],
+  ]);
+  const previous = globalThis.window;
+  globalThis.window = {
+    snow: {
+      readDirectoryEntries: async (dirPath) => directories.get(dirPath) || [],
+      readFileContent: async (filePath) => ({ content: contents.get(filePath) || "", isBinary: false }),
+    },
+  };
+  try {
+    const result = await scanProjectCommands(root);
+    const flat = flattenCommands(result);
+    // 根目录既有 package.json 又有 go.mod：两个生态都必须产出（不能因有 package.json 就漏掉 Wails）。
+    assert.ok(flat.some((c) => c.cmd === "wails3 task dev"), "应识别出 wails3 命令");
+    assert.ok(flat.some((c) => c.cmd === "npm run dev"), "应识别出 Node 命令");
+    // 服务端（Go/Wails）在前端（Node）之前
+    const wailsIdx = flat.findIndex((c) => c.cmd === "wails3 task dev");
+    const nodeIdx = flat.findIndex((c) => c.cmd === "npm run dev");
+    assert.ok(wailsIdx < nodeIdx);
   } finally {
     if (previous === undefined) delete globalThis.window;
     else globalThis.window = previous;

@@ -95,6 +95,7 @@
   "run.stopAndClose": "停止並關閉",
   "run.close": "收合執行面板",
   "run.clear": "清空輸出",
+  "run.copySelection": "複製選取文字",
   "run.collapse": "收合執行面板",
   "run.minimize": "最小化終端面板",
   "run.showPanel": "顯示終端面板",

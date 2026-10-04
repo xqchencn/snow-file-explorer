@@ -25,6 +25,7 @@ import {
   getGitStatus,
   partitionGitFiles,
   gitStatusSignature,
+  collectGitFolderPaths,
 } from "./services/git-service.js";
 import { highlightCodeHtml, isLargeText } from "./components/highlighter.js";
 import { renderMarkdownHtml } from "./components/markdown-renderer.js";
@@ -225,7 +226,9 @@ export function mount(container, api, _options = {}) {
     diffMode: "unified",
     gitCommitMode: "commit",
     gitCommitMenuOpen: false,
-    collapsedStaged: new Set(),
+    // 首次加载仓库时，已暂存目录默认折叠；null 表示尚未初始化默认状态。
+    // 初始化后只响应用户自己的折叠/展开操作，不因 Git watcher 刷新而覆盖。
+    collapsedStaged: null,
     collapsedUnstaged: new Set(),
     preview: {
       kind: "empty",
@@ -287,6 +290,8 @@ export function mount(container, api, _options = {}) {
     state.confirmDialog = null;
     state.operationBusy = false;
     state.gitStatus = null;
+    state.collapsedStaged = null;
+    state.collapsedUnstaged = new Set();
     state.gitStatusMap = Object.create(null);
     state.gitignoreRules = [];
     state.gitPreview = null;
@@ -370,6 +375,12 @@ export function mount(container, api, _options = {}) {
     const prevSig = gitStatusSignature(state.gitStatus);
     const nextSig = gitStatusSignature(status);
     state.gitStatus = status;
+    // 首次获得仓库状态时只初始化一次：已暂存目录默认折叠，变更目录保持展开。
+    // 后续 watcher 刷新不重置集合，保证用户手动展开/折叠的选择不被覆盖。
+    if (state.collapsedStaged === null && status && status.isRepo) {
+      const { staged } = partitionGitFiles(status.files);
+      state.collapsedStaged = collectGitFolderPaths(staged);
+    }
     // 内容未变则跳过重绘（宿主 watcher 高频触发，无条件重建会让列表跳动）。
     if (prevSig === nextSig && prevSig !== "") return;
     // 底部同步栏（当前分支名 + ↑/↓ 计数）依赖 gitStatus，文件树视图下同样要刷新，
@@ -1831,6 +1842,12 @@ export function mount(container, api, _options = {}) {
     void copyToClipboard(term.title || "");
   }
 
+  /** 复制某 tab 终端的选中文本到系统剪贴板（运行窗口工具栏「复制选中文本」用）。 */
+  function copyTerminalSelection(id, text) {
+    if (!findTerminal(id)) return;
+    void copyToClipboard(text || "");
+  }
+
   /**
    * 读取系统剪贴板文本（终端右键「粘贴」用）。
    * @description 优先宿主 IPC `window.snow.readClipboardText`（走主进程，渲染进程无权限限制；
@@ -1898,6 +1915,7 @@ export function mount(container, api, _options = {}) {
       onCloseOthers: closeOtherTerminals,
       onCloseAll: () => closeAllTerminalsOfMode("run"),
       onCopyTab: copyTerminalTab,
+      onCopySelection: copyTerminalSelection,
       onPasteText: readClipboardText,
     };
   }

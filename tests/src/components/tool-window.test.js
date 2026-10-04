@@ -342,7 +342,8 @@ test("工具窗口: 运行窗口无「＋新建」，但有工具栏（重跑/�
   assert.ok(bar, "运行窗口必须有工具栏");
   assert.ok(bar.querySelector(".sfe-run-tb-btn.rerun"), "必须有重跑按钮");
   assert.ok(bar.querySelector(".sfe-run-tb-btn.stop"), "必须有停止按钮");
-  assert.equal(bar.querySelectorAll(".sfe-run-tb-btn").length, 5, "滚动到底/清空/更多共 5 个按钮");
+  assert.ok(bar.querySelector(".sfe-run-tb-btn.copy"), "必须有复制选中文本按钮");
+  assert.equal(bar.querySelectorAll(".sfe-run-tb-btn").length, 6, "复制选中文本/滚动到底/清空/更多共 6 个按钮");
 });
 
 test("工具窗口: 运行窗口工具栏按钮按激活 tab 的运行态启用/置灰", () => {
@@ -382,9 +383,56 @@ test("工具窗口: 运行窗口工具栏重跑/停止/清空/滚动到底回调
   );
   pane.querySelector(".sfe-run-tb-btn.rerun").click();
   pane.querySelector(".sfe-run-tb-btn.stop").click();
-  pane.querySelector(".sfe-run-tb-btn:not(.rerun):not(.stop):not(.more)").click();
+  pane.querySelector(".sfe-run-tb-btn:not(.rerun):not(.stop):not(.copy):not(.more)").click();
   assert.ok(calls.some((c) => c[0] === "rerun" && c[1] === "r1"));
   assert.ok(calls.some((c) => c[0] === "stop" && c[1] === "r1"));
+});
+
+test("工具窗口: 运行窗口「复制选中文本」有选区时可用并回调选中文本", () => {
+  const calls = [];
+  const created = [];
+  const createTerminal = (host, opts) => {
+    const record = { host, opts, selection: "line1\nline2" };
+    record.view = {
+      write() {},
+      fit() {},
+      focus() {},
+      clear() {},
+      scrollToBottom() {},
+      dispose() {},
+      hasSelection: () => record.selection !== "",
+      getSelection: () => record.selection,
+      paste() {},
+      selectAll() {},
+      cols: 80,
+      rows: 24,
+    };
+    created.push(record);
+    return record.view;
+  };
+  const terms = [term("r1", "dev", { mode: "run" })];
+  const { pane } = mount(
+    makeOpts({
+      kind: "run",
+      getTerminals: () => terms,
+      getActiveId: () => "r1",
+      factory: { createTerminal, created },
+      onCopySelection: (id, text) => calls.push([id, text]),
+    })
+  );
+  const copy = pane.querySelector(".sfe-run-tb-btn.copy");
+  assert.equal(copy.disabled, false, "有选区时「复制选中文本」可用");
+  copy.click();
+  assert.deepEqual(calls, [["r1", "line1\nline2"]], "应回调当前 tab id 与选中文本");
+});
+
+test("工具窗口: 运行窗口无选区时「复制选中文本」置灰", () => {
+  const terms = [term("r1", "dev", { mode: "run" })];
+  const factory = makeClipboardFactory(); // 其视图 hasSelection 恒为 false
+  const { pane } = mount(
+    makeOpts({ kind: "run", getTerminals: () => terms, getActiveId: () => "r1", factory })
+  );
+  assert.equal(pane.querySelector(".sfe-run-tb-btn.copy").disabled, true, "无选区时置灰");
 });
 
 // ───────────────────────── tab 右键菜单（两个窗口都有）─────────────────────────

@@ -1,13 +1,17 @@
 /**
  * 生态辅助函数 (src/services/ecosystems.js)
  *
- * 提供 Node 生态的两段纯逻辑，供 project-commands.js 组合：
- *   - resolveNodeEntry：包清单没有 scripts 时挑一个入口文件（仅根包用）。
- *   - readNodeScripts：由 package.json 的 scripts 生成对应包管理器的 `run` 命令，支持子包工作目录。
+ * 提供各生态的命令生成纯逻辑，供 project-commands.js 组合：
+ *   - Node：resolveNodeEntry / readNodeScripts（package.json scripts → 包管理器 run）。
+ *   - Go / Wails：readTaskfileCommands（Taskfile 任务名 → `task <name>`）、
+ *     readWails2Commands（wails.json → `wails dev|build`）、
+ *     readWails3NativeCommands（wails3 原生命令）、readGoCommands（go build|test|vet|run）。
  *
- * 说明：原先的 ECOSYSTEMS 声明式注册表已移除——命令识别已改为「扫描多个 package.json」
- *   的模型（支持多级目录 / 多个 package.json），根目录单包只是它的一个特例，
+ * 说明：原先的 ECOSYSTEMS 声明式注册表已移除——命令识别已改为「扫描标记文件」
+ *   的模型（多级目录 / 多标记文件），根目录单项目只是它的一个特例，
  *   旧的「根目录命中即整体识别」注册表契约不再适用。
+ *
+ * 所有函数均为无 IO 纯函数：调用方负责读文件 / 列目录，本模块只做文本解析与命令拼装。
  */
 
 /**
@@ -132,6 +136,8 @@ export function readNodeScripts(packageJson, opts = {}) {
       packageManager: manager,
       // 运行时会把 cwd 切到 package.json 所在目录，避免为不同包管理器维护 --prefix / --cwd 方言。
       cmd: `${manager} run ${name}`,
+      // 运行配置图标：Node 用 npm 图标（lucide package）。
+      icon: "package",
     });
   }
   return commands;
@@ -154,6 +160,96 @@ export function nodeEntryFallback(packageJson, entries) {
       labelKey: "run.nodeEntry",
       labelFallback: "Run entry",
       cmd: `node ${entry}`,
+      icon: "package",
     },
   ];
+}
+
+/* ─────────────────────────── Go / Wails ─────────────────────────── */
+
+/** 归一化命令前缀（相对根目录的 POSIX 路径）：去首尾斜杠。 */
+function normalizePrefix(prefix) {
+  return typeof prefix === "string" ? prefix.replace(/^\/+|\/+$/g, "") : "";
+}
+
+/**
+ * 生成命令对象的公共外壳（与 readNodeScripts 产物同构，供渲染层统一消费）。
+ * @param {string} kind 命令来源标识（go / wails / wails3），用作 id 前缀
+ * @param {string} prefix 所属目录前缀（根目录为 ""）
+ * @param {string} name 稳定名（用于 id，多项目同名不冲突）
+ * @param {string} cmd 实际执行的命令文本
+ * @param {string} [label] 显示名（缺省用 name）
+ * @param {string} [icon] 运行配置图标名（go / wails / package）
+ */
+function makeCommand(kind, prefix, name, cmd, label = name, icon = "package") {
+  return {
+    id: prefix ? `${kind}:${prefix}:${name}` : `${kind}:${name}`,
+    labelKey: null,
+    label,
+    labelFallback: prefix ? `${prefix}/${label}` : label,
+    cmd,
+    icon,
+  };
+}
+
+/**
+ * Wails v3 标准运行入口：固定的 `wails3 task dev` / `wails3 task package` / `wails3 task build`。
+ * @description wails3 项目自带 Taskfile，这三个是标准任务。用 wails3 CLI 的 `task` 子命令执行
+ *   （不依赖系统单独安装 go-task，wails3 内置）。不再解析 Taskfile 的全部任务，避免把
+ *   run / setup:docker / build:server 等一次性 / CI 任务也塞进运行列表（用户要求精简）。
+ * @param {{prefix?: string}} [opts]
+ */
+export function readWails3Commands(opts = {}) {
+  const prefix = normalizePrefix(opts.prefix);
+  return [
+    ["dev", "wails3 task dev"],
+    ["package", "wails3 task package"],
+    ["build", "wails3 task build"],
+  ].map(([name, cmd]) => makeCommand("wails3", prefix, name, cmd, cmd, "wails"));
+}
+
+/** Wails v2 命令：`wails dev` / `wails build`（图标同 Wails）。 */
+export function readWails2Commands(opts = {}) {
+  const prefix = normalizePrefix(opts.prefix);
+  return [
+    ["dev", "wails dev"],
+    ["build", "wails build"],
+  ].map(([name, cmd]) => makeCommand("wails", prefix, name, cmd, cmd, "wails"));
+}
+
+/**
+ * 纯 Go 项目命令（图标用 Go）。
+ * @description 两类作用域：
+ *   - build / run：必须定位到 main 包入口（`go build ./cmd/server` 才产出可执行文件，
+ *     `go build ./...` 不产出）。入口包：根 main.go → `.`；否则每个 `cmd/<name>/main.go` → `./cmd/<name>`。
+ *   - test / vet：作用域是整个模块，保持 `./...`（`go test ./cmd/server` 只测入口包，会漏掉 internal 等库代码）。
+ *   无 main 入口（纯库）时 build 也退化为 `./...`。
+ * @param {Array<{name: string, isDirectory?: boolean}>} entries 项目目录直接条目
+ * @param {{prefix?: string, cmdDirs?: string[]}} [opts] cmdDirs：cmd/ 下的子目录名（每个通常是一个 main 包）
+ */
+export function readGoCommands(entries, opts = {}) {
+  const prefix = normalizePrefix(opts.prefix);
+  const items = Array.isArray(entries) ? entries : [];
+  const hasMain = items.some((e) => e && e.name === "main.go" && e.isDirectory !== true);
+  const cmdDirs = (Array.isArray(opts.cmdDirs) ? opts.cmdDirs : []).filter((dir) => typeof dir === "string" && dir);
+
+  // 入口 main 包列表：根 main.go → "."；否则每个 cmd/<name> → "./cmd/<name>"。
+  const entryPackages = hasMain ? ["."] : cmdDirs.map((dir) => `./cmd/${dir}`);
+
+  const specs = [];
+  if (entryPackages.length) {
+    for (const pkg of entryPackages) {
+      // 多入口时用包路径作区分后缀，保证 id / label 不冲突（根入口用 root）。
+      const tag = pkg === "." ? "root" : pkg.replace(/^\.\//, "").replace(/\//g, "-");
+      specs.push([`build:${tag}`, `go build ${pkg}`]);
+      specs.push([`run:${tag}`, `go run ${pkg}`]);
+    }
+  } else {
+    // 无 main 入口（纯库）：build 也只能模块级。
+    specs.push(["build", "go build ./..."]);
+  }
+  // test / vet 恒为模块级：覆盖全部包。
+  specs.push(["test", "go test ./..."]);
+  specs.push(["vet", "go vet ./..."]);
+  return specs.map(([name, cmd]) => makeCommand("go", prefix, name, cmd, cmd, "go"));
 }

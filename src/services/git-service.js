@@ -294,6 +294,25 @@ export function buildGitFileTree(files) {
 }
 
 /**
+ * 收集 Git 文件列表中的所有目录路径，供分区默认折叠状态使用
+ * @param {Array} files GitFileStatus 列表
+ * @returns {Set<string>} 目录路径集合
+ */
+export function collectGitFolderPaths(files) {
+  const folders = new Set();
+  for (const file of Array.isArray(files) ? files : []) {
+    if (!file || !file.path) continue;
+    const segments = String(file.path).split(/[/\\]+/).filter(Boolean);
+    let path = "";
+    for (let index = 0; index < segments.length - 1; index += 1) {
+      path = path ? `${path}/${segments[index]}` : segments[index];
+      folders.add(path);
+    }
+  }
+  return folders;
+}
+
+/**
  * 统计树节点下的文件总数
  * @param {Object} node 树节点
  * @returns {number}

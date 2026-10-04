@@ -118,28 +118,12 @@ npm run build
 
 插件将两个工具窗口分开：
 
-- **运行**：从项目配置中识别可运行命令。通过运行工具栏或 `package.json` 脚本行内的运行按钮启动一次性任务；运行窗口显示输出、退出码，并可停止当前命令。
+- **运行**：从项目配置中识别可运行命令。通过运行工具栏或文件行内的运行按钮启动一次性任务；运行窗口显示输出、退出码，并可停止当前命令。
 - **终端**：打开真正可交互的终端，可以在光标处输入命令并连续操作；支持多个终端标签页。
 
 运行命令会使用 Snow App 的终端设置和当前项目目录。项目没有可识别的入口或宿主没有终端能力时，运行入口会提示原因，而不是猜测命令。
 
 运行工具栏常用操作：重新运行、停止当前命令、滚动到底部、清空输出。终端标签页支持新建、关闭，以及右键关闭其他标签页或全部标签页。
-
-#### Node.js、TypeScript 与前端框架
-
-运行入口不按框架名称写死规则，而是读取每个 `package.json` 的 `scripts`。因此 React、Vue、Vite、Next.js、Angular、Svelte 等项目只要正确提供 `dev`、`build`、`test` 等脚本，就会以同一套方式出现。
-
-包管理器按下面顺序识别：
-
-1. `package.json` 的 `packageManager`，例如 `"pnpm@9.0.0"`；
-2. 当前包目录的锁文件：`pnpm-lock.yaml`、`yarn.lock`、`bun.lock`/`bun.lockb`、`package-lock.json`；
-3. 没有证据时回退到 npm。
-
-生成的命令是对应包管理器的 `<manager> run <script>`。多包项目会把运行工作目录切换到对应 `package.json` 所在目录，不依赖 `npm --prefix`，所以 Yarn、pnpm、Bun 的 scripts 不会被强行改写成 npm 语法。
-
-workspace 子包默认继承根包的包管理器；子包自身声明的 `packageManager` 或锁文件可以覆盖继承值。包管理器命令本身必须安装在系统 PATH 中，或通过项目约定的 Corepack shim 提供；插件不会偷偷下载包管理器。
-
-TypeScript 和框架源码可以正常浏览、识别和运行其 `scripts`。插件不会自行编译 `.ts`、解析 JSX，也不会凭文件扩展名猜测启动命令；请在 `package.json.scripts` 中明确配置 `tsc`、`tsx`、Vite、Next 等实际命令。没有 `scripts` 时，仅工作区根目录支持 `index.js`、`main.js`、`app.js`、`server.js` 的 `node <entry>` 兜底，TypeScript 入口必须显式配置脚本。
 
 ### 国际化
 

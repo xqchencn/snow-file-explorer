@@ -29,7 +29,7 @@ function createGutterRunButton(command, onRunCommand, t) {
   btn.type = "button";
   btn.title = `${t("run.gutterRun", "运行")}: ${command.cmd || command.labelFallback || ""}`;
   btn.setAttribute("aria-label", btn.title);
-  btn.appendChild(createActionIcon("play", 10));
+  btn.appendChild(createActionIcon("play", 14));
   btn.addEventListener("click", (event) => {
     event.preventDefault();
     event.stopPropagation();
@@ -57,7 +57,8 @@ function buildScriptCommandMap(preview, runCommands, rootPath) {
   const relativePackagePath = rootPath ? relativePath(rootPath, preview.path) : "package.json";
   const normalizedPackagePath = String(relativePackagePath || "").replace(/\\/g, "/");
   if (!normalizedPackagePath || !/package\.json$/i.test(normalizedPackagePath)) return map;
-  const packageDir = normalizedPackagePath.replace(/\/package\.json$/i, "").replace(/^\.\/+/, "");
+  // 同时覆盖根目录 `package.json`（无前置 `/`）和子包 `dir/package.json`，否则根命令的空 dir 永远无法命中。
+  const packageDir = normalizedPackagePath.replace(/(?:^|\/)package\.json$/i, "").replace(/^\.\/+/, "");
   const packageDirKey = packageDir.toLowerCase();
   const packageCommands = commands.filter((command) => {
     const commandDir = typeof command?.dir === "string" ? command.dir : command?.group || "";
@@ -74,6 +75,73 @@ function buildScriptCommandMap(preview, runCommands, rootPath) {
     });
     if (command) map.set(line, command);
   }
+  return map;
+}
+
+/**
+ * 找出 Go 源文件中 `func main()` 所在行（1 基）。
+ * @description 只认「函数名恰为 main 且无接收者」的顶层函数定义；忽略注释行，避免误判 `// func main()`。
+ * @param {string} text Go 源文件文本
+ * @returns {number|null} 行号；未找到返回 null
+ */
+function findGoMainLine(text) {
+  const lines = String(text == null ? "" : text).split(/\r\n|\r|\n/);
+  for (let i = 0; i < lines.length; i += 1) {
+    const code = lines[i].replace(/\/\/.*$/, "").trim();
+    if (/^func\s+main\s*\(\s*\)/.test(code)) return i + 1;
+  }
+  return null;
+}
+
+/**
+ * 由 `go run` 命令反推其入口包目录（相对工作区，POSIX）。
+ * @description `go run .` → 命令自身 dir；`go run ./cmd/<name>` → `<dir>/cmd/<name>`。
+ *   用于把「命令 dir 是 module 根、而 main.go 在 cmd/<name>/ 下」的情况对应起来。
+ * @param {Object} command 命令对象
+ * @returns {string|null} 入口包目录（相对工作区）；非 go run 命令返回 null
+ */
+function goRunEntryDir(command) {
+  const matched = /^go run\s+(\S+)\s*$/.exec(String(command?.cmd || "").trim());
+  if (!matched) return null;
+  const dir = String(command?.dir || "").replace(/\\/g, "/").replace(/^\.\/+|\/+$/g, "");
+  const target = matched[1];
+  if (target === ".") return dir;
+  const rel = target.replace(/^\.\//, "").replace(/\/+$/, "");
+  return dir ? `${dir}/${rel}` : rel;
+}
+
+/**
+ * 若当前预览是 Go 的 main 包文件（含 `func main()`），返回「行号 → 运行命令」映射。
+ * @description 对标 IDEA：`func main()` 旁给出 ▶，运行该文件所属 Go module 的入口。
+ *   入口命令由数据层按目录生成（`go run .` 或 `go run ./cmd/<name>`）；此处按命令的入口包目录
+ *   与文件所在目录匹配（module 根 main.go → `go run .`；cmd/<name>/main.go → `go run ./cmd/<name>`）。
+ * @param {Object|null} preview 预览状态
+ * @param {Function} [runCommands] 读取扁平命令列表
+ * @param {string} [rootPath] 工作区根目录路径
+ * @returns {Map<number, Object>}
+ */
+function buildGoMainCommandMap(preview, runCommands, rootPath) {
+  const map = new Map();
+  if (!preview || preview.kind !== "text" || !/\.go$/i.test(preview.name || "")) return map;
+  if (typeof runCommands !== "function") return map;
+  const line = findGoMainLine(preview.text);
+  if (!line) return map;
+
+  const commands = runCommands();
+  if (!Array.isArray(commands) || !commands.length) return map;
+
+  // preview.path 绝对路径 → 相对工作区；命令 dir / 入口目录都是相对工作区路径。
+  const relPath = rootPath ? relativePath(rootPath, preview.path) : preview.name;
+  const normalized = String(relPath || "").replace(/\\/g, "/");
+  const fileDir = (normalized.includes("/") ? normalized.replace(/\/[^/]*$/, "") : "")
+    .replace(/^\.\/+|\/+$/g, "")
+    .toLowerCase();
+
+  const runCommand = commands.find((command) => {
+    const entryDir = goRunEntryDir(command);
+    return entryDir != null && entryDir.toLowerCase() === fileDir;
+  });
+  if (runCommand) map.set(line, runCommand);
   return map;
 }
 
@@ -531,8 +599,13 @@ export function renderCodeViewer(
       const scroll = el("div", "sfe-file-viewer-code-scroll");
       const rawText = String(preview.text || "");
       const linesArray = rawText.split(/\r\n|\r|\n/);
-      // package.json 的 scripts 行 → 命令映射（行号槽 / 虚拟行内渲染 ▶，两分支共用）
-      const scriptCommandMap = buildScriptCommandMap(preview, runCommands, rootPath);
+      // 运行入口 ▶ 的行号映射（行号槽 / 虚拟行内渲染，两分支共用）：
+      //   - package.json：scripts 各行 → 对应 npm/pnpm… 命令；
+      //   - Go 源文件：`func main()` 行 → 该 module 的 go run 入口。
+      const runLineMap = new Map([
+        ...buildScriptCommandMap(preview, runCommands, rootPath),
+        ...buildGoMainCommandMap(preview, runCommands, rootPath),
+      ]);
 
       // 大文件已被高亮熔断降级为纯文本，逐行渲染不会切坏跨行 token；
       // 虚拟列表只渲染「可视区 + 缓冲」的行，DOM 数量与总行数解耦，因此无需截断内容。
@@ -545,8 +618,8 @@ export function renderCodeViewer(
           renderRow: (lineText, index) => {
             const row = el("div", "sfe-file-viewer-line");
             row.appendChild(el("span", "sfe-file-viewer-line-no", String(index + 1)));
-            // package.json 的 scripts 行内追加 ▶（与整块高亮模式一致的 gutter 运行入口）
-            const command = scriptCommandMap.get(index + 1);
+            // 命中运行入口的行内追加 ▶（与整块高亮模式一致的 gutter 运行入口）
+            const command = runLineMap.get(index + 1);
             if (command) row.appendChild(createGutterRunButton(command, onRunCommand, t));
             row.appendChild(el("span", "sfe-file-viewer-line-text", lineText));
             return row;
@@ -559,13 +632,13 @@ export function renderCodeViewer(
         const total = linesArray.length;
 
         // 行号槽（整列 sticky 于横向滚动时为代码让位）。
-        // package.json：命中 scripts 的行在行号后追加 ▶（对标 IDEA editor gutter 的运行图标）；
+        // 命中运行入口的行（package.json scripts / Go func main）在行号后追加 ▶（对标 IDEA editor gutter）；
         //   行号槽由整块文本改为逐行元素，代码正文仍整块高亮（不切碎跨行 Prism token）。
         const gutter = el("div", "sfe-file-viewer-line-numbers");
         for (let i = 1; i <= total; i++) {
           const row = el("div", "sfe-file-viewer-gutter-row");
           row.appendChild(el("span", "sfe-file-viewer-gutter-no", String(i)));
-          const command = scriptCommandMap.get(i);
+          const command = runLineMap.get(i);
           if (command) row.appendChild(createGutterRunButton(command, onRunCommand, t));
           gutter.appendChild(row);
         }
