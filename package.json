@@ -1,6 +1,6 @@
 {
   "name": "snow-plugin-file-explorer",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "Snow App File Explorer Plugin with syntax highlighting and git status",
   "main": "index.js",
   "type": "module",
