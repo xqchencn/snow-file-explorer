@@ -1,12 +1,12 @@
 {
   "name": "snow-plugin-file-explorer",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Snow App File Explorer Plugin with syntax highlighting and git status",
   "main": "index.js",
   "type": "module",
   "scripts": {
-    "generate": "node tools/generate.mjs",
     "build": "node build.js",
+    "generate": "node tools/generate.mjs",
     "lint": "eslint src build.js tools",
     "test": "node --test"
   },

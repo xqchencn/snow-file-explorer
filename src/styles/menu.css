@@ -4,11 +4,19 @@
    （三点下拉菜单已拆除：主视图切换移到左侧入口栏，视图开关移到文件树右键菜单）
    ========================================================================== */
 
-/* 勾选型右键菜单项（视图开关）：左侧为勾选标记位（勾选时放 ✓ 图标）。 */
+/* 勾选型右键菜单项（视图开关）：✓ 标记位在【右侧】，勾选时显示图标。 */
 .sfe-context-toggle {
   display: flex;
   align-items: center;
   gap: 6px;
+}
+
+.sfe-context-toggle-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .sfe-context-toggle-check {
@@ -18,15 +26,8 @@
   width: 14px;
   height: 14px;
   flex-shrink: 0;
+  margin-left: auto;
   color: var(--accent-color);
-}
-
-.sfe-context-toggle-label {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 /* 文件树右键菜单：独立于工具栏开关菜单，使用 fixed 避免被滚动容器裁切。 */
@@ -58,6 +59,19 @@
   line-height: 1.4;
   text-align: left;
   cursor: pointer;
+}
+
+/* 分组标题：预览区右键「运行」分组的包（文件夹）名，根目录 / 子包路径小字标注。 */
+.sfe-context-menu-group {
+  padding: 6px 9px 2px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .sfe-context-menu-item:hover:not(:disabled) {

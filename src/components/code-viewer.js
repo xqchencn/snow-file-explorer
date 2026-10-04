@@ -82,11 +82,13 @@ function clearViewerContextMenu(bodyEl) {
 
 /** 绑定打开文件内容区的菜单；文件操作与文本编辑动作共用一个菜单。 */
 function bindViewerContextMenu(bodyEl, opts) {
-  if (!bodyEl || !opts.preview) return;
+  if (!bodyEl) return;
   const handleContextMenu = (event) => {
     if (event.target?.closest?.(".sfe-viewer-context-menu")) return;
     event.preventDefault();
     event.stopPropagation();
+    // 即使当前无文件（空态）也弹菜单：仓库级操作（如刷新）不依赖已打开文件；
+    //   具体哪些菜单项可用由 openViewerContextMenu 按已注入的回调决定。
     openViewerContextMenu(bodyEl, event.clientX, event.clientY, event.target, opts);
   };
   bodyEl.addEventListener("contextmenu", handleContextMenu);
@@ -244,11 +246,18 @@ function openViewerContextMenu(bodyEl, x, y, target, opts) {
     addItem("refresh", t("action.refresh", "刷新"), "refresh", onRefresh);
   }
   // 运行分组：列出该项目全部可运行命令（npm scripts），命中几条渲染几条（对齐 IDEA 右键 Run）。
+  // 多 package.json：按包（文件夹）分组并加组标题，父包由数据层排在前。
   if (canRun) {
     const commands = runCommands();
     if (Array.isArray(commands) && commands.length) {
       addSeparator();
+      let lastGroup;
       for (const command of commands) {
+        const group = command.group || null;
+        if (group !== lastGroup) {
+          menu.appendChild(el("div", "sfe-context-menu-group", group || t("run.groupRoot", "根目录")));
+          lastGroup = group;
+        }
         const label = command.labelKey ? t(command.labelKey, command.labelFallback) : command.labelFallback;
         addItem(`run:${command.id}`, `${t("run.menuRun", "运行")} · ${label}`, "play", () =>
           onRunCommand(command)
@@ -288,6 +297,7 @@ function openViewerContextMenu(bodyEl, x, y, target, opts) {
  * @param {Function} [options.onRefresh] 重新读取当前文件回调（仅只读态显示，编辑态不显示）
  * @param {boolean} [options.editable=false] 当前是否处于编辑状态
  * @param {boolean} [options.saving=false] 是否正在保存
+ * @param {string} [options.emptyHint] 无文件时空态提示文案（默认「选择一个文件即可预览。」）
  * @param {Function} options.t 本地化翻译函数
  */
 export function renderCodeViewer(
@@ -309,6 +319,7 @@ export function renderCodeViewer(
     onRunCommand,
     editable = false,
     saving = false,
+    emptyHint,
     t,
   }
 ) {
@@ -338,7 +349,8 @@ export function renderCodeViewer(
 
   if (!preview) {
     const empty = el("div", "sfe-file-viewer-empty");
-    empty.appendChild(el("div", null, t("preview.hint", "选择一个文件即可预览。")));
+    // 允许调用方覆盖空态提示（如 Git 右侧查看器：「选择左侧变更文件查看差异」）。
+    empty.appendChild(el("div", null, emptyHint || t("preview.hint", "选择一个文件即可预览。")));
     bodyEl.appendChild(empty);
     return;
   }

@@ -13,8 +13,35 @@
  *   单测注入假实现（node 环境无 DOM，无法真跑 xterm），保证组件逻辑可单测。
  */
 
-import { el } from "../utils/dom.js";
+import { el, copyToClipboard } from "../utils/dom.js";
 import { createActionIcon } from "../icons/action-icons.js";
+
+/**
+ * 读取系统剪贴板文本。
+ * @description 优先宿主 IPC（window.snow.readClipboardText，走主进程、无渲染进程权限限制，
+ *   宿主终端自身粘贴即用此 API）；否则退回标准 Clipboard API；都不可用返回空串。
+ * @returns {Promise<string>}
+ */
+function readClipboardText() {
+  const snow = typeof window !== "undefined" ? window.snow : null;
+  if (snow && typeof snow.readClipboardText === "function") {
+    return Promise.resolve(snow.readClipboardText())
+      .then((text) => String(text || ""))
+      .catch(() => "");
+  }
+  if (typeof navigator !== "undefined" && navigator.clipboard && typeof navigator.clipboard.readText === "function") {
+    return navigator.clipboard.readText()
+      .then((text) => String(text || ""))
+      .catch(() => "");
+  }
+  return Promise.resolve("");
+}
+
+/** 剪贴板是否有可粘贴文本。 */
+async function hasClipboardText() {
+  const text = await readClipboardText();
+  return !!text;
+}
 
 /** 创建工具窗口内的图标按钮（统一 type / title / aria-label）。 */
 function iconButton(className, iconName, title, size = 14) {
@@ -47,7 +74,8 @@ function iconButton(className, iconName, title, size = 14) {
  * @param {Function} [options.onCloseOthers] 关闭其它 tab：(id) => void
  * @param {Function} [options.onCloseAll] 关闭全部 tab：() => void
  * @param {Function} [options.onCopyTab] 复制该 tab 的标识（命令 / 标题）：(id) => void
- * @returns {{rebuild: Function, syncActive: Function, write: Function, getSizes: Function, fit: Function, focus: Function, dispose: Function}}
+ * @param {Function} [options.onPasteText] 终端右键「粘贴」的剪贴板文本来源：() => Promise<string>
+ * @returns {{rebuild: Function, syncActive: Function, write: Function, getSizes: Function, fit: Function, focus: Function, clear: Function, scrollToBottom: Function, dispose: Function}}
  */
 export function renderToolWindow(container, options) {
   const {
@@ -68,6 +96,7 @@ export function renderToolWindow(container, options) {
     onCloseOthers,
     onCloseAll,
     onCopyTab,
+    onPasteText,
   } = options;
   const isRun = kind === "run";
 
@@ -128,6 +157,12 @@ export function renderToolWindow(container, options) {
 
   // ── 终端容器：每个终端一个 host（激活者显示，其余隐藏；xterm 实例常驻不销毁）──
   const body = el("div", "sfe-run-body");
+  // 内容区（xterm 之外的空白）右键：退回当前 tab 的右键菜单。
+  body.addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    openActiveTabMenu(event.clientX, event.clientY);
+  });
   container.appendChild(body);
 
   // ── tab 右键菜单（两个窗口都有）+ 运行工具栏 ⋮ 菜单（复用同一浮动层）──
@@ -182,23 +217,38 @@ export function renderToolWindow(container, options) {
       }
       const row = el("button", "sfe-popup-menu-item");
       row.type = "button";
+      // 禁用项（如剪贴板为空的「粘贴」）：置灰且点击无效。
+      if (item.disabled) row.disabled = true;
       if (item.icon) row.appendChild(createActionIcon(item.icon, 12));
       row.appendChild(el("span", "sfe-popup-menu-label", item.label));
       row.addEventListener("click", (event) => {
         event.stopPropagation();
+        if (item.disabled) return;
         closeMenu();
         if (typeof item.onClick === "function") item.onClick();
       });
       menu.appendChild(row);
     }
-    // 定位：把视口坐标换算为容器内坐标（窗口容器 position:relative）。
-    const rect =
+    // 先脱离 hidden 才能测量真实尺寸用于定位。
+    menu.hidden = false;
+    // 视口坐标 → 容器内坐标（容器 position:relative）。
+    const containerRect =
       typeof container.getBoundingClientRect === "function"
         ? container.getBoundingClientRect()
         : { left: 0, top: 0 };
-    menu.style.left = `${Math.max(0, x - (rect.left || 0))}px`;
-    menu.style.top = `${Math.max(0, y - (rect.top || 0))}px`;
-    menu.hidden = false;
+    const vw = (typeof window !== "undefined" && window.innerWidth) || 0;
+    const vh = (typeof window !== "undefined" && window.innerHeight) || 0;
+    const rect =
+      typeof menu.getBoundingClientRect === "function"
+        ? menu.getBoundingClientRect()
+        : { width: menu.offsetWidth || 0, height: menu.offsetHeight || 0 };
+    // 用视口坐标 clamp，保证菜单不被面板上/下/右边缘遮挡；空间不足时向左/上翻转。
+    let left = x;
+    if (vw && left + rect.width + 4 > vw) left = Math.max(4, x - rect.width);
+    let top = y;
+    if (vh && top + rect.height + 4 > vh) top = Math.max(4, y - rect.height);
+    menu.style.left = `${Math.max(0, left - (containerRect.left || 0))}px`;
+    menu.style.top = `${Math.max(0, top - (containerRect.top || 0))}px`;
   }
 
   /** 某 tab 的右键菜单项（终端 / 运行共用，运行窗口另加「停止」）。 */
@@ -218,6 +268,93 @@ export function renderToolWindow(container, options) {
     items.push({ label: t("run.closeOthers", "关闭其它"), onClick: () => onCloseOthers && onCloseOthers(id) });
     items.push({ label: t("run.closeAll", "关闭全部"), onClick: () => onCloseAll && onCloseAll() });
     return items;
+  }
+
+  /** 打开某 tab 的右键菜单（tab 本身 / 内容区空白均复用）。 */
+  function openTabMenu(id, x, y) {
+    menuTabId = id;
+    openMenu(tabMenuItems(id), x, y);
+  }
+
+  /** 内容区右键：对当前激活 tab 打开菜单。 */
+  function openActiveTabMenu(x, y) {
+    const active = activeTerminal();
+    if (active) openTabMenu(active.id, x, y);
+  }
+
+  /**
+   * 某 tab 的「关闭类」菜单项（去掉复制命令 / 运行窗口的停止·重新运行），供内容区菜单复用。
+   * @param {string} id tab id
+   * @returns {Array} 菜单项
+   */
+  function closeMenuItems(id) {
+    const out = [];
+    for (const item of tabMenuItems(id)) {
+      if (item.separator) continue;
+      if (item.label === t("run.copyTab", "复制命令")) continue;
+      if (isRun && (item.label === t("run.stop", "停止") || item.label === t("run.restart", "重新运行"))) continue;
+      out.push(item);
+    }
+    return out;
+  }
+
+  /**
+   * 打开「含剪贴板」菜单：剪贴板有文本时才把「粘贴」项启用（否则置灰不可点）。
+   * @param {Array} items 菜单项（粘贴项需带 paste:true 标记）
+   */
+  function openClipboardMenu(items, x, y) {
+    (async () => {
+      const hasText = await hasClipboardText();
+      openMenu(
+        hasText ? items : items.map((it) => (it.paste ? { ...it, disabled: true } : it)),
+        x,
+        y,
+      );
+    })();
+  }
+
+  /**
+   * xterm 右键菜单：复制 / 粘贴 / 全选（内容区动作）+ 该 tab 的关闭项（复用 tabMenuItems）。
+   * @description 只读（模式 A 运行）终端不提供「粘贴」——xterm 已禁用 stdin；
+   *   可交互终端仅在剪贴板有文本时启用「粘贴」（异步读取后再决定 enabled）。
+   */
+  function openTerminalMenu(id, x, y) {
+    const term = list().find((x) => x && x.id === id);
+    const entry = views.get(id);
+    const view = entry && entry.view;
+    const readOnly = term ? term.mode === "run" : false;
+    const hasSel = !!(view && typeof view.hasSelection === "function" && view.hasSelection());
+    const items = [];
+    if (hasSel) {
+      items.push({
+        label: t("action.copySelection", "复制"),
+        icon: "copy",
+        onClick: () => {
+          if (view && typeof view.getSelection === "function") void copyToClipboard(view.getSelection());
+        },
+      });
+    }
+    let needClipboard = false;
+    if (!readOnly) {
+      items.push({ label: t("action.paste", "粘贴"), icon: "clipboardPaste", paste: true, onClick: () => void pasteInto(id) });
+      needClipboard = true;
+    }
+    items.push({ label: t("run.selectAll", "全选"), icon: "code", onClick: () => view && view.selectAll && view.selectAll() });
+    items.push({ separator: true });
+    for (const item of closeMenuItems(id)) items.push(item);
+    if (needClipboard) openClipboardMenu(items, x, y);
+    else openMenu(items, x, y);
+  }
+
+  /** 读取剪贴板文本并写入某终端（异步）。 */
+  function pasteInto(id) {
+    if (typeof onPasteText !== "function") return;
+    Promise.resolve(onPasteText())
+      .then((text) => {
+        const entry = views.get(id);
+        if (text && entry && entry.view && typeof entry.view.paste === "function") entry.view.paste(text);
+      })
+      .catch(() => {});
   }
 
   /** ⋮ 更多菜单（运行窗口工具栏）：停止全部 / 关闭其它 / 关闭全部。 */
@@ -330,6 +467,8 @@ export function renderToolWindow(container, options) {
         onResize: (cols, rows) => {
           if (typeof term.onResize === "function") term.onResize(cols, rows);
         },
+        // 终端内容区右键：复制 / 粘贴 / 全选 + 关闭项（由组件弹菜单）。
+        onContextMenu: (x, y) => openTerminalMenu(term.id, x, y),
       });
       views.set(term.id, { view, host });
     }

@@ -47,6 +47,7 @@
   "git.diffUnavailable": "Unable to read diff",
   "git.diffBinary": "Binary file — no diff available.",
   "git.noDiff": "No text changes",
+  "git.previewHint": "Select a changed file on the left to view its diff.",
   "git.folderChanged": "Contains changes",
   "git.aheadCount": "{{count}} commits to push",
   "git.behindCount": "{{count}} commits to pull",
@@ -123,6 +124,8 @@
   "run.window.stopAll": "Stop all",
   "run.scrollToEnd": "Scroll to end",
   "run.copyTab": "Copy command",
+  "run.selectAll": "Select all",
+  "run.groupRoot": "Root",
   "run.closeOthers": "Close others",
   "run.closeAll": "Close all"
 }

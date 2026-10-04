@@ -389,25 +389,47 @@ export function mount(container, api, _options = {}) {
   // ------------------------------------------------------------------
   // Git 变更视图操作
   // ------------------------------------------------------------------
-  // 执行一个 Git 写操作：置忙 → 执行 → 刷新，失败仅记录
-  // 返回操作结果，便于调用方按 success 决定后续（如仅成功时清空选中）
-  async function runGitAction(busy, fn) {
-    if (state.gitBusy) return null;
-    state.gitBusy = busy;
-    renderGitPaneCommit();
-    renderGitPaneSync();
+  // Git 写操作队列：串行执行，忙时入队而非丢弃。
+  // 旧实现 `if (state.gitBusy) return null` 会静默吞掉忙碌期的点击（表现为「点了没反应 /
+  // 要等一会 / 得先点别处」）；排队后连点会依次执行，且不会并发写同一仓库。
+  const gitActionQueue = [];
+  let gitActionRunning = false;
+
+  /** 串行排空队列；每个操作执行前后同步提交栏 / 底栏的忙碌态。 */
+  async function drainGitActions() {
+    if (gitActionRunning) return;
+    gitActionRunning = true;
     try {
-      return await fn();
-    } catch (err) {
-      console.warn("[FileExplorer] Git 操作失败:", err);
-      return null;
+      while (gitActionQueue.length && !disposed) {
+        const { busy, fn } = gitActionQueue.shift();
+        state.gitBusy = busy;
+        renderGitPaneCommit();
+        renderGitPaneSync();
+        try {
+          await fn();
+        } catch (err) {
+          console.warn("[FileExplorer] Git 操作失败:", err);
+        }
+      }
     } finally {
+      gitActionRunning = false;
       if (!disposed) {
         state.gitBusy = null;
         renderGitPaneCommit();
         renderGitPaneSync();
       }
     }
+  }
+
+  /**
+   * 执行一个 Git 写操作（忙时入队，串行执行，不丢用户点击）。
+   * @param {string} busy 进行中的操作名（用于提交栏 / 底栏忙碌态）
+   * @param {Function} fn 实际写操作（内部自行 refresh）
+   * @returns {Promise<void>}
+   */
+  function runGitAction(busy, fn) {
+    gitActionQueue.push({ busy, fn });
+    return drainGitActions();
   }
 
   function handleStageToggle(files, section) {
@@ -676,7 +698,11 @@ export function mount(container, api, _options = {}) {
   // Git 差异查看器右键「刷新」：重新拉取差异与工作区完整内容（该视图天然只读）。
   async function handleGitPreviewRefresh() {
     const gp = state.gitPreview;
-    if (!gp || !gp.absPath) return;
+    // 空态（未打开文件）没有具体差异可刷：回落到刷新左侧变更列表与状态，而不是空操作。
+    if (!gp || !gp.absPath) {
+      await refreshGitAll();
+      return;
+    }
     state.gitPreview = { ...gp, diff: { loading: true, result: null, error: "" } };
     renderGitPreview();
     await loadGitPreviewDiff(gp);
@@ -1037,6 +1063,25 @@ export function mount(container, api, _options = {}) {
     void copyPathText(file.path);
   }
 
+  // Git 右侧查看器右键：按当前打开的差异文件（state.gitPreview.relPath/absPath）。
+  async function handleGitPreviewRevealFile() {
+    const gp = state.gitPreview;
+    if (!gp || !gp.absPath) return;
+    await handleRevealInExplorer({ path: gp.absPath });
+  }
+
+  function handleGitPreviewCopyPath() {
+    const gp = state.gitPreview;
+    if (!gp || !gp.absPath) return;
+    void copyPathText(gp.absPath);
+  }
+
+  function handleGitPreviewCopyRelativePath() {
+    const gp = state.gitPreview;
+    if (!gp || !gp.relPath) return;
+    void copyPathText(gp.relPath);
+  }
+
   function handleGitCopyAbsolutePath(file) {
     if (!file || !state.rootPath) return;
     void copyPathText(joinPath(state.rootPath, file.path));
@@ -1332,17 +1377,17 @@ export function mount(container, api, _options = {}) {
     };
     const separator = () => menu.appendChild(el("div", "sfe-context-menu-separator"));
 
-    // 勾选型菜单项（视图开关）：左侧用 ✓ 标记勾选态，未勾选留空位保持对齐。
+    // 勾选型菜单项（视图开关）：右侧用 ✓ 标记勾选态（与常见菜单一致），未勾选留空位保持对齐。
     const addToggleItem = (label, checked, action, isDisabled = false) => {
       const item = el("button", "sfe-context-menu-item sfe-context-toggle" + (isDisabled ? " disabled" : ""));
       item.type = "button";
       item.disabled = isDisabled;
       item.setAttribute("role", "menuitemcheckbox");
       item.setAttribute("aria-checked", checked ? "true" : "false");
+      item.appendChild(el("span", "sfe-context-toggle-label", label));
       const mark = el("span", "sfe-context-toggle-check");
       if (checked) mark.appendChild(createActionIcon("check", 13));
       item.appendChild(mark);
-      item.appendChild(el("span", "sfe-context-toggle-label", label));
       item.addEventListener("click", () => {
         if (!isDisabled && !state.operationBusy) action();
       });
@@ -1871,6 +1916,31 @@ export function mount(container, api, _options = {}) {
     void copyToClipboard(term.title || "");
   }
 
+  /**
+   * 读取系统剪贴板文本（终端右键「粘贴」用）。
+   * @description 优先宿主 IPC `window.snow.readClipboardText`（走主进程，渲染进程无权限限制；
+   *   宿主终端自身的粘贴即用此 API），否则退回标准 Clipboard API。之前只用 navigator.clipboard，
+   *   在插件沙箱中常不可用，导致「粘贴」拿不到内容——这是右键粘贴失效的根因。
+   */
+  async function readClipboardText() {
+    const snow = typeof window !== "undefined" ? window.snow : null;
+    if (snow && typeof snow.readClipboardText === "function") {
+      try {
+        return String((await snow.readClipboardText()) || "");
+      } catch {
+        return "";
+      }
+    }
+    if (typeof navigator !== "undefined" && navigator.clipboard && typeof navigator.clipboard.readText === "function") {
+      try {
+        return await navigator.clipboard.readText();
+      } catch {
+        return "";
+      }
+    }
+    return "";
+  }
+
   /** 终端窗口（mode B）组件配置。 */
   function terminalWindowOptions() {
     return {
@@ -1889,6 +1959,7 @@ export function mount(container, api, _options = {}) {
       onCloseOthers: closeOtherTerminals,
       onCloseAll: () => closeAllTerminalsOfMode("terminal"),
       onCopyTab: copyTerminalTab,
+      onPasteText: readClipboardText,
     };
   }
 
@@ -1912,6 +1983,7 @@ export function mount(container, api, _options = {}) {
       onCloseOthers: closeOtherTerminals,
       onCloseAll: () => closeAllTerminalsOfMode("run"),
       onCopyTab: copyTerminalTab,
+      onPasteText: readClipboardText,
     };
   }
 
@@ -2744,13 +2816,22 @@ export function mount(container, api, _options = {}) {
   // 局部：Git 右侧文件查看器（差异 / 内容）
   function renderGitPreview() {
     if (disposed || !layoutEls || !layoutEls.gitPreviewPane) return;
+    const preview = gitPreviewView();
+    // 有文件时提供文件操作（资源管理器 / 复制路径）；无文件（空态）时不注入，
+    // 但保留 onRefresh —— 空态右键也能弹出「刷新」，刷新左侧变更列表与当前差异。
+    const hasFile = preview && state.gitPreview;
     renderCodeViewer(layoutEls.gitPreviewPane, {
-      preview: gitPreviewView(),
+      preview,
+      emptyHint: t("git.previewHint", "在左侧选择变更文件以查看差异。"),
       copied: state.copied,
       onCopy: handleCopyCode,
       onSetMode: setPreviewMode,
       onSetDiffMode: setDiffMode,
       onRefresh: handleGitPreviewRefresh,
+      // 右侧差异查看器的右键菜单：与文件管理器预览区一致的文件操作（仅打开文件时注入）
+      onRevealFile: hasFile ? handleGitPreviewRevealFile : undefined,
+      onCopyPath: hasFile ? handleGitPreviewCopyPath : undefined,
+      onCopyRelativePath: hasFile ? handleGitPreviewCopyRelativePath : undefined,
       t,
     });
     // 「差异 / 内容」切换位于工具栏，需随查看器同步（打开/切换文件、切换子视图）

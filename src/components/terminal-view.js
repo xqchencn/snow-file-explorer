@@ -86,10 +86,11 @@ function writeClipboard(text) {
  * @param {(data: string) => void} [options.onData] 键盘输入回调
  * @param {(cols: number, rows: number) => void} [options.onResize] 尺寸变化回调
  * @param {boolean} [options.readOnly] 只读（模式 A 一次性运行）：禁止键盘输入
- * @returns {{write: Function, fit: Function, focus: Function, cols: number, rows: number, dispose: Function}}
+ * @param {(x: number, y: number) => void} [options.onContextMenu] 右键回调（由调用方弹菜单）
+ * @returns {{write: Function, fit: Function, focus: Function, clear: Function, scrollToBottom: Function, hasSelection: Function, getSelection: Function, paste: Function, selectAll: Function, cols: number, rows: number, dispose: Function}}
  */
 export function createXtermView(host, options = {}) {
-  const { onData, onResize, readOnly = false } = options;
+  const { onData, onResize, readOnly = false, onContextMenu } = options;
 
   const term = new Terminal({
     cursorBlink: readOnly !== true,
@@ -132,6 +133,14 @@ export function createXtermView(host, options = {}) {
     if (typeof onResize === "function") onResize(cols, rows);
   });
 
+  // 右键：拦截浏览器默认菜单，交给调用方弹出自定义菜单（复制/粘贴/清空/关闭…）。
+  const handleContextMenu = (event) => {
+    if (typeof onContextMenu !== "function") return;
+    event.preventDefault();
+    onContextMenu(event.clientX, event.clientY);
+  };
+  if (typeof host.addEventListener === "function") host.addEventListener("contextmenu", handleContextMenu);
+
   return {
     write(data) {
       term.write(String(data == null ? "" : data));
@@ -172,8 +181,41 @@ export function createXtermView(host, options = {}) {
     get rows() {
       return term.rows;
     },
+    /** 是否有文本选区（右键菜单「复制」的可用性）。 */
+    hasSelection() {
+      try {
+        return term.hasSelection();
+      } catch {
+        return false;
+      }
+    },
+    /** 读取当前选区文本。 */
+    getSelection() {
+      try {
+        return term.getSelection();
+      } catch {
+        return "";
+      }
+    },
+    /** 粘贴文本到终端（走 xterm.paste，尊重 bracketed paste 模式）。 */
+    paste(text) {
+      try {
+        term.paste(String(text == null ? "" : text));
+      } catch {
+        // 忽略：实例已释放
+      }
+    },
+    /** 全选终端缓冲。 */
+    selectAll() {
+      try {
+        term.selectAll();
+      } catch {
+        // 忽略：实例已释放
+      }
+    },
     dispose() {
       try {
+        if (typeof host.removeEventListener === "function") host.removeEventListener("contextmenu", handleContextMenu);
         dataSub.dispose();
         resizeSub.dispose();
         term.dispose();

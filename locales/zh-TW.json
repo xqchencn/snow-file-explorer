@@ -47,6 +47,7 @@
   "git.diffUnavailable": "無法讀取差異",
   "git.diffBinary": "二進位檔案，無法顯示差異。",
   "git.noDiff": "無文字差異",
+  "git.previewHint": "在左側選擇變更檔案以查看差異。",
   "git.folderChanged": "包含變更",
   "git.aheadCount": "{{count}} 個提交待推送",
   "git.behindCount": "{{count}} 個提交待拉取",
@@ -123,6 +124,8 @@
   "run.window.stopAll": "停止全部執行",
   "run.scrollToEnd": "捲動到底",
   "run.copyTab": "複製指令",
+  "run.selectAll": "全選",
+  "run.groupRoot": "根目錄",
   "run.closeOthers": "關閉其他",
   "run.closeAll": "關閉全部"
 }

@@ -1,13 +1,13 @@
 /**
- * 生态注册表 (src/services/ecosystems.js)
+ * 生态辅助函数 (src/services/ecosystems.js)
  *
- * 设计要点（KISS / 可扩展）：
- *   每个技术栈是注册表里的一条**声明式记录**，检测流程、UI、终端运行全部与生态解耦。
- *   新增生态 = 往 ECOSYSTEMS 追加一条记录，无需改动检测流程或渲染逻辑。
+ * 提供 Node 生态的两段纯逻辑，供 project-commands.js 组合：
+ *   - resolveNodeEntry：包清单没有 scripts 时挑一个入口文件（仅根包用）。
+ *   - readNodeScripts：由 package.json 的 scripts 生成 `npm run` 命令，支持子包前缀。
  *
- * 一期范围：仅实现 Node.js（命令定义在 package.json 内容里，是最复杂的形态；
- *   打通"读文件内容 → 生成命令"这条路径后，其余纯文件名判断的生态都是它的退化情形）。
- *   其余生态以注释形式预留 schema，待机制验证后再增量补齐。
+ * 说明：原先的 ECOSYSTEMS 声明式注册表已移除——命令识别已改为「扫描多个 package.json」
+ *   的模型（支持多级目录 / 多个 package.json），根目录单包只是它的一个特例，
+ *   旧的「根目录命中即整体识别」注册表契约不再适用。
  */
 
 /**
@@ -43,95 +43,56 @@ export function resolveNodeEntry(packageJson, entries) {
 
 /**
  * 由 package.json 的 scripts 生成可运行命令列表。
- * @description 保持 scripts 的定义顺序；每条 script 生成一条 `npm run <name>`。
+ * @description 保持 scripts 的定义顺序；每条 script 生成 `npm run <name>`。
  *   标签**原样使用 script 名**（不汉化、不归类）：与 IDEA 一致，`dev` 就显示 `dev`，
  *   避免「开发 / 构建」这类改写造成与 package.json 定义不一致、难以对上号。
  * @param {Object|null} packageJson 已解析的 package.json
+ * @param {{prefix?: string}} [opts]
+ *   - prefix：子包相对根目录的路径（如 `sub` / `sub/nested`）。为空表示根包，
+ *     生成 `npm run <name>`；非空则生成 `npm --prefix <prefix> run <name>`，
+ *     使命令在宿主当前 shell（cwd=工作区根目录）里也能正确跑到子包。
  * @returns {Array<{id: string, labelKey: null, labelFallback: string, cmd: string}>}
  */
-export function readNodeScripts(packageJson) {
+export function readNodeScripts(packageJson, opts = {}) {
   const scripts =
     packageJson && typeof packageJson === "object" && packageJson.scripts && typeof packageJson.scripts === "object"
       ? packageJson.scripts
       : null;
   if (!scripts) return [];
 
+  const prefix = typeof opts.prefix === "string" ? opts.prefix.replace(/^\/+|\/+$/g, "") : "";
   const commands = [];
   for (const name of Object.keys(scripts)) {
     if (!name || typeof scripts[name] !== "string") continue;
     commands.push({
-      id: `npm:${name}`,
+      // id 带上包路径前缀，避免多个包的同名 script 冲突。
+      id: prefix ? `npm:${prefix}:${name}` : `npm:${name}`,
       labelKey: null,
-      labelFallback: name,
-      cmd: `npm run ${name}`,
+      // 子包的标签带包路径，便于多包时区分（如 `sub/dev`）。
+      labelFallback: prefix ? `${prefix}/${name}` : name,
+      cmd: prefix ? `npm --prefix ${prefix} run ${name}` : `npm run ${name}`,
     });
   }
   return commands;
 }
 
 /**
- * 生态注册表。
- * @description 每条记录字段：
- *   - id / label：生态标识与展示名
- *   - markers：判定该生态的标识文件名（根目录直接子文件，精确匹配）
- *   - entryCandidates：入口文件候选（可选，供无 package.json 元数据时兜底）
- *   - readFiles：需要读取内容的标识文件（一期仅 node 用到）
- *   - commands(ctx)：生成命令列表；ctx = { packageJson, entries, entry }
- *
- * @type {Array<Object>}
+ * 根包（package.json 无 scripts 时）的兜底命令：探测入口文件，生成 `node <entry>`。
+ * @description 仅用于**工作区根目录**的 package.json（子包不走此兜底，避免 `node sub/index.js`
+ *   这类相对 cwd 的入口命令在宿主 shell（cwd=根目录）里语义不清）。
+ * @param {Object|null} packageJson 已解析的 package.json
+ * @param {Array<{name: string, isDirectory?: boolean}>} entries 该包目录的直接子条目
+ * @returns {Array<{id: string, labelKey: string, labelFallback: string, cmd: string}>}
  */
-export const ECOSYSTEMS = [
-  {
-    id: "node",
-    label: "Node.js",
-    markers: ["package.json"],
-    entryCandidates: NODE_ENTRY_CANDIDATES,
-    readFiles: ["package.json"],
-    resolveEntry: resolveNodeEntry,
-    commands: (ctx) => {
-      const list = readNodeScripts(ctx.packageJson);
-      if (list.length) return list;
-      // 无 scripts 时回退：有入口文件就 node <entry>
-      if (ctx.entry) {
-        return [
-          {
-            id: "node:entry",
-            labelKey: "run.nodeEntry",
-            labelFallback: "Run entry",
-            cmd: `node ${ctx.entry}`,
-          },
-        ];
-      }
-      return [];
+export function nodeEntryFallback(packageJson, entries) {
+  const entry = resolveNodeEntry(packageJson, entries);
+  if (!entry) return [];
+  return [
+    {
+      id: "node:entry",
+      labelKey: "run.nodeEntry",
+      labelFallback: "Run entry",
+      cmd: `node ${entry}`,
     },
-  },
-
-  // ── 后续增量：纯文件名判断的生态，追加记录即可，无需改动检测流程 ──
-  // {
-  //   id: "go",
-  //   label: "Go",
-  //   markers: ["go.mod"],
-  //   entryCandidates: ["main.go"],
-  //   commands: () => [
-  //     { id: "go:run", labelKey: "run.go.run", labelFallback: "Run", cmd: "go run ." },
-  //     { id: "go:test", labelKey: "run.go.test", labelFallback: "Test", cmd: "go test ./..." },
-  //   ],
-  // },
-  // {
-  //   id: "rust",
-  //   label: "Rust",
-  //   markers: ["Cargo.toml"],
-  //   entryCandidates: ["src/main.rs"],
-  //   commands: () => [
-  //     { id: "cargo:run", labelKey: "run.rust.run", labelFallback: "Run", cmd: "cargo run" },
-  //     { id: "cargo:test", labelKey: "run.rust.test", labelFallback: "Test", cmd: "cargo test" },
-  //   ],
-  // },
-  // {
-  //   id: "python",
-  //   label: "Python",
-  //   markers: ["pyproject.toml", "requirements.txt"],
-  //   entryCandidates: ["main.py", "app.py"],
-  //   commands: (ctx) => (ctx.entry ? [{ id: "py:run", labelKey: null, labelFallback: "Run", cmd: `python ${ctx.entry}` }] : []),
-  // },
-];
+  ];
+}

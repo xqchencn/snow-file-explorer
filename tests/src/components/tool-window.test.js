@@ -426,3 +426,124 @@ test("工具窗口: 右键菜单项点击后回调并关闭菜单", () => {
   assert.equal(closedAll, 1);
   assert.equal(menu.hidden, true, "点击后菜单关闭");
 });
+
+// ───────────────────────── 内容区右键：粘贴按剪贴板启用 + 菜单定位 clamp ─────────────────────────
+
+/** 记录粘贴 / 全选调用的假终端工厂（内容区右键菜单用）。 */
+function makeClipboardFactory() {
+  const created = [];
+  const createTerminal = (host, opts) => {
+    const record = { host, opts, pasted: [] };
+    record.view = {
+      write() {},
+      fit() {},
+      focus() {},
+      clear() {},
+      scrollToBottom() {},
+      dispose() {},
+      hasSelection: () => false,
+      getSelection: () => "",
+      paste: (text) => record.pasted.push(text),
+      selectAll() {},
+      cols: 80,
+      rows: 24,
+    };
+    created.push(record);
+    return record.view;
+  };
+  return { createTerminal, created };
+}
+
+/** 在 window.snow.readClipboardText 返回 text 的环境下执行 fn，结束后还原。 */
+async function withClipboard(text, fn) {
+  const prev = globalThis.window.snow;
+  globalThis.window.snow = { readClipboardText: async () => text };
+  try {
+    await fn();
+  } finally {
+    if (prev === undefined) delete globalThis.window.snow;
+    else globalThis.window.snow = prev;
+  }
+}
+
+const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+test("工具窗口: 内容区右键「粘贴」在剪贴板有内容时启用并写入终端", async () => {
+  await withClipboard("hello-clip", async () => {
+    const terms = [term("t1")];
+    const factory = makeClipboardFactory();
+    const { pane } = mount(
+      makeOpts({ getTerminals: () => terms, getActiveId: () => "t1", factory, onPasteText: async () => "hello-clip" })
+    );
+    // xterm 视图中右键 → 调用注入的 onContextMenu 弹出内容区菜单
+    factory.created[0].opts.onContextMenu(20, 20);
+    await flush();
+    const menu = pane.querySelector(".sfe-popup-menu");
+    assert.equal(menu.hidden, false, "右键后菜单显示");
+    const paste = [...menu.querySelectorAll(".sfe-popup-menu-item")].find((n) => /粘贴/.test(n.textContent));
+    assert.ok(paste, "内容区菜单应含「粘贴」");
+    assert.equal(paste.disabled, false, "剪贴板有内容时「粘贴」可用");
+    paste.click();
+    await flush();
+    assert.deepEqual(factory.created[0].pasted, ["hello-clip"]);
+  });
+});
+
+test("工具窗口: 剪贴板为空时内容区右键「粘贴」置灰不可点", async () => {
+  await withClipboard("", async () => {
+    const terms = [term("t1")];
+    const factory = makeClipboardFactory();
+    const { pane } = mount(
+      makeOpts({ getTerminals: () => terms, getActiveId: () => "t1", factory, onPasteText: async () => "" })
+    );
+    factory.created[0].opts.onContextMenu(20, 20);
+    await flush();
+    const menu = pane.querySelector(".sfe-popup-menu");
+    const paste = [...menu.querySelectorAll(".sfe-popup-menu-item")].find((n) => /粘贴/.test(n.textContent));
+    assert.equal(paste.disabled, true, "剪贴板为空时「粘贴」置灰");
+  });
+});
+
+test("工具窗口: 运行窗口（只读）内容区右键不提供「粘贴」", () => {
+  const terms = [term("r1", "dev", { mode: "run" })];
+  const factory = makeClipboardFactory();
+  const { pane } = mount(
+    makeOpts({ kind: "run", getTerminals: () => terms, getActiveId: () => "r1", factory, onPasteText: async () => "x" })
+  );
+  factory.created[0].opts.onContextMenu(20, 20);
+  const menu = pane.querySelector(".sfe-popup-menu");
+  assert.equal(menu.hidden, false);
+  assert.equal(
+    [...menu.querySelectorAll(".sfe-popup-menu-item")].some((n) => /粘贴/.test(n.textContent)),
+    false,
+    "只读运行窗口不得出现「粘贴」"
+  );
+});
+
+test("工具窗口: 右键菜单靠近视口右下边缘时被 clamp（向左/上翻转，不被遮挡）", async () => {
+  const win = dom.window;
+  const proto = win.Element.prototype;
+  const orig = proto.getBoundingClientRect;
+  // jsdom 无布局：给菜单一个固定尺寸，才能验证 clamp 数学。
+  proto.getBoundingClientRect = function () {
+    if (this.classList && this.classList.contains("sfe-popup-menu")) {
+      return { width: 200, height: 120, left: 0, top: 0, right: 200, bottom: 120 };
+    }
+    return { width: 0, height: 0, left: 0, top: 0, right: 0, bottom: 0 };
+  };
+  try {
+    const terms = [term("t1")];
+    const factory = makeClipboardFactory();
+    const { pane } = mount(makeOpts({ getTerminals: () => terms, getActiveId: () => "t1", factory }));
+    const vw = win.innerWidth || 1024;
+    const vh = win.innerHeight || 768;
+    factory.created[0].opts.onContextMenu(vw - 2, vh - 2);
+    // 内容区菜单异步读取剪贴板后再打开，需等待一拍。
+    await flush();
+    const menu = pane.querySelector(".sfe-popup-menu");
+    assert.equal(menu.style.left, `${vw - 2 - 200}px`, "向右越界时左移到菜单完整可见");
+    assert.equal(menu.style.top, `${vh - 2 - 120}px`, "向下越界时上移到菜单完整可见");
+  } finally {
+    proto.getBoundingClientRect = orig;
+  }
+});

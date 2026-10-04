@@ -22,15 +22,16 @@ function commandLabel(t, command) {
 }
 
 /**
- * 比较两组命令是否等价（id + 命令文本）。
+ * 比较两组命令是否等价（id + 命令文本 + 所属分组）。
  * @description 调用方每次都传入 flattenCommands() 生成的新数组，引用永不相等；
  *   若直接比引用会导致每次 sync 都重建下拉，破坏展开态与选中项。此处按内容比较。
+ *   分组名也要比：多 package.json 分组切换后（如切项目）组标题必须重绘。
  */
 function sameCommands(a, b) {
   if (a === b) return true;
   if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
   for (let i = 0; i < a.length; i += 1) {
-    if (a[i].id !== b[i].id || a[i].cmd !== b[i].cmd) return false;
+    if (a[i].id !== b[i].id || a[i].cmd !== b[i].cmd || a[i].group !== b[i].group) return false;
   }
   return true;
 }
@@ -152,8 +153,16 @@ export function renderRunToolbar(container, options) {
    */
   function renderDropdown(commands) {
     dropdownMenu.replaceChildren();
+    // 多 package.json：命令按包（文件夹）分组，组名变化处插入分组标题（父包已由数据层排在前）。
+    let lastGroup;
     for (const command of commands) {
       const label = commandLabel(t, command);
+      // 分组标题：根包（group=null）显示「根目录」，子包显示其相对目录路径。
+      const group = command.group || null;
+      if (group !== lastGroup) {
+        dropdownMenu.appendChild(el("div", "sfe-run-dropdown-group", group || t("run.groupRoot", "根目录")));
+        lastGroup = group;
+      }
       // 用 div 而非 button：行内要再放一个 ▶ 按钮，button 不能嵌套 button。
       const item = el("div", "sfe-run-dropdown-item");
       item.setAttribute("role", "button");

@@ -28,8 +28,6 @@ function makeOpts(overrides = {}) {
     onRun: () => {},
     onRerun: () => {},
     onStop: () => {},
-    onStopCommand: () => {},
-    onStopAll: () => {},
     ...overrides,
   };
 }
@@ -208,4 +206,27 @@ test("运行控件: dispose 解绑 document 监听（不抛异常）", () => {
     makeOpts({ getState: () => ({ commands: [DEV], ready: true, isCommandRunning: () => false, runningCommands: [] }) })
   );
   assert.doesNotThrow(() => controller.dispose());
+});
+
+test("运行控件: 多包命令按文件夹分组，组名变化处显示分组标题（父包在前）", () => {
+  const ROOT = { id: "npm:dev", labelKey: null, labelFallback: "dev", cmd: "npm run dev", dir: "", group: null };
+  const API = {
+    id: "npm:api:start",
+    labelKey: null,
+    labelFallback: "api/start",
+    cmd: "npm --prefix api run start",
+    dir: "api",
+    group: "api",
+  };
+  const { wrap } = mount(
+    makeOpts({ getState: () => ({ commands: [ROOT, API], ready: true, isCommandRunning: () => false, runningCommands: [] }) })
+  );
+  wrap.querySelector(".sfe-run-config").click();
+  // 根包用本地化「根目录」文案；子包显示目录路径
+  assert.deepEqual(
+    [...wrap.querySelectorAll(".sfe-run-dropdown-group")].map((n) => n.textContent),
+    ["根目录", "api"]
+  );
+  // 分组标题不是可点命令项
+  assert.equal(wrap.querySelectorAll(".sfe-run-dropdown-item").length, 2);
 });

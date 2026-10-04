@@ -770,3 +770,95 @@ test('预览区右键菜单: 剪切写入剪贴板失败时保留原文', async 
   assert.equal(inputCount, 0);
 });
 
+test('Git 右侧查看器: 未打开文件（空态）也能右键弹出「刷新」菜单', () => {
+  const host = document.createElement('div');
+  const calls = [];
+  // 与 index.js renderGitPreview 空态一致：不注入文件操作，只保留 onRefresh；自定义空态提示。
+  renderCodeViewer(host, {
+    preview: null,
+    emptyHint: '在左侧选择变更文件以查看差异。',
+    copied: false,
+    onCopy: () => {},
+    onRefresh: () => calls.push('refresh'),
+    t,
+  });
+
+  // 空态提示用调用方文案
+  assert.equal(host.querySelector('.sfe-file-viewer-empty').textContent, '在左侧选择变更文件以查看差异。');
+  // 空态右键：此前 bindViewerContextMenu 对 !preview 直接不绑，导致完全无反应——回归点
+  dispatchContextMenu(host.querySelector('.sfe-file-viewer-empty'));
+  const menu = document.querySelector('.sfe-viewer-context-menu');
+  assert.ok(menu, '空态右键应显示菜单');
+  assert.deepEqual([...menu.querySelectorAll('[data-menu-id]')].map((item) => item.dataset.menuId), ['refresh']);
+  menu.querySelector('[data-menu-id="refresh"]').click();
+  assert.deepEqual(calls, ['refresh']);
+});
+
+test('Git 右侧查看器: 差异视图右键弹出文件操作菜单（只读）', () => {
+  const host = document.createElement('div');
+  const result = parseUnifiedDiff('@@ -1,1 +1,1 @@\n-const a = 1;\n+const a = 2;');
+  const calls = [];
+  renderCodeViewer(host, {
+    preview: {
+      kind: 'text',
+      name: 'a.js',
+      path: 'D:/repo/a.js',
+      text: 'const a = 2;',
+      diff: { result, fullContent: 'const a = 2;' },
+      gitView: 'diff',
+      diffMode: 'unified',
+    },
+    copied: false,
+    onCopy: () => {},
+    onSetDiffMode: () => {},
+    onRefresh: () => calls.push('refresh'),
+    onRevealFile: () => calls.push('reveal'),
+    onCopyPath: () => calls.push('copy-path'),
+    onCopyRelativePath: () => calls.push('copy-relative-path'),
+    t,
+  });
+
+  // 差异正文区右键：与文件管理器预览区一致的只读菜单（文件操作 + 刷新，不含文本编辑）
+  dispatchContextMenu(host.querySelector('.sfe-diff-scroll'));
+  const menu = document.querySelector('.sfe-viewer-context-menu');
+  assert.ok(menu, '差异视图右键应显示菜单');
+  assert.deepEqual(
+    [...menu.querySelectorAll('[data-menu-id]')].map((item) => item.dataset.menuId),
+    ['reveal', 'copy-path', 'copy-relative-path', 'refresh']
+  );
+  menu.querySelector('[data-menu-id="refresh"]').click();
+  assert.deepEqual(calls, ['refresh']);
+});
+
+test('预览区右键菜单: 运行分组按包显示组标题（根目录 / 子包路径，父包在前）', () => {
+  const host = document.createElement('div');
+  renderCodeViewer(host, {
+    preview: {
+      kind: 'text',
+      name: 'package.json',
+      path: 'D:/repo/package.json',
+      text: '{}',
+      highlightedHtml: '{}',
+      isMarkdown: false,
+      truncated: false,
+    },
+    copied: false,
+    onCopy: () => {},
+    runCommands: () => [
+      { id: 'npm:dev', labelKey: null, labelFallback: 'dev', cmd: 'npm run dev', group: null },
+      { id: 'npm:api:start', labelKey: null, labelFallback: 'api/start', cmd: 'npm --prefix api run start', group: 'api' },
+    ],
+    onRunCommand: () => {},
+    t,
+  });
+
+  dispatchContextMenu(host.querySelector('.sfe-file-viewer-code-content'));
+  const menu = document.querySelector('.sfe-viewer-context-menu');
+  assert.deepEqual(
+    [...menu.querySelectorAll('.sfe-context-menu-group')].map((node) => node.textContent),
+    ['根目录', 'api']
+  );
+  // 清理本用例菜单，避免影响后续用例
+  renderCodeViewer(host, { preview: null, copied: false, onCopy: () => {}, t });
+});
+

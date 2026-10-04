@@ -178,6 +178,19 @@
   display: none;
 }
 
+/* 分组标题：多 package.json 时按包（文件夹）分组，根目录 / 子包路径小字标注。 */
+.sfe-run-dropdown-group {
+  padding: 6px 8px 2px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .sfe-run-dropdown-item {
   display: flex;
   align-items: center;

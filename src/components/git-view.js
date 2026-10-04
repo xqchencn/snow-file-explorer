@@ -470,7 +470,6 @@ function renderSection(opts) {
     section,
     files,
     selected,
-    busy,
     collapsedStaged,
     collapsedUnstaged,
     onSelectFile,
@@ -484,6 +483,7 @@ function renderSection(opts) {
     onRevealFile,
     onCopyRelativePath,
     onCopyAbsolutePath,
+    onRefresh,
     t,
   } = opts;
 
@@ -503,7 +503,8 @@ function renderSection(opts) {
     const actionBtn = el("button", "sfe-git-section-action");
     actionBtn.type = "button";
     actionBtn.title = isStaged ? t("git.unstageAll", "全部取消暂存") : t("git.stageAll", "全部暂存");
-    actionBtn.disabled = busy !== null;
+    // 不做 busy 禁用：Git 写操作由 index.js 串行排队，点击不会丢；禁用反而在
+    // 「busy 期间重建列表」时被写死成 disabled（finally 不再重建列表 → 永久点不动）。
     actionBtn.appendChild(createActionIcon(isStaged ? "minus" : "plus", 14));
     actionBtn.addEventListener("click", () => {
       if (isStaged) {
@@ -528,13 +529,25 @@ function renderSection(opts) {
     for (const row of rows) {
       body.appendChild(
         row.kind === "folder"
-          ? renderFolderRow({ row, section, selected, onSelectFolder, onToggleCollapse, onStageToggle, busy, t })
+          ? renderFolderRow({
+              row,
+              section,
+              selected,
+              onSelectFolder,
+              onToggleCollapse,
+              onStageToggle,
+              onDiscard,
+              onRevealFile,
+              onCopyRelativePath,
+              onCopyAbsolutePath,
+              onRefresh,
+              t,
+            })
           : renderFileRow({
               file: row.file,
               depth: row.depth,
               section,
               selected,
-              busy,
               onSelectFile,
               onStageToggle,
               onDiscard,
@@ -555,7 +568,20 @@ function renderSection(opts) {
  * 渲染目录行
  */
 function renderFolderRow(opts) {
-  const { row, section, selected, onSelectFolder, onToggleCollapse, onStageToggle, busy, t } = opts;
+  const {
+    row,
+    section,
+    selected,
+    onSelectFolder,
+    onToggleCollapse,
+    onStageToggle,
+    onDiscard,
+    onRevealFile,
+    onCopyRelativePath,
+    onCopyAbsolutePath,
+    onRefresh,
+    t,
+  } = opts;
   const { node, depth, isExpanded } = row;
   const isStaged = section === "staged";
   const isSelected = selected === `${section}:${node.path}`;
@@ -570,12 +596,12 @@ function renderFolderRow(opts) {
   item.appendChild(el("span", "sfe-git-name-text", node.name));
   item.appendChild(el("span", "sfe-git-folder-count", String(countGitTreeFiles(node))));
 
-  // 目录级暂存/取消暂存：对整个子树生效，按钮恒在最右（与文件行一致）
+  // 目录级暂存/取消暂存：对整个子树生效，按钮恒在最右（与文件行一致）。
+  // 不做 busy 禁用（见 renderSection.actionBtn 注释：禁用会在列表重建后写死）。
   if (typeof onStageToggle === "function") {
     const btn = el("button", "sfe-git-row-btn stage-toggle");
     btn.type = "button";
     btn.title = isStaged ? t("git.unstageFolder", "取消暂存此目录") : t("git.stageFolder", "暂存此目录");
-    btn.disabled = busy !== null;
     btn.appendChild(createActionIcon(isStaged ? "minus" : "plus", 13));
     btn.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -583,6 +609,20 @@ function renderFolderRow(opts) {
     });
     item.appendChild(btn);
   }
+
+  // 目录行右键菜单：暂存此目录 / 取消暂存 / 丢弃 / 复制路径 / 资源管理器 / 刷新
+  item.addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    openGitFolderContextMenu(
+      item.closest(".sfe-git-pane") || item.parentElement,
+      event.clientX,
+      event.clientY,
+      node,
+      section,
+      { onStageToggle, onDiscard, onRevealFile, onCopyRelativePath, onCopyAbsolutePath, onRefresh, t },
+    );
+  });
 
   // 单击文件夹行：切换折叠 + 选中该文件夹（使行内加号常显，不再仅 hover 可见）。
   // 先写选中态再折叠，折叠触发的重建会按 selected 恢复高亮；两者互不干扰。
@@ -609,7 +649,6 @@ function renderFileRow(opts) {
     depth,
     section,
     selected,
-    busy,
     onSelectFile,
     onStageToggle,
     onDiscard,
@@ -670,7 +709,7 @@ function renderFileRow(opts) {
     const btn = el("button", "sfe-git-row-btn " + cls);
     btn.type = "button";
     btn.title = title;
-    btn.disabled = busy !== null;
+    // 不做 busy 禁用（见 renderSection.actionBtn 注释：禁用会在列表重建后写死）。
     btn.appendChild(createActionIcon(iconName, 13));
     btn.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -815,6 +854,48 @@ function openGitContextMenu(parentEl, x, y, file, section, opts) {
     if (typeof opts.onCopyAbsolutePath === "function") opts.onCopyAbsolutePath(file);
   });
   // 刷新：重新拉取文件树与 Git 状态（与文件树右键菜单保持一致）
+  menu.addItem("refresh", opts.t("action.refresh", "刷新"), "refresh", () => {
+    if (typeof opts.onRefresh === "function") opts.onRefresh();
+  }, { separator: true });
+  menu.open();
+}
+
+/**
+ * 构建 Git 目录行菜单：对该目录子树批量操作（暂存/取消暂存 / 丢弃 / 复制路径 / 资源管理器 / 刷新）。
+ * @description 目录不是具体文件：资源管理器/复制路径/丢弃按「子树的第一个文件」定位其所在目录，
+ *   与文件行菜单保持一致的条目集合。
+ */
+function openGitFolderContextMenu(parentEl, x, y, node, section, opts) {
+  if (!parentEl || !node) return;
+  closeGitContextMenu(parentEl);
+
+  const files = collectGitTreeFiles(node);
+  const first = files[0] || null;
+  const isStaged = section === "staged";
+  const menu = createGitMenu(parentEl, x, y);
+
+  menu.addItem(
+    "stage-toggle",
+    isStaged ? opts.t("git.unstageFolder", "取消暂存此目录") : opts.t("git.stageFolder", "暂存此目录"),
+    isStaged ? "minus" : "plus",
+    () => {
+      if (typeof opts.onStageToggle === "function") opts.onStageToggle(files, section);
+    },
+  );
+  if (!isStaged && first && typeof opts.onDiscard === "function") {
+    menu.addItem("discard", opts.t("git.discardFolder", "丢弃此目录更改"), "undo", () => opts.onDiscard(files), {
+      danger: true,
+    });
+  }
+  menu.addItem("reveal", opts.t("git.revealInExplorer", "在资源管理器中打开"), "folderOpen", () => {
+    if (first && typeof opts.onRevealFile === "function") opts.onRevealFile(first);
+  }, { separator: true });
+  menu.addItem("copy-relative", opts.t("git.copyRelativePath", "复制相对路径"), "copy", () => {
+    if (first && typeof opts.onCopyRelativePath === "function") opts.onCopyRelativePath(first);
+  });
+  menu.addItem("copy-absolute", opts.t("git.copyAbsolutePath", "复制绝对路径"), "copy", () => {
+    if (first && typeof opts.onCopyAbsolutePath === "function") opts.onCopyAbsolutePath(first);
+  });
   menu.addItem("refresh", opts.t("action.refresh", "刷新"), "refresh", () => {
     if (typeof opts.onRefresh === "function") opts.onRefresh();
   }, { separator: true });
