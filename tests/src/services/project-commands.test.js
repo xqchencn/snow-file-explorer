@@ -12,6 +12,9 @@ import {
   findJavaMainCandidates,
   readMavenCommands,
   readGradleCommands,
+  detectPythonPackageManager,
+  findPythonMainCandidates,
+  readPythonCommands,
 } from "../../../src/services/ecosystems.js";
 
 function file(name, path) {
@@ -117,6 +120,93 @@ test("nodeEntryFallback：有入口才产 node <entry>，无入口返回空数�
   assert.deepEqual(nodeEntryFallback({}, [file("index.js", "D:/proj/index.js")]).map((c) => c.cmd), ["node index.js"]);
   assert.deepEqual(nodeEntryFallback({}, [file("README.md", "D:/proj/README.md")]), []);
 });
+
+test("Python 生态：识别常见入口并生成系统 Python 命令", () => {
+  const entries = [file("main.py", "D:/repo/main.py"), file("README.md", "D:/repo/README.md")];
+  assert.deepEqual(findPythonMainCandidates(entries), [
+    { name: "main.py", path: "D:/repo/main.py", kind: "file" },
+  ]);
+  const commands = readPythonCommands({ entries });
+  assert.deepEqual(commands.map((command) => command.cmd), ["python main.py"]);
+  assert.equal(commands[0].packageManager, "python");
+  assert.equal(commands[0].icon, "python");
+});
+
+test("Python 生态：包管理器锁文件包裹 Python 入口，不生成安装命令", () => {
+  const entries = [
+    file("main.py", "D:/repo/main.py"),
+    file("pyproject.toml", "D:/repo/pyproject.toml"),
+    file("uv.lock", "D:/repo/uv.lock"),
+  ];
+  assert.equal(detectPythonPackageManager(entries), "uv");
+  assert.deepEqual(readPythonCommands({ entries }).map((command) => command.cmd), ["uv run python main.py"]);
+  assert.deepEqual(
+    readPythonCommands({
+      entries: [file("app.py", "D:/repo/app.py"), file("Pipfile", "D:/repo/Pipfile")],
+    }).map((command) => command.cmd),
+    ["pipenv run python app.py"]
+  );
+});
+
+test("Python 生态：顶层包 __main__.py 生成 python -m 包名并保留源码路径", () => {
+  const commands = readPythonCommands({
+    prefix: "tools",
+    entries: [],
+    modules: [{ name: "demo_package", sourcePath: "D:/repo/tools/demo_package/__main__.py" }],
+  });
+  assert.equal(commands[0].cmd, "python -m demo_package");
+  assert.equal(commands[0].labelFallback, "tools/demo_package");
+  assert.equal(commands[0].sourcePath, "D:/repo/tools/demo_package/__main__.py");
+});
+
+test("detectProjectCommands：Python 项目进入生态列表并按所属目录运行", () => {
+  const result = detectProjectCommands([
+    {
+      dir: "services/api",
+      ecosystem: "python",
+      entries: [file("main.py", "D:/repo/services/api/main.py"), file("poetry.lock", "D:/repo/services/api/poetry.lock")],
+      packageManager: "poetry",
+    },
+  ]);
+  const [command] = flattenCommands(result);
+  assert.equal(result.ecosystems[0].id, "python:services/api");
+  assert.equal(command.cmd, "poetry run python main.py");
+  assert.equal(command.dir, "services/api");
+  assert.equal(command.ecosystem, "python:services/api");
+});
+
+test("scanProjectCommands：Python 包只生成模块命令，不把包目录重复识别为项目", async () => {
+  const root = "D:/python/repo";
+  const packageDir = `${root}/demo_package`;
+  const main = `${packageDir}/__main__.py`;
+  const helper = `${packageDir}/helpers.py`;
+  const directories = new Map([
+    [root, [file("pyproject.toml", `${root}/pyproject.toml`), directory("demo_package", packageDir)]],
+    [packageDir, [file("__main__.py", main), file("helpers.py", helper)]],
+  ]);
+  const contents = new Map([[`${root}/pyproject.toml`, "[project]\nname = 'demo'\n"]]);
+  const previous = globalThis.window;
+  globalThis.window = {
+    snow: {
+      readDirectoryEntries: async (dirPath) => directories.get(dirPath) || [],
+      readFileContent: async (filePath) => ({ content: contents.get(filePath) || "", isBinary: false }),
+    },
+  };
+  try {
+    const result = await scanProjectCommands(root);
+    const pythonPackages = result.packages.filter((item) => item.ecosystem === "python");
+    const commands = flattenCommands(result);
+    assert.deepEqual(pythonPackages.map((item) => item.dir), [""]);
+    assert.deepEqual(commands.map((command) => command.cmd), ["python -m demo_package"]);
+    assert.equal(commands[0].sourcePath, main);
+    assert.ok(!commands.some((command) => command.cmd === "python __main__.py"));
+    assert.ok(!result.packages.some((item) => item.dir === "demo_package"));
+  } finally {
+    if (previous === undefined) delete globalThis.window;
+    else globalThis.window = previous;
+  }
+});
+
 
 test("readNodeScripts：忽略非字符串脚本值，空 scripts 返回空数组；prefix 仅标记包目录", () => {
   assert.deepEqual(readNodeScripts(null), []);

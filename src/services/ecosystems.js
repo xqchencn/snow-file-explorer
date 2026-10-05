@@ -165,6 +165,103 @@ export function nodeEntryFallback(packageJson, entries) {
   ];
 }
 
+/* ─────────────────────────── Python ─────────────────────────── */
+
+const PYTHON_ENTRY_CANDIDATES = ["main.py", "app.py", "cli.py", "run.py", "server.py", "__main__.py"];
+const PYTHON_PACKAGE_MANAGERS = new Set(["uv", "poetry", "pipenv", "pdm", "hatch"]);
+
+function normalizePythonPackageManager(value) {
+  const name = String(value || "").trim().toLowerCase();
+  return PYTHON_PACKAGE_MANAGERS.has(name) ? name : "python";
+}
+
+/**
+ * 根据项目标记判断 Python 包管理器；没有明确包管理器时回退到系统 Python。
+ * @param {Array<{name: string, isDirectory?: boolean}>} entries 项目目录直接条目
+ * @param {string} pyprojectText 已读取的 pyproject.toml 文本
+ * @param {string} fallback 无锁文件时的回退值
+ * @returns {string} python / uv / poetry / pipenv / pdm / hatch
+ */
+export function detectPythonPackageManager(entries, pyprojectText = "", fallback = "python") {
+  const names = new Set(
+    (Array.isArray(entries) ? entries : [])
+      .filter((entry) => entry && entry.isDirectory !== true && typeof entry.name === "string")
+      .map((entry) => entry.name.toLowerCase())
+  );
+  const text = String(pyprojectText || "");
+  if (names.has("uv.lock")) return "uv";
+  if (names.has("poetry.lock") || /\[tool\.poetry\]/.test(text)) return "poetry";
+  if (names.has("pipfile") || names.has("pipfile.lock")) return "pipenv";
+  if (names.has("pdm.lock") || /\[tool\.pdm\]/.test(text)) return "pdm";
+  if (names.has("hatch.toml") || /\[tool\.hatch/.test(text)) return "hatch";
+  return normalizePythonPackageManager(fallback);
+}
+
+/**
+ * 识别 Python 可运行入口。入口只来自直接文件；包目录由扫描器显式传入 modules。
+ * @param {Array<{name: string, path: string, isDirectory?: boolean}>} entries 项目目录条目
+ * @param {{modules?: Array<{name: string, path?: string, sourcePath?: string}>}} opts 包入口
+ * @returns {Array<{name: string, path: string, kind: "file"|"module", module?: string}>}
+ */
+export function findPythonMainCandidates(entries, opts = {}) {
+  const items = Array.isArray(entries) ? entries : [];
+  const files = new Map(
+    items
+      .filter((entry) => entry && entry.isDirectory !== true && typeof entry.name === "string")
+      .map((entry) => [entry.name.toLowerCase(), entry])
+  );
+  const result = [];
+  const seen = new Set();
+  for (const name of PYTHON_ENTRY_CANDIDATES) {
+    const entry = files.get(name.toLowerCase());
+    if (!entry || seen.has(entry.path)) continue;
+    seen.add(entry.path);
+    result.push({ name: entry.name, path: entry.path, kind: "file" });
+  }
+  for (const module of Array.isArray(opts.modules) ? opts.modules : []) {
+    if (!module || !module.name || !module.sourcePath || seen.has(module.sourcePath)) continue;
+    seen.add(module.sourcePath);
+    result.push({ name: module.name, path: module.sourcePath, kind: "module", module: module.name });
+  }
+  return result;
+}
+
+/**
+ * 生成 Python 项目运行命令；包管理器只包裹解释器，不擅自生成安装命令。
+ * @param {{prefix?: string, entries?: Array, pyprojectText?: string, packageManager?: string, modules?: Array}} opts
+ * @returns {Array<Object>}
+ */
+export function readPythonCommands(opts = {}) {
+  const prefix = normalizePrefix(opts.prefix);
+  const manager = normalizePythonPackageManager(
+    opts.packageManager || detectPythonPackageManager(opts.entries, opts.pyprojectText, "python")
+  );
+  const runner = {
+    python: "python",
+    uv: "uv run python",
+    poetry: "poetry run python",
+    pipenv: "pipenv run python",
+    pdm: "pdm run python",
+    hatch: "hatch run python",
+  }[manager];
+  const candidates = findPythonMainCandidates(opts.entries, { modules: opts.modules });
+  return candidates.map((candidate) => {
+    const target = candidate.kind === "module" ? `-m ${candidate.module}` : candidate.name;
+    const label = candidate.kind === "module" ? candidate.module : candidate.name;
+    return {
+      id: prefix ? `python:${prefix}:${label}` : `python:${label}`,
+      labelKey: null,
+      label,
+      labelFallback: prefix ? `${prefix}/${label}` : label,
+      cmd: `${runner} ${target}`,
+      icon: "python",
+      packageManager: manager,
+      runKind: "python",
+      sourcePath: candidate.path,
+    };
+  });
+}
+
 /* ─────────────────────────── Go / Wails ─────────────────────────── */
 
 /** 归一化命令前缀（相对根目录的 POSIX 路径）：去首尾斜杠。 */

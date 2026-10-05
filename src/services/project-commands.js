@@ -25,6 +25,8 @@ import {
   findJavaMainCandidates,
   readMavenCommands,
   readGradleCommands,
+  detectPythonPackageManager,
+  readPythonCommands,
 } from "./ecosystems.js";
 
 /** 递归扫描时跳过的目录名（海量 / 无关 / 生成物）。 */
@@ -62,7 +64,7 @@ const GO_TEST_DIRS = new Set(["tests", "test"]);
  * @description 用户规矩——**服务端（Go / Wails）展示在前端（Node）之前**。
  *   仅在「同一目录层级」内比较，父包在前的既有层级规则不受影响。
  */
-const ECOSYSTEM_PRIORITY = { go: 0, maven: 1, gradle: 1, node: 2 };
+const ECOSYSTEM_PRIORITY = { go: 0, maven: 1, gradle: 1, python: 1, node: 2 };
 
 /**
  * 规范化根目录键：统一分隔符、小写、去尾部分隔符。
@@ -116,6 +118,16 @@ function buildGoCommands(pkg, prefix) {
   if (pkg.hasWails3) return readWails3Commands({ prefix });
   if (pkg.hasWails2) return readWails2Commands({ prefix });
   return readGoCommands(pkg.entries, { prefix, cmdDirs: pkg.cmdDirs });
+}
+
+function buildPythonCommands(pkg, prefix) {
+  return readPythonCommands({
+    prefix,
+    entries: pkg.entries,
+    pyprojectText: pkg.pyprojectText,
+    packageManager: pkg.packageManager,
+    modules: pkg.pythonModules,
+  });
 }
 
 function buildJvmCommands(pkg, prefix) {
@@ -188,6 +200,23 @@ export function detectProjectCommands(packages) {
       continue;
     }
 
+    if (pkg.ecosystem === "python") {
+      const commands = buildPythonCommands(pkg, prefix);
+      const eco = {
+        kind: "python",
+        id: prefix ? `python:${prefix}` : "python",
+        label: prefix ? `Python · ${prefix}` : "Python",
+        markers: ["pyproject.toml", "requirements.txt", "Pipfile", "setup.py", "*.py"],
+        dir: prefix,
+        packageManager: pkg.packageManager || "python",
+        entry: null,
+        commands,
+      };
+      ecosystems.push(eco);
+      summary.push({ id: eco.id, dir: prefix, ecosystem: "python", packageManager: eco.packageManager, commandCount: commands.length });
+      continue;
+    }
+
     if (pkg.ecosystem === "maven" || pkg.ecosystem === "gradle") {
       const eco = buildJvmEcosystem(pkg, prefix);
       ecosystems.push(eco);
@@ -254,6 +283,25 @@ export async function scanProjectCommands(rootPath) {
   const hasFile = (entries, name) => Boolean(findFile(entries, name));
   const isGoModule = (entries) =>
     hasFile(entries, "go.mod") || hasFile(entries, "Taskfile.yml") || hasFile(entries, "Taskfile.yaml") || hasFile(entries, "wails.json");
+  const isPythonProject = (entries) =>
+    (Array.isArray(entries) ? entries : []).some((entry) => {
+      if (!entry || entry.isDirectory === true || typeof entry.name !== "string") return false;
+      const name = entry.name.toLowerCase();
+      return (
+        name === "pyproject.toml" ||
+        name === "pipfile" ||
+        name === "pipfile.lock" ||
+        name === "setup.py" ||
+        name === "setup.cfg" ||
+        name === "requirements.txt" ||
+        /^requirements(?:[.-].+)?\.txt$/i.test(entry.name) ||
+        name === "uv.lock" ||
+        name === "poetry.lock" ||
+        name === "pdm.lock" ||
+        // 包目录中的 __main__.py / helpers.py 由父项目的 modules 逻辑处理，不能单独触发递归项目识别。
+        /^(?:main|app|cli|run|server)\.py$/i.test(entry.name)
+      );
+    });
 
   // JVM 源码只从标准源码根读取，且有文件数上限，避免扫描生成物或巨型仓库卡死。
   const collectJvmSources = async (sourceRoot, rootRel, result, budget, state) => {
@@ -302,6 +350,44 @@ export async function scanProjectCommands(rootPath) {
       }
     }
     return roots;
+  };
+
+  const buildPythonPackage = async (dirRel, entries) => {
+    const pyprojectEntry = findFile(entries, "pyproject.toml");
+    const pyprojectText = pyprojectEntry ? (await readText(pyprojectEntry)) || "" : "";
+    const packageManager = detectPythonPackageManager(entries, pyprojectText, "python");
+    const modules = [];
+    const collectModules = async (baseEntries) => {
+      for (const entry of Array.isArray(baseEntries) ? baseEntries : []) {
+        if (!entry || entry.isDirectory !== true || SCAN_SKIP_DIRS.has(String(entry.name || "").toLowerCase())) continue;
+        let children;
+        try {
+          children = await readDirectoryEntries(entry.path);
+        } catch {
+          continue;
+        }
+        const main = findFile(children, "__main__.py");
+        if (main) modules.push({ name: entry.name, sourcePath: main.path });
+      }
+    };
+    await collectModules(entries);
+    const srcDir = findDir(entries, "src");
+    if (srcDir) {
+      try {
+        await collectModules(await readDirectoryEntries(srcDir.path));
+      } catch {
+        // src 布局读取失败时仍保留根目录 Python 入口。
+      }
+    }
+    return {
+      dir: dirRel,
+      ecosystem: "python",
+      entries,
+      pyprojectText,
+      packageManager,
+      pythonModules: modules,
+      markers: ["pyproject.toml", "requirements.txt", "Pipfile", "setup.py", "*.py"],
+    };
   };
 
   const buildJvmPackage = async (dirRel, entries, ecosystem, inheritedWrapper) => {
@@ -373,6 +459,7 @@ export async function scanProjectCommands(rootPath) {
     const gradlew = findFile(entries, "gradlew.bat") ? "gradlew.bat" : inheritedGradlew;
     if (pkgEntry) packages.push({ dir: rel, packageJson, packageManager, entries });
     if (isGoModule(entries)) packages.push(await buildGoPackage(rel, entries));
+    if (isPythonProject(entries)) packages.push(await buildPythonPackage(rel, entries));
     if (hasFile(entries, "pom.xml")) packages.push(await buildJvmPackage(rel, entries, "maven", mvnw));
     if (hasFile(entries, "build.gradle") || hasFile(entries, "build.gradle.kts") || hasFile(entries, "settings.gradle") || hasFile(entries, "settings.gradle.kts")) {
       packages.push(await buildJvmPackage(rel, entries, "gradle", gradlew));
@@ -396,6 +483,7 @@ export async function scanProjectCommands(rootPath) {
   const rootManager = rootPkg ? detectPackageManager(rootJson, rootEntries, "npm") : "npm";
   if (rootPkg) packages.push({ dir: "", packageJson: rootJson, packageManager: rootManager, entries: rootEntries });
   if (isGoModule(rootEntries)) packages.push(await buildGoPackage("", rootEntries));
+  if (isPythonProject(rootEntries)) packages.push(await buildPythonPackage("", rootEntries));
   const rootMvnw = findFile(rootEntries, "mvnw.cmd") ? "mvnw.cmd" : null;
   const rootGradlew = findFile(rootEntries, "gradlew.bat") ? "gradlew.bat" : null;
   if (hasFile(rootEntries, "pom.xml")) packages.push(await buildJvmPackage("", rootEntries, "maven", rootMvnw));
