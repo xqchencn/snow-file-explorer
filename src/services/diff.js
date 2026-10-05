@@ -240,3 +240,172 @@ export function buildFullFileDiff(patchResult, fullContent) {
 export function buildFullSplitRows(fullLines) {
   return buildSplitRows({ lines: fullLines });
 }
+
+/**
+ * 统计与 String.split(/\\r\\n|\\r|\\n/) 相同的行数。空字符串为 0。
+ * @param {string} text 全文
+ * @returns {number}
+ */
+function countSplitLines(text) {
+  if (!text) return 0;
+  let count = 1;
+  for (let i = 0; i < text.length; i += 1) {
+    const code = text.charCodeAt(i);
+    if (code === 10) count += 1;
+    else if (code === 13) {
+      count += 1;
+      if (text.charCodeAt(i + 1) === 10) i += 1;
+    }
+  }
+  return count;
+}
+
+/**
+ * 记录每行起点。只在读取某一行时切出那一行的字符串。
+ * @param {string} text 全文
+ * @returns {number[]}
+ */
+function buildLineStarts(text) {
+  const starts = [0];
+  for (let i = 0; i < text.length; i += 1) {
+    const code = text.charCodeAt(i);
+    if (code === 10) starts.push(i + 1);
+    else if (code === 13) {
+      if (text.charCodeAt(i + 1) === 10) i += 1;
+      starts.push(i + 1);
+    }
+  }
+  return starts;
+}
+
+/**
+ * 取出 1-based 行文本，不含行尾换行。
+ * @param {string} text 全文
+ * @param {number[]} starts 行起点
+ * @param {number} lineNumber 行号
+ * @returns {string}
+ */
+function lineTextAt(text, starts, lineNumber) {
+  const index = lineNumber - 1;
+  if (index < 0 || index >= starts.length) return "";
+  const from = starts[index];
+  const to = index + 1 < starts.length ? starts[index + 1] : text.length;
+  let end = to;
+  if (end > from && text.charCodeAt(end - 1) === 10) end -= 1;
+  if (end > from && text.charCodeAt(end - 1) === 13) end -= 1;
+  return text.slice(from, end);
+}
+
+/**
+ * 全文件差异的按需访问器。长度与 buildFullFileDiff 一致，但只为当前下标创建行对象。
+ * @param {Object|null} patchResult parseUnifiedDiff 的结果
+ * @param {string|null} fullContent 新版本全文；空字符串或 null 表示按补丁行展开
+ * @param {'unified'|'split'} [mode]
+ * @returns {{length: number, hunkStartRow: number[], at: function}}
+ */
+export function createFullDiffAccess(patchResult, fullContent, mode) {
+  const viewMode = mode === "split" ? "split" : "unified";
+  const hunks = patchResult && Array.isArray(patchResult.hunks) ? patchResult.hunks : [];
+  const text = typeof fullContent === "string" ? fullContent : "";
+  const hasText = text.length > 0;
+  const segments = [];
+  const hunkStartRow = [];
+  let length = 0;
+  let hunkGroup = [];
+
+  const flushHunkGroup = () => {
+    const group = hunkGroup;
+    hunkGroup = [];
+    if (!group.length) return;
+    if (viewMode !== "split") {
+      for (const item of group) {
+        const count = Array.isArray(item.hunk.lines) ? item.hunk.lines.length : 0;
+        hunkStartRow[item.index] = length;
+        segments.push({ kind: "hunk", hunk: item.hunk, count });
+        length += count;
+      }
+      return;
+    }
+    const lines = [];
+    const firstLineOffset = [];
+    for (const item of group) {
+      firstLineOffset.push(lines.length);
+      if (Array.isArray(item.hunk.lines)) lines.push(...item.hunk.lines);
+    }
+    const rows = buildSplitRows({ lines });
+    const rowOfLine = new Array(lines.length);
+    let cursor = 0;
+    for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
+      const row = rows[rowIndex];
+      const cells = row.left === row.right ? [row.left] : [row.left, row.right];
+      for (const cell of cells) {
+        if (!cell || cursor >= lines.length || lines[cursor] !== cell) continue;
+        if (rowOfLine[cursor] === undefined) rowOfLine[cursor] = rowIndex;
+        cursor += 1;
+      }
+    }
+    for (let i = 0; i < group.length; i += 1) {
+      const lineOffset = firstLineOffset[i];
+      hunkStartRow[group[i].index] = length + (rowOfLine[lineOffset] ?? 0);
+    }
+    segments.push({ kind: "rows", rows, count: rows.length });
+    length += rows.length;
+  };
+  const pushGap = (newFrom, oldFrom, count) => {
+    flushHunkGroup();
+    if (count <= 0) return;
+    segments.push({ kind: "gap", newFrom, oldFrom, count });
+    length += count;
+  };
+
+  if (!patchResult || !patchResult.hasHunks) {
+    if (hasText) pushGap(1, 1, countSplitLines(text));
+  } else if (!hasText) {
+    hunks.forEach((hunk, index) => hunkGroup.push({ hunk, index }));
+    flushHunkGroup();
+  } else {
+    const lineCount = countSplitLines(text);
+    let curNew = 1;
+    let curOld = 1;
+    hunks.forEach((hunk, index) => {
+      const hunkNewStart = Number(hunk.newStart || 1);
+      if (curNew < hunkNewStart && curNew <= lineCount) {
+        pushGap(curNew, curOld, Math.min(hunkNewStart, lineCount + 1) - curNew);
+      }
+      hunkGroup.push({ hunk, index });
+      curOld = hunk.oldStart + hunk.oldLines;
+      curNew = hunk.newStart + hunk.newLines;
+    });
+    if (curNew <= lineCount) pushGap(curNew, curOld, lineCount - curNew + 1);
+    else flushHunkGroup();
+  }
+
+  let starts = null;
+  const contextLine = (newNo, oldNo) => {
+    if (!starts) starts = buildLineStarts(text);
+    return { type: "context", text: lineTextAt(text, starts, newNo), oldNo, newNo };
+  };
+  const locate = (index) => {
+    let cursor = 0;
+    for (const seg of segments) {
+      if (index < cursor + seg.count) return { seg, offset: index - cursor };
+      cursor += seg.count;
+    }
+    return null;
+  };
+
+  return {
+    length,
+    hunkStartRow,
+    at(index) {
+      const found = locate(index);
+      if (!found) return { kind: "line", row: null };
+      const { seg, offset } = found;
+      if (seg.kind === "rows") return { kind: "line", row: seg.rows[offset] };
+      if (seg.kind === "hunk") return { kind: "line", row: seg.hunk.lines[offset] };
+      const line = contextLine(seg.newFrom + offset, seg.oldFrom + offset);
+      if (viewMode === "split") return { kind: "line", row: { left: line, right: line } };
+      return { kind: "line", row: line };
+    },
+  };
+}

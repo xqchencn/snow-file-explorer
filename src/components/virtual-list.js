@@ -81,7 +81,7 @@ export function createVirtualList({ viewport, rowHeight, renderRow, onRangeChang
     startIndex = first;
     endIndex = last;
     const frag = document.createDocumentFragment();
-    for (let i = first; i < last; i++) frag.appendChild(renderRow(items[i], i));
+    for (let i = first; i < last; i++) frag.appendChild(renderRow(items.at(i), i));
     content.replaceChildren(frag);
     content.style.transform = `translateY(${first * rowHeightPx}px)`;
     if (typeof onRangeChange === "function") onRangeChange(first, last);
@@ -103,7 +103,9 @@ export function createVirtualList({ viewport, rowHeight, renderRow, onRangeChang
    * @param {Array} nextItems 行数据数组
    */
   const setItems = (nextItems) => {
-    items = Array.isArray(nextItems) ? nextItems : [];
+    items = Array.isArray(nextItems) || (nextItems && typeof nextItems.length === "number" && typeof nextItems.at === "function")
+      ? nextItems
+      : [];
     spacer.style.height = `${items.length * rowHeightPx}px`;
     startIndex = -1;
     endIndex = -1;

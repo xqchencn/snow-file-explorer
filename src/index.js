@@ -27,9 +27,9 @@ import {
 } from "./services/git-service.js";
 import { shouldVirtualize } from "./components/highlight-policy.js";
 import { loadChunk } from "./services/lazy-chunk.js";
-import { installFileIcons } from "./icons/file-icons.js";
+import { installFileIcons, refreshInstalledIcons } from "./icons/file-icons.js";
 import { mapPool } from "./utils/async.js";
-import { renderTreeView } from "./components/tree-view.js";
+import { renderTreeView, paintTreeGitStatus } from "./components/tree-view.js";
 import { loadJvmPackageTree } from "./services/java-project.js";
 import { renderCodeViewer } from "./components/code-viewer.js";
 import { renderGitCommitBar, renderGitList, closeGitContextMenu } from "./components/git-view.js";
@@ -192,15 +192,42 @@ export function mount(container, api, _options = {}) {
     return iconsPromise;
   }
 
-  /** 面板空闲后再识别项目命令并预解析终端组件，避免挡住第一帧。 */
-  function scheduleBackgroundWork() {
-    const run = () => {
-      if (disposed) return;
-      void ensureCommands();
-      void loadChunk("terminal").catch(() => {});
-    };
-    if (typeof requestIdleCallback === "function") requestIdleCallback(run, { timeout: 1500 });
-    else setTimeout(run, 300);
+  let startupToken = 0;
+
+  /**
+   * 树出现之后再做图标回填、JVM 识别和 Git 状态。
+   * 右上角运行识别等这三件事都结束再开始，识别完再预载终端块。
+   * @param {Array} rootEntries 刚刚列到的根目录条目
+   */
+  function scheduleStartupFollowups(rootEntries) {
+    const token = ++startupToken;
+    const root = state.rootPath;
+    const rootToken = pathKey(root);
+    void (async () => {
+      try {
+        await Promise.all([
+          ensureIcons().then(() => {
+            if (disposed || token !== startupToken) return;
+            refreshInstalledIcons(container);
+          }),
+          refreshJavaProject(root, rootEntries),
+          refreshGitAll(),
+        ]);
+      } catch (err) {
+        console.warn("[FileExplorer] 启动后续任务失败", err);
+      }
+      if (disposed || token !== startupToken || pathKey(state.rootPath) !== rootToken) return;
+      try {
+        await ensureCommands();
+      } catch (err) {
+        console.warn("[FileExplorer] 项目命令识别失败", err);
+      }
+      if (disposed || token !== startupToken || pathKey(state.rootPath) !== rootToken) return;
+      // 识别已经结束，提前解析 xterm。第一次打开控制台直接用这份结果。
+      void loadChunk("terminal").catch((err) => {
+        console.warn("[FileExplorer] 终端组件预载失败", err);
+      });
+    })();
   }
 
   /** xterm 在终端块里。工具窗口允许工厂返回 Promise，输出会先暂存。 */
@@ -257,6 +284,8 @@ export function mount(container, api, _options = {}) {
       javaPackageView: true,
     },
     gitignoreRules: [],
+    gitignoreFullyLoaded: false,
+    gitignoreLoadedDirs: new Set(),
     contextMenu: null,
     confirmDialog: null,
     operationBusy: false,
@@ -345,6 +374,8 @@ export function mount(container, api, _options = {}) {
     state.collapsedUnstaged = new Set();
     state.gitStatusMap = Object.create(null);
     state.gitignoreRules = [];
+    state.gitignoreFullyLoaded = false;
+    state.gitignoreLoadedDirs = new Set();
     state.gitPreview = null;
     state.gitSelected = null;
     previewRequestId++;
@@ -368,25 +399,18 @@ export function mount(container, api, _options = {}) {
       renderToolbar();
       return;
     }
-    // 先列出根目录。忽略规则、JVM 识别和 Git 状态在树出现之后补。
-    await loadRoot();
-    if (disposed) return;
-    void reloadGitignore().then(() => {
-      if (!disposed && state.rootPath) return loadRoot();
-    });
-    void refreshJavaProject();
-    void refreshGitAll();
-    scheduleBackgroundWork();
+    // 先列出根目录。图标、JVM 和 Git 在树出现之后补；运行识别再等它们结束。
+    await loadRoot({ followups: true });
   }
 
   // 刷新 JVM 项目识别结果：与目录树并行，避免阻塞 Git 状态刷新。
   // 结果保存在状态中，后续 JVM 包视图直接复用，不在渲染层重复扫描。
-  async function refreshJavaProject() {
+  async function refreshJavaProject(projectPath, knownEntries) {
     if (disposed || !state.rootPath) return;
-    const projectPath = state.rootPath;
-    const detected = await detectJvmProject(projectPath);
+    const path = projectPath || state.rootPath;
+    const detected = await detectJvmProject(path, knownEntries);
     // 异步检测期间可能已切换项目，过期结果不能写回当前状态。
-    if (disposed || pathKey(projectPath) !== pathKey(state.rootPath)) return;
+    if (disposed || pathKey(path) !== pathKey(state.rootPath)) return;
     state.javaProject = detected;
   }
 
@@ -438,7 +462,13 @@ export function mount(container, api, _options = {}) {
     const mapChanged = !isSameGitMap(state.gitStatusMap, map);
     if (mapChanged) state.gitStatusMap = map;
     if (prevSig === nextSig && prevSig !== "" && !mapChanged) return;
-    if (mapChanged && state.mainView === "files") renderTree();
+    if (mapChanged && state.mainView === "files") {
+      paintTreeGitStatus(layoutEls && layoutEls.treePane, {
+        rootPath: state.rootPath,
+        gitStatusMap: state.gitStatusMap,
+        t,
+      });
+    }
     syncGitIndicator();
     if (state.mainView === "git" && prevSig !== nextSig) renderGitPane();
   }
@@ -872,13 +902,16 @@ export function mount(container, api, _options = {}) {
       state.javaProject.sourceRoots.some((root) => pathKey(root) === pathKey(entry.path));
 
     if (isJvmSourceRoot) {
+      const sub = await readDirectoryEntries(entry.path);
+      await appendGitignoreFromEntries(entry.path, sub);
       entry.children = await loadJvmPackageTree(entry.path, filtered);
       entry.isJavaSourceRoot = true;
       return;
     }
 
     const sub = await readDirectoryEntries(entry.path);
-    entry.children = filtered(sub, entry.path);
+    await appendGitignoreFromEntries(entry.path, sub);
+    entry.children = filtered(sub);
   }
 
   /**
@@ -920,16 +953,40 @@ export function mount(container, api, _options = {}) {
     return rules;
   }
 
-  // 扫描并重建 .gitignore 规则。无论过滤开关状态如何都保留规则，关闭时只改变显示策略。
+  // 打开目录时补上这一层的 .gitignore。父目录的规则已经在更早的展开里读过。
+  async function appendGitignoreFromEntries(dir, entries) {
+    if (state.gitignoreFullyLoaded) return;
+    const key = pathKey(dir);
+    if (state.gitignoreLoadedDirs.has(key)) return;
+    state.gitignoreLoadedDirs.add(key);
+    if (!Array.isArray(entries)) return;
+    const gitignoreEntry = entries.find((entry) => entry && entry.name === ".gitignore" && !entry.isDirectory);
+    if (!gitignoreEntry) return;
+    const root = state.rootPath;
+    let res;
+    try {
+      res = await readFileContent(gitignoreEntry.path);
+    } catch {
+      return;
+    }
+    if (disposed || state.gitignoreFullyLoaded || pathKey(root) !== pathKey(state.rootPath)) return;
+    if (!res || res.isBinary || typeof res.content !== "string") return;
+    const own = parseGitignore(res.content, getRelativeGitPath(dir, state.rootPath));
+    if (own.length) state.gitignoreRules = state.gitignoreRules.concat(own);
+  }
+
+  // 显式刷新时重走整仓 .gitignore。打开面板只读根上的那一个文件。
   async function reloadGitignore() {
     if (!state.rootPath) {
       state.gitignoreRules = [];
+      state.gitignoreFullyLoaded = false;
       return;
     }
     const root = state.rootPath;
     const rules = await collectGitignoreRules(root, []);
     if (disposed || pathKey(root) !== pathKey(state.rootPath)) return;
     state.gitignoreRules = rules;
+    state.gitignoreFullyLoaded = true;
   }
 
   // 切换视图开关：持久化后重新加载数据（入口：文件树右键菜单的勾选项）
@@ -947,28 +1004,33 @@ export function mount(container, api, _options = {}) {
   }
 
   // 3. 加载根目录
-  async function loadRoot() {
+  async function loadRoot({ followups = false } = {}) {
     if (!state.rootPath) {
       state.status = "";
       renderToolbar();
       renderTree();
       return;
     }
+    const root = state.rootPath;
     state.status = t("status.loading", "加载中…");
     renderToolbar();
     try {
-      const [entries] = await Promise.all([readDirectoryEntries(state.rootPath), ensureIcons()]);
-      if (disposed) return;
-      state.rootNodes = sortEntries(filterExcludedEntries(entries, state.rootPath, viewFilterOpts()));
-      // 加载成功后清空状态文案（不再显示条目计数）
+      const entries = await readDirectoryEntries(root);
+      if (disposed || pathKey(root) !== pathKey(state.rootPath)) return;
+      await appendGitignoreFromEntries(root, entries);
+      if (disposed || pathKey(root) !== pathKey(state.rootPath)) return;
+      state.rootNodes = sortEntries(filterExcludedEntries(entries, root, viewFilterOpts()));
       state.status = "";
+      renderToolbar();
+      renderTree();
+      if (followups) scheduleStartupFollowups(entries);
     } catch {
-      if (disposed) return;
+      if (disposed || pathKey(root) !== pathKey(state.rootPath)) return;
       state.rootNodes = [];
       state.status = t("error.readRoot", "无法读取根目录");
+      renderToolbar();
+      renderTree();
     }
-    renderToolbar();
-    renderTree();
   }
 
   // 4. 切换文件夹展开与收起
@@ -3058,14 +3120,8 @@ export function mount(container, api, _options = {}) {
     state.diffMode = diffMode;
     render();
     if (state.rootPath) {
-      await loadRoot();
+      await loadRoot({ followups: true });
       if (disposed) return;
-      void reloadGitignore().then(() => {
-        if (!disposed && state.rootPath) return loadRoot();
-      });
-      void refreshJavaProject();
-      void refreshGitAll();
-      scheduleBackgroundWork();
     }
     // 跟随宿主项目切换：订阅 projects 域（live），activeDirectory 变化时全量切换到新项目。
     // 与宿主「打开文件夹」按钮天然一致，插件不自建多开与目录选择。

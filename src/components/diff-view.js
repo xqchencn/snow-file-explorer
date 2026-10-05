@@ -10,7 +10,7 @@
 
 import { el } from "../utils/dom.js";
 import { createActionIcon } from "../icons/action-icons.js";
-import { buildSplitRows, buildFullFileDiff, buildFullSplitRows } from "../services/diff.js";
+import { createFullDiffAccess } from "../services/diff.js";
 import { MAX_HIGHLIGHT_LINE_LEN } from "./highlight-policy.js";
 import { ensureHighlighter, highlighterReady, highlightCodeHtml } from "./highlight-client.js";
 import { createVirtualList } from "./virtual-list.js";
@@ -73,41 +73,13 @@ export function renderDiffView(parentEl, {
   // 1. 把差异序列化为统一的「行项」数组：unified 直接是行对象，split 是 {left,right} 配对。
   //    虚拟列表只渲染可视区的行项，DOM 数量与差异总行数解耦，因此无需再截断内容。
   //    行项携带 hunkIndex（hunk 头或该 hunk 首行），供 hunk 跳转按索引定位。
-  const items = [];
-  const hunkStartRow = []; // hunkIndex -> 行项在 items 中的下标
-
-  // 有全文就补齐未改动行；没有全文（如已删除文件）则按补丁行展开。虚拟列表只挂载可视行。
-  const fullMode = typeof fullContent === "string" || result.hasHunks;
-  if (fullMode) {
-    const fullLines = buildFullFileDiff(result, fullContent);
-    const rows = viewMode === "split" ? buildFullSplitRows(fullLines) : fullLines;
-    const startByLine = new Map();
-    result.hunks.forEach((hunk, index) => {
-      if (hunk && Array.isArray(hunk.lines) && hunk.lines[0]) {
-        startByLine.set(hunk.lines[0], index);
-      }
-    });
-    for (const row of rows) {
-      const line = row && Object.prototype.hasOwnProperty.call(row, "left")
-        ? row.left || row.right
-        : row;
-      const hunkIndex = startByLine.has(line) ? startByLine.get(line) : undefined;
-      if (hunkIndex !== undefined && hunkStartRow[hunkIndex] === undefined) {
-        hunkStartRow[hunkIndex] = items.length;
-      }
-      items.push({ kind: "line", row, hunkIndex });
-    }
-  } else {
-    for (const [index, hunk] of result.hunks.entries()) {
-      hunkStartRow[index] = items.length;
-      items.push({ kind: "head", header: hunk.header });
-      if (viewMode === "split") {
-        for (const row of buildSplitRows(hunk)) items.push({ kind: "line", row });
-      } else {
-        for (const line of hunk.lines) items.push({ kind: "line", row: line });
-      }
-    }
-  }
+  // 全文按需取行：虚拟列表只为可视下标创建行对象，不先物化整份文件。
+  const items = createFullDiffAccess(
+    result,
+    typeof fullContent === "string" ? fullContent : null,
+    viewMode,
+  );
+  const hunkStartRow = items.hunkStartRow;
 
   // 2. 只对当前可视行做语法高亮。超长单行仍跳过，避免压缩成一行的文件卡住分词。
 

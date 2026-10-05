@@ -62,12 +62,30 @@ function resolveIconId(fileName, isDir, isExpanded) {
  */
 export function createFileIconNode(fileName, isDir, isExpanded) {
   const span = el("span", "sfe-type-icon");
+  span.dataset.iconName = String(fileName || "");
+  span.dataset.iconDir = isDir ? "1" : "0";
+  span.dataset.iconOpen = isExpanded ? "1" : "0";
   const id = resolveIconId(fileName, isDir, isExpanded);
   const svg = ICON_SVGS[id] || ICON_SVGS[FILE];
   if (svg) {
     span.innerHTML = svg;
   }
   return span;
+}
+
+/**
+ * 把已经挂上、但图标块尚未到达的占位填上 SVG。已有图标的节点不动。
+ * @param {ParentNode|null} root 搜索范围
+ */
+export function refreshInstalledIcons(root) {
+  if (!root || typeof root.querySelectorAll !== "function") return;
+  if (!ICON_SVGS[FILE] && !ICON_SVGS[FOLDER]) return;
+  for (const span of root.querySelectorAll(".sfe-type-icon")) {
+    if (span.childElementCount) continue;
+    const id = resolveIconId(span.dataset.iconName || "", span.dataset.iconDir === "1", span.dataset.iconOpen === "1");
+    const svg = ICON_SVGS[id] || ICON_SVGS[FILE];
+    if (svg) span.innerHTML = svg;
+  }
 }
 
 /**

@@ -273,26 +273,47 @@ export function detectJvmProjectFromEntries(entries, sourceRoots = []) {
 }
 
 /**
- * 在有限范围内检测 Java/Kotlin JVM 项目，避免递归扫描整个工作区。
- * @description 只读取根目录、根目录下的标准 `src/.../{main,test}/{java,kotlin}`，以及一级模块的同名路径。
- *   因此能覆盖 Maven/Gradle 多模块项目，又不会因为 node_modules 或构建产物导致卡顿。
+ * 根目录列表里是否已经能看出 JVM 工程（构建文件或根上的 Java/Kotlin 源文件）。
+ * @param {Array} entries 根目录直接子条目
+ * @returns {boolean}
+ */
+export function hasJvmRootMarker(entries) {
+  if (!Array.isArray(entries)) return false;
+  for (const entry of entries) {
+    if (!entry || entry.isDirectory) continue;
+    const name = String(entry.name || "");
+    if (JVM_BUILD_FILES.has(name)) return true;
+    if (/\.(java|kt)$/i.test(name)) return true;
+  }
+  return false;
+}
+
+/**
+ * 在有限范围内检测 Java/Kotlin JVM 项目。
+ * @description 根目录没有构建文件或 Java/Kotlin 源文件时直接返回，不再列子目录。
+ *   调用方已经列过根目录时传入 knownRootEntries，避免再读一次。
  * @param {string} rootPath 项目根目录绝对路径
+ * @param {Array} [knownRootEntries] 已经读到的根目录条目
  * @returns {Promise<ReturnType<typeof detectJvmProjectFromEntries>>}
  */
-export async function detectJvmProject(rootPath) {
+export async function detectJvmProject(rootPath, knownRootEntries) {
   const empty = detectJvmProjectFromEntries([]);
   if (!rootPath) return empty;
 
-  let rootEntries;
-  try {
-    rootEntries = await readDirectoryEntries(rootPath);
-  } catch {
-    return empty;
+  let rootEntries = knownRootEntries;
+  if (!Array.isArray(rootEntries)) {
+    try {
+      rootEntries = await readDirectoryEntries(rootPath);
+    } catch {
+      return empty;
+    }
   }
+
+  const rootItems = normalizeProjectEntries(rootEntries);
+  if (!hasJvmRootMarker(rootItems)) return detectJvmProjectFromEntries(rootItems, []);
 
   const roots = [];
   const seenPaths = new Set();
-  const rootItems = normalizeProjectEntries(rootEntries);
 
   async function addSourceRoot(basePath, baseEntries, segments) {
     const sourcePath = await findDirectoryFromEntries(basePath, baseEntries, segments);

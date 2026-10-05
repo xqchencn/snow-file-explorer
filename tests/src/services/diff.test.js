@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseUnifiedDiff, parseHunkHeader, buildSplitRows } from '../../../src/services/diff.js';
+import { parseUnifiedDiff, parseHunkHeader, buildSplitRows, buildFullFileDiff, buildFullSplitRows, createFullDiffAccess } from '../../../src/services/diff.js';
 
 test('diff 解析: hunk 头解析（含省略行数默认 1）', () => {
   assert.deepEqual(parseHunkHeader('@@ -1,3 +1,4 @@ function foo() {'), {
@@ -134,4 +134,33 @@ test('diff 分栏: 纯新增/纯删除块在对侧留空占位', () => {
   // 空 hunk 安全
   assert.deepEqual(buildSplitRows({ lines: [] }), []);
   assert.deepEqual(buildSplitRows(null), []);
+});
+
+test('全文件差异: 按需访问与全量展开的每一行一致', () => {
+  const full = ['const a = 1;', 'const b = 2;', 'const c = 3;', 'const d = 4;', 'const e = 5;'].join('\n');
+  const patch = [
+    '@@ -1,1 +1,1 @@',
+    '-const a = 1;',
+    '+const a = 9;',
+    '@@ -4,1 +4,2 @@',
+    '-const d = 4;',
+    '+const d = 8;',
+    '+const extra = 1;',
+  ].join('\n');
+  const result = parseUnifiedDiff(patch);
+  const expected = buildFullFileDiff(result, full);
+  const access = createFullDiffAccess(result, full, 'unified');
+  assert.equal(access.length, expected.length);
+  for (let i = 0; i < expected.length; i += 1) {
+    assert.deepEqual(access.at(i).row, expected[i], `unified 第 ${i} 行`);
+  }
+  const splitExpected = buildFullSplitRows(expected);
+  const split = createFullDiffAccess(result, full, 'split');
+  assert.equal(split.length, splitExpected.length);
+  for (let i = 0; i < splitExpected.length; i += 1) {
+    assert.deepEqual(split.at(i).row, splitExpected[i], `split 第 ${i} 行`);
+  }
+  assert.equal(access.hunkStartRow.length, result.hunks.length);
+  assert.equal(access.at(access.hunkStartRow[1]).row.type, 'del');
+  assert.equal(access.at(access.hunkStartRow[1]).row.text, 'const d = 4;');
 });

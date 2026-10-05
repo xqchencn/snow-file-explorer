@@ -6,6 +6,8 @@ import {
   sortEntries,
   resolveActiveDirectoryPath,
   detectJavaProjectFromEntries,
+  detectJvmProject,
+  hasJvmRootMarker,
   writeFileContent,
   relativePath,
   renameFileSystemEntry,
@@ -180,5 +182,32 @@ test('文件服务: 删除调用使用真实工作区和条目路径，并透传
   const result = await deleteFileSystemEntry(api, 'D:/repo', 'D:/repo/a.txt');
   assert.equal(result.ok, true);
   assert.deepEqual(calls, [{ rootPath: 'D:/repo', entryPath: 'D:/repo/a.txt' }]);
+});
+
+test('JVM 检测: 根目录没有构建文件或源文件时不读取子目录', async () => {
+  const reads = [];
+  const previous = globalThis.window;
+  globalThis.window = {
+    snow: {
+      readDirectoryEntries: async (dir) => {
+        reads.push(dir);
+        return [];
+      },
+    },
+  };
+  try {
+    const entries = [
+      { name: 'src', isDirectory: true, path: 'D:/repo/src' },
+      { name: 'package.json', isDirectory: false, path: 'D:/repo/package.json' },
+    ];
+    assert.equal(hasJvmRootMarker(entries), false);
+    assert.equal(hasJvmRootMarker([{ name: 'pom.xml', isDirectory: false }]), true);
+    const result = await detectJvmProject('D:/repo', entries);
+    assert.deepEqual(reads, []);
+    assert.equal(result.isJvmProject, false);
+    assert.deepEqual(result.sourceRoots, []);
+  } finally {
+    globalThis.window = previous;
+  }
 });
 

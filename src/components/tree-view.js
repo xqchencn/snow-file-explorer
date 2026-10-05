@@ -181,6 +181,41 @@ export function renderTreeView(parentEl, options) {
   parentEl.appendChild(list);
 }
 
+const GIT_NAME_CLASSES = ["sfe-git-modify", "sfe-git-untracked", "sfe-git-add", "sfe-git-delete", "sfe-git-rename"];
+
+/**
+ * 按当前 Git 状态表更新已渲染行的文件名颜色和徽章，不重建列表。
+ * @param {HTMLElement|null} parentEl 文件树容器
+ * @param {Object} options
+ * @param {string} options.rootPath 仓库根目录
+ * @param {Record<string, string>} options.gitStatusMap 状态表
+ * @param {Function} options.t 翻译函数
+ */
+export function paintTreeGitStatus(parentEl, { rootPath, gitStatusMap = {}, t }) {
+  if (!parentEl || typeof parentEl.querySelectorAll !== "function") return;
+  for (const item of parentEl.querySelectorAll(".sfe-file-item")) {
+    const filePath = item.dataset.path || "";
+    if (!filePath) continue;
+    const isDir = item.classList.contains("sfe-folder-row");
+    const name = filePath.split(/[/\\]/).pop();
+    const gitStatus = isDir
+      ? resolveGitFolderStatus(filePath, rootPath, gitStatusMap)
+      : resolveGitStatus(filePath, name, rootPath, gitStatusMap);
+    const nameText = item.querySelector(".sfe-file-name-text");
+    if (nameText) {
+      nameText.classList.remove(...GIT_NAME_CLASSES);
+      if (gitStatus) applyGitNameStyle(nameText, gitStatus);
+    }
+    for (const old of item.querySelectorAll(".sfe-git-badge, .sfe-git-dot")) old.remove();
+    if (!gitStatus) continue;
+    const marker = isDir ? createFolderGitDot(gitStatus, t) : createGitBadge(gitStatus);
+    if (!marker) continue;
+    const sizeEl = item.querySelector(".sfe-tree-folder-count, .sfe-file-size");
+    if (sizeEl) item.insertBefore(marker, sizeEl);
+    else item.appendChild(marker);
+  }
+}
+
 /**
  * 创建文件夹的 Git 变更圆点（对齐 VS Code 的 "Contains emphasized items" 气泡徽章）
  * @description 文件夹不显示字母徽章，仅以圆点表示「子孙含变更」；圆点颜色由状态染色 Class 的
