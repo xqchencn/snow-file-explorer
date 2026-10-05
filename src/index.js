@@ -272,6 +272,8 @@ export function mount(container, api, _options = {}) {
     activeRunTerminalId: null,
     // 底部当前显示哪个工具窗口：null=收起 | "terminal" | "run"；由左侧竖排入口栏切换。
     bottomView: null,
+    // 启动窗口右键开关：是否把其他项目里尚未结束的任务显示出来。默认不显示。
+    showOtherProjectRuns: false,
     // 终端 / 运行窗口的停靠：bottom 底栏 | right 右侧（与代码预览同侧）。两个窗口共用。
     toolDock: "bottom",
     // 主视图：始终二选一 —— "files"（文件树）/ "git"（Git 变更）；由左侧入口栏顶部切换，不可都关。
@@ -348,22 +350,22 @@ export function mount(container, api, _options = {}) {
     if (disposed) return;
     const next = nextPath || "";
     if (!force && pathKey(next) === pathKey(state.rootPath)) return;
+    const previousRoot = state.rootPath;
     state.rootPath = next;
     state.rootNodes = null;
     state.javaProject = null;
-    // 切换项目：先终止上一项目的全部终端（避免残留「看不见的进程」），再清空识别缓存与终端状态。
-    killAllTerminals();
+    // 切换项目：交互终端和已经结束的启动任务关掉。
+    // 还在跑的启动任务留在原项目目录里，默认不出现在新项目的启动列表中。
+    retainUnfinishedRuns(previousRoot);
     if (terminalWindow && typeof terminalWindow.dispose === "function") terminalWindow.dispose();
-    if (runWindow && typeof runWindow.dispose === "function") runWindow.dispose();
+    terminalWindow = null;
     state.projectCommands = null;
     state.manualScriptCommands = [];
     runShellPromise = null;
-    state.terminals = [];
     state.activeTerminalId = null;
-    state.activeRunTerminalId = null;
-    state.bottomView = null;
-    terminalWindow = null;
-    runWindow = null;
+    if (state.bottomView === "terminal") state.bottomView = null;
+    syncRetainedRuns();
+    rebuildTerminalWindows();
     // 运行控件随新项目重建（命令集合必然变化）。
     if (runToolbar && typeof runToolbar.dispose === "function") runToolbar.dispose();
     runToolbar = null;
@@ -1680,8 +1682,61 @@ export function mount(container, api, _options = {}) {
     }
   }
 
+  /**
+   * 切换项目时留下未结束的启动任务，其余终端关掉。
+   * @param {string} previousRoot 切换前的项目根目录
+   */
+  function retainUnfinishedRuns(previousRoot) {
+    const kept = [];
+    for (const term of state.terminals) {
+      const keep = term && term.mode === "run" && term.exited !== true;
+      if (!keep) {
+        try {
+          if (term && term.session && typeof term.session.kill === "function") term.session.kill();
+        } catch {
+          // 忽略：进程可能已自然退出
+        }
+        continue;
+      }
+      if (!term.projectPath) term.projectPath = previousRoot;
+      kept.push(term);
+    }
+    state.terminals = kept;
+  }
+
+  /**
+   * 标记哪些启动任务属于其他项目，并按开关决定是否出现在 tab 上。
+   * 进程和 xterm 都留着，只是默认不画 tab。
+   */
+  function syncRetainedRuns() {
+    const root = pathKey(state.rootPath);
+    for (const term of state.terminals) {
+      if (!term || term.mode !== "run") continue;
+      const other = !!(term.projectPath && pathKey(term.projectPath) !== root);
+      term.projectLabel = other ? basename(term.projectPath) : "";
+      term.hiddenRun = other && !state.showOtherProjectRuns;
+    }
+    const active = findTerminal(state.activeRunTerminalId);
+    if (!active || active.hiddenRun || active.mode !== "run") {
+      const visible = state.terminals.find((term) => term && term.mode === "run" && !term.hiddenRun);
+      state.activeRunTerminalId = visible ? visible.id : null;
+    }
+  }
+
+  /** 右键开关：显示或藏起其他项目里尚未结束的启动任务。 */
+  function toggleShowOtherProjectRuns() {
+    if (disposed) return;
+    state.showOtherProjectRuns = !state.showOtherProjectRuns;
+    rebuildTerminalWindows();
+    syncSidebar();
+    const fit = () => fitTerminalPanel();
+    if (typeof requestAnimationFrame === "function") requestAnimationFrame(fit);
+    else fit();
+  }
+
   /** 终端集合变化后重建两个窗口的 tab 列表（xterm 实例由组件内部增量维护，不丢失）。 */
   function rebuildTerminalWindows() {
+    syncRetainedRuns();
     if (terminalWindow && typeof terminalWindow.rebuild === "function") terminalWindow.rebuild();
     if (runWindow && typeof runWindow.rebuild === "function") runWindow.rebuild();
   }
@@ -1784,14 +1839,14 @@ export function mount(container, api, _options = {}) {
    */
   function stopAllRunTerminals() {
     for (const term of state.terminals) {
-      if (!term || term.mode !== "run") continue;
+      if (!term || term.mode !== "run" || term.hiddenRun) continue;
       try {
         if (term.session && typeof term.session.kill === "function") term.session.kill();
       } catch {
         // 忽略：进程可能已自然退出
       }
     }
-    state.terminals = state.terminals.filter((term) => !term || term.mode !== "run");
+    state.terminals = state.terminals.filter((term) => term && (term.mode !== "run" || term.hiddenRun));
     reconcileActiveTerminals([state.activeRunTerminalId]);
     rebuildTerminalWindows();
     syncSidebar();
@@ -1855,7 +1910,7 @@ export function mount(container, api, _options = {}) {
   function closeOtherTerminals(id) {
     const target = findTerminal(id);
     if (!target) return;
-    const victims = state.terminals.filter((term) => term.mode === target.mode && term.id !== id);
+    const victims = state.terminals.filter((term) => term.mode === target.mode && term.id !== id && !term.hiddenRun);
     for (const term of victims) {
       try {
         if (term.session && typeof term.session.kill === "function") term.session.kill();
@@ -1873,7 +1928,7 @@ export function mount(container, api, _options = {}) {
 
   /** 关闭某窗口内的全部 tab（按 mode 区分，不动另一窗口）。 */
   function closeAllTerminalsOfMode(mode) {
-    const victims = state.terminals.filter((term) => term && term.mode === mode);
+    const victims = state.terminals.filter((term) => term && term.mode === mode && !term.hiddenRun);
     for (const term of victims) {
       try {
         if (term.session && typeof term.session.kill === "function") term.session.kill();
@@ -2191,6 +2246,8 @@ export function mount(container, api, _options = {}) {
       onCopyTab: copyTerminalTab,
       onCopySelection: copyTerminalSelection,
       onPasteText: readClipboardText,
+      getShowOtherRuns: () => state.showOtherProjectRuns,
+      onToggleShowOtherRuns: toggleShowOtherProjectRuns,
     };
   }
 
@@ -2229,6 +2286,8 @@ export function mount(container, api, _options = {}) {
       scriptPath: typeof opts.scriptPath === "string" ? opts.scriptPath : "",
       // 运行命令使用所属 package.json 目录；交互式终端默认使用项目根目录。
       cwd: typeof opts.cwd === "string" && opts.cwd ? opts.cwd : state.rootPath,
+      // 任务所属项目。切走之后用来判断它是不是「其他项目」的后台任务。
+      projectPath: state.rootPath,
       // pty 启动阶段令牌：重跑复用同一 tab 时用于作废旧 pty 的迟到 onData/onExit。
       phase: 0,
     };
@@ -2351,6 +2410,14 @@ export function mount(container, api, _options = {}) {
         term.exited = true;
         term.exitCode = typeof exitCode === "number" ? exitCode : null;
         term.session = null;
+        // 其他项目的后台任务结束且当前没打开开关：直接拿走，不留一个看不见的已结束 tab。
+        if (term.mode === "run" && term.projectPath && pathKey(term.projectPath) !== pathKey(state.rootPath) && !state.showOtherProjectRuns) {
+          state.terminals = state.terminals.filter((item) => item !== term);
+          rebuildTerminalWindows();
+          syncRunToolbar();
+          syncSidebar();
+          return;
+        }
         // 模式 A 退出后刷新运行窗口 tab（✓/✗ + 退出码 + 状态点/工具栏态）。
         if (term.mode === "run") rebuildTerminalWindows();
         syncRunToolbar();

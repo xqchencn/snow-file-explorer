@@ -14,6 +14,7 @@
 
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { WebglAddon } from "@xterm/addon-webgl";
 
 /** 深色主题 ANSI 16 色：Windows Terminal 默认 (Campbell) 配色。 */
 const DARK_THEME = {
@@ -80,6 +81,141 @@ function writeClipboard(text) {
 }
 
 /**
+ * 在宿主里铺一层和代码区相同的原生滚动结构。
+ * 画面放在 sticky 里不动，spacer 把可滚动高度撑到回滚缓冲那么高。
+ * @param {HTMLElement} host
+ * @returns {{sticky: HTMLElement, spacer: HTMLElement}}
+ */
+function mountNativeScrollPort(host) {
+  const sticky = document.createElement("div");
+  sticky.className = "sfe-xterm-sticky";
+  const spacer = document.createElement("div");
+  spacer.className = "sfe-xterm-spacer";
+  spacer.setAttribute("aria-hidden", "true");
+  host.appendChild(sticky);
+  host.appendChild(spacer);
+  return { sticky, spacer };
+}
+
+/**
+ * 把宿主的原生滚动位置和 xterm 视口对齐。
+ * 滚轮停在捕获阶段，避免 xterm preventDefault 把浏览器的惯性滚动取消掉。
+ * 备用屏和鼠标跟踪仍交给 xterm（vim / less 把滚轮当按键或鼠标上报）。
+ * @param {HTMLElement} host
+ * @param {HTMLElement} spacer
+ * @param {import("@xterm/xterm").Terminal} term
+ * @returns {{sync: Function, dispose: Function}}
+ */
+function bindNativeScroll(host, spacer, term) {
+  let applying = false;
+  let queued = 0;
+
+  const cellHeight = () => {
+    const rows = term.rows || 0;
+    if (rows < 1) return 0;
+    const screen = host.querySelector(".xterm-screen");
+    const canvas = screen ? screen.querySelector("canvas") : null;
+    const styled = (el) => {
+      if (!el) return 0;
+      if (el.clientHeight > 0) return el.clientHeight;
+      const parsed = parseFloat(el.style && el.style.height);
+      return parsed > 0 ? parsed : 0;
+    };
+    // WebGL 会把屏幕高度写在 style 上；DOM 渲染则撑开 clientHeight。都没有时用粘性视口兜底。
+    const height = styled(screen) || styled(canvas) || styled(host.querySelector(".sfe-xterm-sticky"));
+    if (height <= 0) return 0;
+    return height / rows;
+  };
+
+  const syncFromTerm = () => {
+    if (applying) return;
+    const cell = cellHeight();
+    if (cell <= 0) return;
+    let maxLine;
+    let viewportY;
+    try {
+      const buf = term.buffer.active;
+      maxLine = Math.max(0, buf.baseY);
+      viewportY = buf.viewportY;
+    } catch {
+      return;
+    }
+    const nextHeight = maxLine * cell;
+    if (spacer.style.height !== `${nextHeight}px`) spacer.style.height = `${nextHeight}px`;
+    // 用户正在拖/甩原生滚动条时，视口行已经跟上，不要回写 scrollTop，否则惯性会被掐断。
+    const line = Math.round(host.scrollTop / cell);
+    if (line === viewportY) return;
+    applying = true;
+    host.scrollTop = Math.min(viewportY, maxLine) * cell;
+    applying = false;
+  };
+
+  const sync = () => {
+    if (queued) return;
+    const raf = typeof requestAnimationFrame === "function" ? requestAnimationFrame : (cb) => setTimeout(cb, 16);
+    queued = raf(() => {
+      queued = 0;
+      syncFromTerm();
+    });
+  };
+
+  const onHostScroll = () => {
+    if (applying) return;
+    const cell = cellHeight();
+    if (cell <= 0) return;
+    const line = Math.round(host.scrollTop / cell);
+    let viewportY;
+    try {
+      viewportY = term.buffer.active.viewportY;
+    } catch {
+      return;
+    }
+    if (line === viewportY) return;
+    applying = true;
+    try {
+      term.scrollToLine(line);
+    } catch {
+      // 忽略：实例已释放
+    }
+    applying = false;
+  };
+
+  const onWheel = (event) => {
+    if (event.shiftKey) return;
+    let passThrough;
+    try {
+      passThrough = term.buffer.active.type === "alternate" || term.modes.mouseTrackingMode !== "none";
+    } catch {
+      return;
+    }
+    if (passThrough) return;
+    // 不 preventDefault：浏览器才能对这条原生滚动条做惯性滑动。
+    event.stopImmediatePropagation();
+  };
+
+  host.addEventListener("scroll", onHostScroll, { passive: true });
+  host.addEventListener("wheel", onWheel, { capture: true, passive: false });
+  const scrollSub = term.onScroll(() => sync());
+  const parsedSub = term.onWriteParsed(() => sync());
+
+  return {
+    sync,
+    dispose() {
+      if (queued && typeof cancelAnimationFrame === "function") cancelAnimationFrame(queued);
+      queued = 0;
+      host.removeEventListener("scroll", onHostScroll);
+      host.removeEventListener("wheel", onWheel, { capture: true });
+      try {
+        scrollSub.dispose();
+        parsedSub.dispose();
+      } catch {
+        // 忽略：实例已释放
+      }
+    },
+  };
+}
+
+/**
  * 创建 xterm 终端视图。
  * @param {HTMLElement} host 终端挂载宿主元素（必须有尺寸）
  * @param {Object} [options]
@@ -105,12 +241,45 @@ export function createXtermView(host, options = {}) {
   const fit = new FitAddon();
   term.loadAddon(fit);
 
-  term.open(host);
+  // DOM 渲染器在滚动时要逐行改 DOM，输出一长就卡。WebGL 只负责把字形画在画布上。
+  // 滚动手感不靠它：xterm 自带滑块在 Windows 上横移超过一段距离就会松手回弹，
+  // 滚轮也没有惯性。下面的原生滚动层才和代码区一样，滑一下会带着走。
+  let webgl = null;
+  let webglFailed = false;
+  const attachWebgl = () => {
+    if (webgl || webglFailed) return;
+    const width = host.clientWidth || 0;
+    const height = host.clientHeight || 0;
+    if (width < 2 || height < 2) return;
+    try {
+      const addon = new WebglAddon();
+      addon.onContextLoss(() => {
+        if (webgl === addon) webgl = null;
+        try {
+          addon.dispose();
+        } catch {
+          // 上下文已经丢了
+        }
+      });
+      term.loadAddon(addon);
+      webgl = addon;
+    } catch (err) {
+      webglFailed = true;
+      console.warn("[FileExplorer] 终端 WebGL 不可用，改用 DOM 渲染", err);
+    }
+  };
+
+  // 先铺原生滚动层，xterm 画在粘性视口里，滚动条留给浏览器。
+  const scrollPort = mountNativeScrollPort(host);
+  term.open(scrollPort.sticky);
+  const nativeScroll = bindNativeScroll(host, scrollPort.spacer, term);
   try {
     fit.fit();
   } catch {
     // 宿主尺寸尚未就绪（隐藏/零宽）：由调用方在可见后再次 fit。
   }
+  nativeScroll.sync();
+  attachWebgl();
 
   // Windows 终端惯例：Ctrl+C 有选中则复制（无选中时放行给 shell 作中断信号 SIGINT）。
   // 粘贴不在此拦截：交给浏览器原生 paste 事件（xterm 原生处理），少一条剪贴板读取失败路径。
@@ -159,6 +328,8 @@ export function createXtermView(host, options = {}) {
       } catch {
         // 忽略：容器尺寸不可用
       }
+      attachWebgl();
+      nativeScroll.sync();
     },
     focus() {
       try {
@@ -223,10 +394,19 @@ export function createXtermView(host, options = {}) {
     },
     dispose() {
       try {
+        nativeScroll.dispose();
         if (typeof host.removeEventListener === "function") host.removeEventListener("contextmenu", handleContextMenu);
         dataSub.dispose();
         resizeSub.dispose();
         selectionSub.dispose();
+        if (webgl) {
+          try {
+            webgl.dispose();
+          } catch {
+            // 忽略：addon 已释放
+          }
+          webgl = null;
+        }
         term.dispose();
       } catch {
         // 忽略：重复释放

@@ -78,6 +78,8 @@ function iconButton(className, iconName, title, size = 14) {
  * @param {Function} [options.onCopyTab] 复制该 tab 的标识（命令 / 标题）：(id) => void
  * @param {Function} [options.onCopySelection] 仅 kind=run：复制当前 tab 的选中文本：(id, text) => void
  * @param {Function} [options.onPasteText] 终端右键「粘贴」的剪贴板文本来源：() => Promise<string>
+ * @param {Function} [options.getShowOtherRuns] 仅 kind=run：是否正在显示其他项目的后台任务
+ * @param {Function} [options.onToggleShowOtherRuns] 仅 kind=run：切换上述显示：() => void
  * @returns {{rebuild: Function, syncActive: Function, syncDock: Function, write: Function, getSizes: Function, fit: Function, focus: Function, clear: Function, scrollToBottom: Function, dispose: Function}}
  */
 export function renderToolWindow(container, options) {
@@ -103,6 +105,8 @@ export function renderToolWindow(container, options) {
     onCopyTab,
     onCopySelection,
     onPasteText,
+    getShowOtherRuns,
+    onToggleShowOtherRuns,
   } = options;
   const isRun = kind === "run";
 
@@ -221,9 +225,9 @@ export function renderToolWindow(container, options) {
     return Array.isArray(arr) ? arr : [];
   }
 
-  /** 当前激活终端：优先 activeId，否则退化为第一条。 */
+  /** 当前激活终端：只认还显示在 tab 上的任务，藏起的后台任务不占按钮。 */
   function activeTerminal() {
-    const arr = list();
+    const arr = list().filter((term) => term && !term.hiddenRun);
     const id = typeof getActiveId === "function" ? getActiveId() : null;
     return arr.find((x) => x && x.id === id) || arr[0] || null;
   }
@@ -279,6 +283,7 @@ export function renderToolWindow(container, options) {
       row.type = "button";
       // 禁用项（如剪贴板为空的「粘贴」）：置灰且点击无效。
       if (item.disabled) row.disabled = true;
+      if (item.checked) row.classList.add("checked");
       if (item.icon) row.appendChild(createActionIcon(item.icon, 12));
       row.appendChild(el("span", "sfe-popup-menu-label", item.label));
       row.addEventListener("click", (event) => {
@@ -311,6 +316,18 @@ export function renderToolWindow(container, options) {
     menu.style.top = `${Math.max(0, top - (containerRect.top || 0))}px`;
   }
 
+  /** 启动窗口右键里的开关：显示或藏起其他项目尚未结束的任务。 */
+  function otherRunsToggleItem() {
+    if (!isRun || typeof onToggleShowOtherRuns !== "function") return null;
+    const on = typeof getShowOtherRuns === "function" && getShowOtherRuns();
+    return {
+      label: t("run.showOtherProjects", "显示其他项目的任务"),
+      icon: on ? "check" : "",
+      checked: !!on,
+      onClick: () => onToggleShowOtherRuns(),
+    };
+  }
+
   /** 某 tab 的右键菜单项（终端 / 运行共用，运行窗口另加「停止」）。 */
   function tabMenuItems(id) {
     const term = list().find((x) => x && x.id === id);
@@ -327,6 +344,11 @@ export function renderToolWindow(container, options) {
     items.push({ label: t("run.closeTab", "关闭"), icon: "close", onClick: () => onCloseTerminal && onCloseTerminal(id) });
     items.push({ label: t("run.closeOthers", "关闭其它"), onClick: () => onCloseOthers && onCloseOthers(id) });
     items.push({ label: t("run.closeAll", "关闭全部"), onClick: () => onCloseAll && onCloseAll() });
+    const toggle = otherRunsToggleItem();
+    if (toggle) {
+      items.push({ separator: true });
+      items.push(toggle);
+    }
     return items;
   }
 
@@ -336,10 +358,15 @@ export function renderToolWindow(container, options) {
     openMenu(tabMenuItems(id), x, y);
   }
 
-  /** 内容区右键：对当前激活 tab 打开菜单。 */
+  /** 内容区右键：对当前可见 tab 打开菜单。没有可见 tab 时，启动窗口仍给出后台任务开关。 */
   function openActiveTabMenu(x, y) {
     const active = activeTerminal();
-    if (active) openTabMenu(active.id, x, y);
+    if (active && !active.hiddenRun) {
+      openTabMenu(active.id, x, y);
+      return;
+    }
+    const toggle = otherRunsToggleItem();
+    if (toggle) openMenu([toggle], x, y);
   }
 
   /**
@@ -448,9 +475,12 @@ export function renderToolWindow(container, options) {
     tabList.replaceChildren();
     tabNodes = new Map();
     for (const term of list()) {
+      if (term.hiddenRun) continue;
       const tab = el("button", "sfe-run-tab");
       tab.type = "button";
-      const labelText = term.title || t("run.terminal", "终端");
+      const labelText = term.projectLabel
+        ? `${term.title || t("run.terminal", "终端")} · ${term.projectLabel}`
+        : (term.title || t("run.terminal", "终端"));
       // 模式 A（一次性运行）退出后显示 ✓/✗ + 退出码；模式 B（交互终端）不显示。
       const isTermRun = term.mode === "run";
       const exited = isTermRun && term.exited === true;
@@ -505,6 +535,10 @@ export function renderToolWindow(container, options) {
     if (!toolbarRefs) return;
     const active = activeTerminal();
     const running = !!active && active.exited !== true;
+    // 任务 tab 被藏起时，重跑和停止跟着藏，避免还对着看不见的任务操作。
+    const onlyHidden = !active && list().some((term) => term && term.hiddenRun);
+    toolbarRefs.rerun.hidden = onlyHidden;
+    toolbarRefs.stop.hidden = onlyHidden;
     toolbarRefs.rerun.disabled = !active;
     toolbarRefs.stop.disabled = !running;
     if (toolbarRefs.copy) toolbarRefs.copy.disabled = !activeHasSelection();
@@ -586,12 +620,13 @@ export function renderToolWindow(container, options) {
   /** 显示激活终端：其余隐藏，当前 fit + focus（切 tab 后终端尺寸正确、可立即输入）。 */
   function syncActiveView() {
     const active = activeTerminal();
-    if (!active) return;
-    const entry = views.get(active.id);
-    if (!entry) return;
+    const currentId = active && !active.hiddenRun ? active.id : null;
     for (const [id, item] of views) {
-      item.host.hidden = id !== active.id;
+      item.host.hidden = id !== currentId;
     }
+    if (!currentId) return;
+    const entry = views.get(currentId);
+    if (!entry) return;
     entry.view.fit();
     entry.view.focus();
   }

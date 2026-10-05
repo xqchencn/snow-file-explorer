@@ -126,5 +126,6 @@
   "run.selectAll": "全选",
   "run.groupRoot": "根目录",
   "run.closeOthers": "关闭其它",
-  "run.closeAll": "关闭全部"
+  "run.closeAll": "关闭全部",
+  "run.showOtherProjects": "显示其他项目的任务"
 }

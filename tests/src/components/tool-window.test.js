@@ -475,6 +475,54 @@ test("工具窗口: 终端 tab 右键打开浮动菜单（含关闭/关闭其它
   assert.match(menu.textContent, /关闭其它/);
 });
 
+test("工具窗口: 运行窗口右键菜单有「显示其他项目的任务」，点击切换", () => {
+  const terms = [term("r1", "dev", { mode: "run" })];
+  let shown = false;
+  let toggles = 0;
+  const { pane } = mount(makeOpts({
+    kind: "run",
+    getTerminals: () => terms,
+    getActiveId: () => "r1",
+    getShowOtherRuns: () => shown,
+    onToggleShowOtherRuns: () => {
+      toggles += 1;
+      shown = !shown;
+    },
+  }));
+  const tab = pane.querySelector(".sfe-run-tab");
+  tab.dispatchEvent(new dom.window.MouseEvent("contextmenu", { bubbles: true, clientX: 20, clientY: 20 }));
+  const menu = pane.querySelector(".sfe-popup-menu");
+  const item = [...menu.querySelectorAll(".sfe-popup-menu-item")].find((node) => /显示其他项目的任务/.test(node.textContent));
+  assert.ok(item, "右键菜单必须有后台任务开关");
+  assert.equal(item.classList.contains("checked"), false);
+  item.click();
+  assert.equal(toggles, 1);
+  tab.dispatchEvent(new dom.window.MouseEvent("contextmenu", { bubbles: true, clientX: 20, clientY: 20 }));
+  const again = [...pane.querySelector(".sfe-popup-menu").querySelectorAll(".sfe-popup-menu-item")]
+    .find((node) => /显示其他项目的任务/.test(node.textContent));
+  assert.ok(again.classList.contains("checked"));
+});
+
+test("工具窗口: hiddenRun 的启动任务不画 tab，重跑和停止也跟着藏", () => {
+  const terms = [
+    term("r1", "当前", { mode: "run" }),
+    term("r2", "后台", { mode: "run", hiddenRun: true, projectLabel: "other" }),
+  ];
+  const { pane, controller } = mount(makeOpts({ kind: "run", getTerminals: () => terms, getActiveId: () => "r1" }));
+  const tabs = [...pane.querySelectorAll(".sfe-run-tab")];
+  assert.equal(tabs.length, 1);
+  assert.match(tabs[0].textContent, /当前/);
+  assert.equal(pane.querySelectorAll(".sfe-run-terminal-host").length, 2);
+  assert.equal(pane.querySelector(".sfe-run-tb-btn.rerun").hidden, false);
+  assert.equal(pane.querySelector(".sfe-run-tb-btn.stop").hidden, false);
+
+  terms.splice(0, 1);
+  controller.rebuild();
+  assert.equal(pane.querySelectorAll(".sfe-run-tab").length, 0);
+  assert.equal(pane.querySelector(".sfe-run-tb-btn.rerun").hidden, true);
+  assert.equal(pane.querySelector(".sfe-run-tb-btn.stop").hidden, true);
+});
+
 test("工具窗口: 运行 tab 右键菜单额外含「停止」（运行中）与「重新运行」", () => {
   const terms = [term("r1", "dev", { mode: "run" })];
   const { pane } = mount(makeOpts({ kind: "run", getTerminals: () => terms, getActiveId: () => "r1" }));

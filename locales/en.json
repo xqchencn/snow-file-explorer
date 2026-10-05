@@ -126,5 +126,6 @@
   "run.selectAll": "Select all",
   "run.groupRoot": "Root",
   "run.closeOthers": "Close others",
-  "run.closeAll": "Close all"
+  "run.closeAll": "Close all",
+  "run.showOtherProjects": "Show tasks from other projects"
 }

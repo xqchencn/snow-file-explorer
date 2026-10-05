@@ -126,5 +126,6 @@
   "run.selectAll": "全選",
   "run.groupRoot": "根目錄",
   "run.closeOthers": "關閉其他",
-  "run.closeAll": "關閉全部"
+  "run.closeAll": "關閉全部",
+  "run.showOtherProjects": "顯示其他專案的任務"
 }

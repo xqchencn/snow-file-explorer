@@ -356,6 +356,10 @@
   transition: background 0.12s ease, color 0.12s ease;
 }
 
+.sfe-run-tb-btn[hidden] {
+  display: none;
+}
+
 .sfe-run-tb-btn:hover:not(:disabled) {
   background: var(--bg-hover);
   color: var(--text-primary);
@@ -415,6 +419,10 @@
 .sfe-popup-menu-item:hover {
   background: var(--bg-hover);
   color: var(--text-primary);
+}
+
+.sfe-popup-menu-item.checked {
+  color: var(--accent-color);
 }
 
 .sfe-popup-menu-label {
@@ -559,21 +567,44 @@
   position: relative;
   flex: 1;
   min-height: 0;
+  overflow: hidden;
   background: var(--bg-primary);
 }
 
-/* xterm 宿主：铺满容器。作者样式的 display 会覆盖 UA 的 [hidden]{display:none}，必须显式声明。 */
+/* xterm 宿主：铺满容器，自己做原生滚动（和代码区同一套 overflow）。
+   作者样式的 display 会覆盖 UA 的 [hidden]{display:none}，必须显式声明。 */
 .sfe-run-terminal-host {
   width: 100%;
   height: 100%;
+  overflow-x: hidden;
+  overflow-y: scroll;
+  overscroll-behavior: contain;
+  overflow-anchor: none;
 }
 
 .sfe-run-terminal-host[hidden] {
   display: none;
 }
 
-/* xterm 视口内部微调：底部留白 0，避免出现多余滚动条；选中文本用系统色。 */
+/* 终端画面粘在视口上，真正滚动的是下面的撑高条。这样滚轮和拖滑块都走浏览器。 */
+.sfe-xterm-sticky {
+  position: sticky;
+  top: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+.sfe-xterm-spacer {
+  pointer-events: none;
+}
+
+/* xterm 自带滑块拖起来会松手，视口上的空滚动条又拉不动。两者都藏掉，只留宿主这条原生条。 */
+.sfe-run-terminal-host .xterm .xterm-scrollable-element > .scrollbar {
+  display: none !important;
+}
+
 .sfe-run-terminal-host .xterm .xterm-viewport {
   background: transparent !important;
+  overflow: hidden !important;
 }
 
