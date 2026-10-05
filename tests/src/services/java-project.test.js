@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildJavaPackageTree } from "../../../src/services/java-project.js";
+import { buildJavaPackageTree, buildJvmPackageTree } from "../../../src/services/java-project.js";
 
 function directory(name, path, children = []) {
   return { name, path, isDirectory: true, children };
@@ -86,6 +86,19 @@ test("Java 包树：默认包文件与顶层包并列", () => {
   assert.equal(tree[1].path, "D:/src/Main.java");
 });
 
+test("JVM 包树：Kotlin 文件复用同一套压缩包路径逻辑", () => {
+  const tree = buildJvmPackageTree([
+    directory("com", "D:/src/com", [
+      directory("example", "D:/src/com/example", [
+        file("Launcher.kt", "D:/src/com/example/Launcher.kt"),
+      ]),
+    ]),
+  ]);
+
+  assert.equal(tree[0].displayName, "com.example");
+  assert.equal(tree[0].packageName, "com.example");
+  assert.equal(tree[0].children[0].name, "Launcher.kt");
+});
 test("Java 包树：空输入失败安全地返回空数组", () => {
   assert.deepEqual(buildJavaPackageTree(null), []);
   assert.deepEqual(buildJavaPackageTree([]), []);

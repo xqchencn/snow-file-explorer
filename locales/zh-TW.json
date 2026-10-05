@@ -21,7 +21,7 @@
   "diff.next": "下一個差異",
   "diff.full": "完整檔案",
   "diff.hunks": "僅差異",
-  "settings.javaPackageView": "Java 套件結構檢視",
+  "settings.javaPackageView": "JVM 套件結構檢視",
   "git.notARepo": "目前目錄不是 Git 倉庫",
   "git.stagedChanges": "已暫存的變更",
   "git.changes": "變更",

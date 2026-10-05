@@ -1,18 +1,18 @@
 /**
- * Java 项目包视图服务。
- * @description 只负责把真实源码目录转换成「包节点」；节点始终保留真实 path，
+ * JVM 项目包视图服务。
+ * @description 只负责把 Java/Kotlin 源码目录转换成「包节点」；节点始终保留真实 path，
  *   因此展开、预览、Git 状态和后续文件操作不需要理解虚拟 UI 名称。
  */
 
 import { readDirectoryEntries, sortEntries } from "./file-service.js";
 
 /**
- * 递归读取 Java 源码根目录，构造成普通嵌套文件树。
+ * 递归读取 Java/Kotlin 源码根目录，构造成普通嵌套文件树。
  * @param {string} dirPath 源码根目录
  * @param {(entries: Array, dirPath: string) => Array} filterEntries 可选过滤器
  * @returns {Promise<Array>}
  */
-async function readJavaSourceTree(dirPath, filterEntries) {
+async function readJvmSourceTree(dirPath, filterEntries) {
   const entries = await readDirectoryEntries(dirPath);
   const visible = typeof filterEntries === "function" ? filterEntries(entries, dirPath) : entries;
   const result = [];
@@ -22,7 +22,7 @@ async function readJavaSourceTree(dirPath, filterEntries) {
       result.push(entry);
       continue;
     }
-    const children = await readJavaSourceTree(entry.path, filterEntries);
+    const children = await readJvmSourceTree(entry.path, filterEntries);
     result.push({ ...entry, children });
   }
 
@@ -87,11 +87,11 @@ function compactPackageNode(node) {
 }
 
 /**
- * 将已读取的源码树转换成 Java 包树。
+ * 将已读取的源码树转换成 JVM 包树。
  * @param {Array} sourceEntries 源码根目录的嵌套条目
  * @returns {Array}
  */
-export function buildJavaPackageTree(sourceEntries) {
+export function buildJvmPackageTree(sourceEntries) {
   if (!Array.isArray(sourceEntries)) return [];
 
   const packageNodes = sourceEntries
@@ -104,13 +104,17 @@ export function buildJavaPackageTree(sourceEntries) {
 }
 
 /**
- * 读取并构建一个 Java 源码根目录的包树。
- * @param {string} sourceRootPath 标准 Java 源码根目录
+ * 读取并构建一个 Java/Kotlin 源码根目录的包树。
+ * @param {string} sourceRootPath 标准 Java/Kotlin 源码根目录
  * @param {(entries: Array, dirPath: string) => Array} filterEntries 可选过滤器
  * @returns {Promise<Array>}
  */
-export async function loadJavaPackageTree(sourceRootPath, filterEntries) {
+export async function loadJvmPackageTree(sourceRootPath, filterEntries) {
   if (!sourceRootPath) return [];
-  const sourceTree = await readJavaSourceTree(sourceRootPath, filterEntries);
-  return buildJavaPackageTree(sourceTree);
+  const sourceTree = await readJvmSourceTree(sourceRootPath, filterEntries);
+  return buildJvmPackageTree(sourceTree);
 }
+
+// 保留旧导出名，已有调用方和测试继续复用同一套 JVM 包树实现。
+export const buildJavaPackageTree = buildJvmPackageTree;
+export const loadJavaPackageTree = loadJvmPackageTree;

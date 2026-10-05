@@ -16,7 +16,7 @@ import {
   deleteFileSystemEntry,
   relativePath,
   resolveActiveDirectoryPath,
-  detectJavaProject,
+  detectJvmProject,
 } from "./services/file-service.js";
 import {
   fetchGitStatusMap,
@@ -30,7 +30,7 @@ import {
 import { highlightCodeHtml, isLargeText } from "./components/highlighter.js";
 import { renderMarkdownHtml } from "./components/markdown-renderer.js";
 import { renderTreeView } from "./components/tree-view.js";
-import { loadJavaPackageTree } from "./services/java-project.js";
+import { loadJvmPackageTree } from "./services/java-project.js";
 import { renderCodeViewer } from "./components/code-viewer.js";
 import { renderGitCommitBar, renderGitList, closeGitContextMenu } from "./components/git-view.js";
 import { renderGitSyncIndicator } from "./components/git-sync-indicator.js";
@@ -323,18 +323,18 @@ export function mount(container, api, _options = {}) {
     void ensureCommands();
   }
 
-  // 刷新 Java 项目识别结果：与目录树并行，避免阻塞 Git 状态刷新。
-  // 结果保存在状态中，后续 Java 包视图直接复用，不在渲染层重复扫描。
+  // 刷新 JVM 项目识别结果：与目录树并行，避免阻塞 Git 状态刷新。
+  // 结果保存在状态中，后续 JVM 包视图直接复用，不在渲染层重复扫描。
   async function refreshJavaProject() {
     if (disposed || !state.rootPath) return;
     const projectPath = state.rootPath;
-    const detected = await detectJavaProject(projectPath);
+    const detected = await detectJvmProject(projectPath);
     // 异步检测期间可能已切换项目，过期结果不能写回当前状态。
     if (disposed || pathKey(projectPath) !== pathKey(state.rootPath)) return;
     state.javaProject = detected;
   }
 
-  // 刷新当前面板全部数据：Java 项目识别必须先完成，源码根目录展开才有可靠的 sourceRoots。
+  // 刷新当前面板全部数据：JVM 项目识别必须先完成，源码根目录展开才有可靠的 sourceRoots。
   async function refreshAll() {
     if (disposed || !state.rootPath) return;
     await refreshJavaProject();
@@ -752,21 +752,21 @@ export function mount(container, api, _options = {}) {
   }
 
   /**
-   * 加载目录的直接子节点；Java 源码根目录只在用户展开时构造包树。
+   * 加载目录的直接子节点；JVM 源码根目录只在用户展开时构造包树。
    * @param {Object} entry 要展开的真实目录条目
    * @returns {Promise<void>}
    */
   async function loadDirectoryChildren(entry) {
     const filtered = (entries) =>
       sortEntries(filterExcludedEntries(entries, state.rootPath, viewFilterOpts()));
-    const isJavaSourceRoot =
+    const isJvmSourceRoot =
       state.viewSettings.javaPackageView &&
       state.javaProject &&
       Array.isArray(state.javaProject.sourceRoots) &&
       state.javaProject.sourceRoots.some((root) => pathKey(root) === pathKey(entry.path));
 
-    if (isJavaSourceRoot) {
-      entry.children = await loadJavaPackageTree(entry.path, filtered);
+    if (isJvmSourceRoot) {
+      entry.children = await loadJvmPackageTree(entry.path, filtered);
       entry.isJavaSourceRoot = true;
       return;
     }
@@ -870,7 +870,7 @@ export function mount(container, api, _options = {}) {
       try {
         await loadDirectoryChildren(entry);
       } catch {
-        // Java 包树失败时保持普通目录可用，当前节点显示为空而不是冒泡到 UI。
+        // JVM 包树失败时保持普通目录可用，当前节点显示为空而不是冒泡到 UI。
         entry.children = [];
       }
     }
@@ -1340,7 +1340,7 @@ export function mount(container, api, _options = {}) {
       menu.appendChild(item);
     };
     // 视图开关分组（工作区级，原三点菜单设置项）：按 .gitignore 过滤（默认勾选，再点取消）；
-    // Java 包结构视图仅 Java 项目显示。切换后关闭菜单并重载文件树。
+    // JVM 包结构视图仅 JVM 项目显示。切换后关闭菜单并重载文件树。
     const appendViewToggles = (isDisabled) => {
       addToggleItem(
         t("settings.respectGitignore", "按 .gitignore 过滤"),
@@ -1357,7 +1357,7 @@ export function mount(container, api, _options = {}) {
         state.javaProject.sourceRoots.length
       ) {
         addToggleItem(
-          t("settings.javaPackageView", "Java 包结构视图"),
+          t("settings.javaPackageView", "JVM 包结构视图"),
           state.viewSettings.javaPackageView !== false,
           () => {
             closeContextMenu();

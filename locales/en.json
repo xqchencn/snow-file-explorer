@@ -21,7 +21,7 @@
   "diff.next": "Next change",
   "diff.full": "Full file",
   "diff.hunks": "Hunks only",
-  "settings.javaPackageView": "Java package view",
+  "settings.javaPackageView": "JVM package view",
   "git.notARepo": "Not a Git repository",
   "git.stagedChanges": "Staged Changes",
   "git.changes": "Changes",

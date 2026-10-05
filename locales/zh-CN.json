@@ -21,7 +21,7 @@
   "diff.next": "下一个差异",
   "diff.full": "完整文件",
   "diff.hunks": "仅差异",
-  "settings.javaPackageView": "Java 包结构视图",
+  "settings.javaPackageView": "JVM 包结构视图",
   "git.notARepo": "当前目录不是 Git 仓库",
   "git.stagedChanges": "已暂存的变更",
   "git.changes": "变更",

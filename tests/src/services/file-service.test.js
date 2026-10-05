@@ -94,6 +94,25 @@ test('Java 项目检测: 标准源码根目录是强信号', () => {
   assert.deepEqual(result.evidence, ['standard-source-root']);
 });
 
+test('JVM 项目检测: Kotlin 标准源码根目录和 Kotlin 文件纳入项目证据', () => {
+  const result = detectJavaProjectFromEntries(
+    [
+      { name: 'build.gradle.kts', isDirectory: false },
+      { name: 'Launcher.kt', isDirectory: false },
+      { name: 'Utils.kt', isDirectory: false },
+    ],
+    ['D:/repo/src/main/kotlin', 'D:/repo/src/test/kotlin']
+  );
+
+  assert.equal(result.isJvmProject, true);
+  assert.equal(result.isJavaProject, true);
+  assert.equal(result.kotlinFileCount, 2);
+  assert.equal(result.jvmFileCount, 2);
+  assert.deepEqual(result.sourceRoots, ['D:/repo/src/main/kotlin', 'D:/repo/src/test/kotlin']);
+  assert.ok(result.evidence.includes('multiple-kotlin-files'));
+});
+
+
 test('Java 项目检测: 单个 Java 文件不足以把普通目录判成项目', () => {
   const result = detectJavaProjectFromEntries([
     { name: 'Example.java', isDirectory: false },

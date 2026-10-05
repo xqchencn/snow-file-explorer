@@ -185,15 +185,15 @@ export function writeFileContent(api, filePath, content) {
   );
 }
 
-/* Java 项目检测服务定义如下。 */
+/* JVM 项目检测服务定义如下。 */
 
 /**
- * Java 项目根目录中可作为构建系统证据的文件名。
- * @description 这些文件只说明项目属于 Java/JVM 生态；真正的包视图仍只对
- *   `sourceRoots` 下的 Java 文件生效，避免把 Kotlin-only Gradle 项目当成 Java 源码树。
+ * JVM 项目根目录中可作为构建系统证据的文件名。
+ * @description 这些文件只说明项目属于 Java/Kotlin JVM 生态；真正的包视图仍只对
+ *   `sourceRoots` 下的 Java/Kotlin 文件生效，避免把普通目录误判为 JVM 项目。
  * @type {ReadonlyMap<string, string>}
  */
-export const JAVA_BUILD_FILES = Object.freeze(
+export const JVM_BUILD_FILES = Object.freeze(
   new Map([
     ["pom.xml", "maven"],
     ["build.gradle", "gradle"],
@@ -204,6 +204,9 @@ export const JAVA_BUILD_FILES = Object.freeze(
     ["gradlew.bat", "gradle"],
   ])
 );
+
+// 保留旧导出名，已有调用方继续复用同一套 JVM 构建文件判定。
+export const JAVA_BUILD_FILES = JVM_BUILD_FILES;
 
 /**
  * 读取条目名称，忽略宿主 API 可能返回的脏数据。
@@ -216,26 +219,30 @@ function normalizeProjectEntries(entries) {
 }
 
 /**
- * 从已读取的目录信息判断其是否具备 Java/JVM 项目证据。
+ * 从已读取的目录信息判断其是否具备 Java/Kotlin JVM 项目证据。
  * @param {Array} entries 项目根目录直接子条目
- * @param {Array<string>} sourceRoots 已发现的标准 Java 源码根目录
- * @returns {{isJavaProject: boolean, confidence: "strong"|"weak"|"none", buildSystem: string|null, buildFiles: string[], sourceRoots: string[], javaFileCount: number, evidence: string[]}}
+ * @param {Array<string>} sourceRoots 已发现的标准 Java/Kotlin 源码根目录
+ * @returns {{isJavaProject: boolean, isJvmProject: boolean, confidence: "strong"|"weak"|"none", buildSystem: string|null, buildFiles: string[], sourceRoots: string[], javaFileCount: number, kotlinFileCount: number, jvmFileCount: number, evidence: string[]}}
  */
-export function detectJavaProjectFromEntries(entries, sourceRoots = []) {
+export function detectJvmProjectFromEntries(entries, sourceRoots = []) {
   const items = normalizeProjectEntries(entries);
   const buildFiles = [];
   const buildSystems = new Set();
   let javaFileCount = 0;
+  let kotlinFileCount = 0;
 
   for (const entry of items) {
     const name = entry.name.toLowerCase();
-    const buildSystem = JAVA_BUILD_FILES.get(name);
+    const buildSystem = JVM_BUILD_FILES.get(name);
     if (buildSystem) {
       buildFiles.push(entry.name);
       buildSystems.add(buildSystem);
     }
     if (!entry.isDirectory && entry.name !== ".java" && /\.java$/i.test(entry.name)) {
       javaFileCount++;
+    }
+    if (!entry.isDirectory && entry.name !== ".kt" && /\.kt$/i.test(entry.name)) {
+      kotlinFileCount++;
     }
   }
 
@@ -244,29 +251,34 @@ export function detectJavaProjectFromEntries(entries, sourceRoots = []) {
   if (buildFiles.length) evidence.push("build-file");
   if (roots.length) evidence.push("standard-source-root");
   if (javaFileCount >= 2) evidence.push("multiple-java-files");
+  if (kotlinFileCount >= 2) evidence.push("multiple-kotlin-files");
 
-  // 构建文件或标准源码根目录是强信号；单个 .java 文件不足以判定项目类型。
-  const isJavaProject = buildFiles.length > 0 || roots.length > 0 || javaFileCount >= 2;
+  // 构建文件或标准源码根目录是强信号；单个 Java/Kotlin 文件不足以判定项目类型。
+  const jvmFileCount = javaFileCount + kotlinFileCount;
+  const isJavaProject = buildFiles.length > 0 || roots.length > 0 || jvmFileCount >= 2;
   return {
     isJavaProject,
-    confidence: buildFiles.length || roots.length ? "strong" : javaFileCount >= 2 ? "weak" : "none",
+    isJvmProject: isJavaProject,
+    confidence: buildFiles.length || roots.length ? "strong" : jvmFileCount >= 2 ? "weak" : "none",
     buildSystem: buildSystems.size === 1 ? [...buildSystems][0] : buildSystems.size > 1 ? "mixed" : null,
     buildFiles,
     sourceRoots: roots,
     javaFileCount,
+    kotlinFileCount,
+    jvmFileCount,
     evidence,
   };
 }
 
 /**
- * 在有限范围内检测 Java 项目，避免递归扫描整个工作区。
- * @description 只读取根目录、根目录下的标准 `src/.../java`，以及一级模块的同名路径。
+ * 在有限范围内检测 Java/Kotlin JVM 项目，避免递归扫描整个工作区。
+ * @description 只读取根目录、根目录下的标准 `src/.../{main,test}/{java,kotlin}`，以及一级模块的同名路径。
  *   因此能覆盖 Maven/Gradle 多模块项目，又不会因为 node_modules 或构建产物导致卡顿。
  * @param {string} rootPath 项目根目录绝对路径
- * @returns {Promise<ReturnType<typeof detectJavaProjectFromEntries>>}
+ * @returns {Promise<ReturnType<typeof detectJvmProjectFromEntries>>}
  */
-export async function detectJavaProject(rootPath) {
-  const empty = detectJavaProjectFromEntries([]);
+export async function detectJvmProject(rootPath) {
+  const empty = detectJvmProjectFromEntries([]);
   if (!rootPath) return empty;
 
   let rootEntries;
@@ -322,11 +334,17 @@ export async function detectJavaProject(rootPath) {
   }
   for (const module of moduleBases) {
     await addSourceRoot(module.path, module.entries, ["src", "main", "java"]);
+    await addSourceRoot(module.path, module.entries, ["src", "main", "kotlin"]);
     await addSourceRoot(module.path, module.entries, ["src", "test", "java"]);
+    await addSourceRoot(module.path, module.entries, ["src", "test", "kotlin"]);
   }
 
-  return detectJavaProjectFromEntries(rootItems, roots);
+  return detectJvmProjectFromEntries(rootItems, roots);
 }
+
+// 保留旧导出名，已有调用方和测试继续复用同一套 JVM 检测实现。
+export const detectJavaProjectFromEntries = detectJvmProjectFromEntries;
+export const detectJavaProject = detectJvmProject;
 
 /**
  * 从 api.metadata.get 的响应中解析当前激活项目目录

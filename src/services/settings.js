@@ -12,7 +12,7 @@ const STORAGE_KEY = "viewSettings";
 export const DEFAULT_VIEW_SETTINGS = Object.freeze({
   excludeMeta: true, // 排除 .git/.svn/.hg/CVS/.DS_Store/Thumbs.db
   respectGitignore: true, // 按 .gitignore 过滤
-  javaPackageView: true, // Java 项目默认使用紧凑包视图
+  javaPackageView: true, // JVM 项目默认使用紧凑包视图
 });
 
 /**
