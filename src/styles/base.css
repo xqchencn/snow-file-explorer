@@ -48,8 +48,17 @@
   user-select: none;
 }
 
-/* 主体（工具栏 / 主视图 / 底部工具窗口 / 底栏，纵排）：占据侧栏右侧剩余空间。 */
+/* 主体（工具栏 + 下方内容）：占据侧栏右侧剩余空间。 */
 .sfe-body {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* 工具栏以下：默认纵排（主视图在上、工具窗口在下）；右侧停靠时改为横排。 */
+.sfe-body-main {
   display: flex;
   flex-direction: column;
   flex: 1;

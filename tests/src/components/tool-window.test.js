@@ -137,9 +137,35 @@ test("工具窗口: 终端窗口的「＋新建」排在 tab 列表【末尾】�
     "新建按钮必须是 tab 列表最后一个节点"
   );
 
-  // 收起按钮在两窗共用的 tabsBar 最右端。
+  // 收起按钮在两窗共用的 tabsBar 最右端，停靠切换紧挨其左侧。
   const tabsBar = pane.querySelector(".sfe-run-tabs");
-  assert.ok(tabsBar.children[tabsBar.children.length - 1].classList.contains("minimize"));
+  const barChildren = [...tabsBar.children];
+  assert.ok(barChildren[barChildren.length - 1].classList.contains("minimize"));
+  assert.ok(barChildren[barChildren.length - 2].classList.contains("dock"), "停靠按钮必须在最小化左边");
+});
+
+test("工具窗口: 停靠按钮在最小化左侧，点击切换，图标随 getDock 变化", () => {
+  let dock = "bottom";
+  let toggles = 0;
+  const { pane, controller } = mount(makeOpts({
+    getDock: () => dock,
+    onToggleDock: () => {
+      toggles += 1;
+    },
+  }));
+  const dockBtn = pane.querySelector(".sfe-run-collapse.dock");
+  const minimize = pane.querySelector(".sfe-run-collapse.minimize");
+  assert.ok(dockBtn);
+  assert.equal(dockBtn.nextElementSibling, minimize);
+  assert.equal(dockBtn.getAttribute("aria-pressed"), "false");
+  assert.equal(dockBtn.title, "放到右侧");
+  dockBtn.click();
+  assert.equal(toggles, 1);
+  dock = "right";
+  controller.syncDock();
+  assert.equal(dockBtn.getAttribute("aria-pressed"), "true");
+  assert.equal(dockBtn.title, "放到底栏");
+  assert.ok(dockBtn.classList.contains("active"));
 });
 
 test("工具窗口: 每个终端渲染一个 tab，label = 标题，激活 tab 有 active 标记", () => {

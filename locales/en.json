@@ -99,6 +99,8 @@
   "run.copySelection": "Copy selection",
   "run.collapse": "Collapse run panel",
   "run.minimize": "Minimize terminal panel",
+  "run.dockRight": "Move to the right",
+  "run.dockBottom": "Move to the bottom",
   "run.showPanel": "Show terminal panel",
   "run.newTerminal": "New terminal",
   "run.terminal": "Terminal",

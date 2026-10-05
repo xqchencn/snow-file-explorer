@@ -99,6 +99,8 @@
   "run.copySelection": "複製選取文字",
   "run.collapse": "收合執行面板",
   "run.minimize": "最小化終端面板",
+  "run.dockRight": "放到右側",
+  "run.dockBottom": "放到底欄",
   "run.showPanel": "顯示終端面板",
   "run.newTerminal": "新增終端",
   "run.terminal": "終端",

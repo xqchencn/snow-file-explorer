@@ -272,6 +272,8 @@ export function mount(container, api, _options = {}) {
     activeRunTerminalId: null,
     // 底部当前显示哪个工具窗口：null=收起 | "terminal" | "run"；由左侧竖排入口栏切换。
     bottomView: null,
+    // 终端 / 运行窗口的停靠：bottom 底栏 | right 右侧（与代码预览同侧）。两个窗口共用。
+    toolDock: "bottom",
     // 主视图：始终二选一 —— "files"（文件树）/ "git"（Git 变更）；由左侧入口栏顶部切换，不可都关。
     mainView: "files",
     expanded: Object.create(null),
@@ -686,6 +688,8 @@ export function mount(container, api, _options = {}) {
     const absPath = joinPath(state.rootPath, relPath);
     const key = `${section}:${relPath}`;
 
+    // 终端占着右侧时先让回底栏，差异才能画到代码那一列。
+    yieldRightDockToCode();
     // 与文件管理器（previewFile）一致：非全屏时自动全屏，右侧才能展开查看器
     if (!isRightPanelFullscreen()) {
       requestRightPanelFullscreen();
@@ -1811,6 +1815,12 @@ export function mount(container, api, _options = {}) {
     refreshBottomVisibility();
     syncSidebar();
     if (!next) return;
+    if (state.toolDock === "right") {
+      void ensureRightDock();
+      const win = next === "run" ? runWindow : terminalWindow;
+      if (win && typeof win.focus === "function") win.focus();
+      return;
+    }
     // 窗口可见后让终端适配尺寸并聚焦，打开即可直接输入。
     const win = next === "run" ? runWindow : terminalWindow;
     if (win && typeof win.fit === "function") win.fit();
@@ -1906,6 +1916,78 @@ export function mount(container, api, _options = {}) {
     if (!layoutEls) return;
     if (layoutEls.terminalWindowEl) layoutEls.terminalWindowEl.hidden = state.bottomView !== "terminal";
     if (layoutEls.runWindowEl) layoutEls.runWindowEl.hidden = state.bottomView !== "run";
+    applyToolDock();
+  }
+
+  /** 工具窗口是否正打开（终端或运行，二者互斥）。 */
+  function toolWindowOpen() {
+    return state.bottomView === "terminal" || state.bottomView === "run";
+  }
+
+  function saveToolDock() {
+    try {
+      if (api && api.storage && typeof api.storage.setJson === "function") {
+        api.storage.setJson("toolDock", state.toolDock);
+      }
+    } catch {
+      // 忽略：偏好写失败不影响这次切换
+    }
+  }
+
+  /**
+   * 把停靠写到主体上。窗口收起时仍按底栏布局，避免主视图被右侧空列挤窄。
+   * 偏好本身留在 state.toolDock，下次打开继续用。
+   */
+  function applyToolDock() {
+    if (!layoutEls || !layoutEls.body) return;
+    layoutEls.body.dataset.toolDock = toolWindowOpen() && state.toolDock === "right" ? "right" : "bottom";
+    if (terminalWindow && typeof terminalWindow.syncDock === "function") terminalWindow.syncDock();
+    if (runWindow && typeof runWindow.syncDock === "function") runWindow.syncDock();
+    renderGitViewSwitchInToolbar();
+  }
+
+  /**
+   * 右侧停靠跟代码预览一样：必须先进入宿主全屏，左侧才是侧栏宽度、右侧才铺满。
+   * 代码预览由样式让出，不会和终端并排。
+   */
+  async function ensureRightDock() {
+    if (disposed || state.toolDock !== "right" || !toolWindowOpen()) return;
+    applyToolDock();
+    if (!isRightPanelFullscreen()) {
+      const ok = await ensureRightPanelFullscreen();
+      if (disposed) return;
+      if (!ok) setOperationStatus(false, "无法进入右侧面板全屏");
+    }
+    fitTerminalPanel();
+  }
+
+  /**
+   * 代码要占右侧时，把正在右侧的终端/运行窗口放回底栏。
+   * 窗口没开着时不动偏好，下次打开仍停在右侧。
+   */
+  function yieldRightDockToCode() {
+    if (state.toolDock !== "right" || !toolWindowOpen()) return;
+    state.toolDock = "bottom";
+    saveToolDock();
+    applyToolDock();
+    const fit = () => fitTerminalPanel();
+    if (typeof requestAnimationFrame === "function") requestAnimationFrame(fit);
+    else fit();
+  }
+
+  /** 在底栏与右侧之间切换，终端和运行窗口一起换位置。 */
+  function toggleToolDock() {
+    if (disposed) return;
+    state.toolDock = state.toolDock === "right" ? "bottom" : "right";
+    saveToolDock();
+    applyToolDock();
+    if (state.toolDock === "right") {
+      void ensureRightDock();
+      return;
+    }
+    const fit = () => fitTerminalPanel();
+    if (typeof requestAnimationFrame === "function") requestAnimationFrame(fit);
+    else fit();
   }
 
   /** 按需首次渲染两个工具窗口（渲染后各自常驻，靠 hidden 切换，xterm 实例不销毁）。 */
@@ -2073,6 +2155,8 @@ export function mount(container, api, _options = {}) {
       onNewTerminal: () => handleNewTerminal({ mode: "terminal" }),
       onCloseTerminal: handleCloseTerminal,
       onMinimize: handleMinimizeRunPanel,
+      getDock: () => state.toolDock,
+      onToggleDock: toggleToolDock,
       onClear: (id) => terminalWindow && typeof terminalWindow.clear === "function" && terminalWindow.clear(id),
       onScrollToBottom: (id) =>
         terminalWindow && typeof terminalWindow.scrollToBottom === "function" && terminalWindow.scrollToBottom(id),
@@ -2094,6 +2178,8 @@ export function mount(container, api, _options = {}) {
       onSelectTab: handleSelectRunTerminal,
       onCloseTerminal: handleCloseTerminal,
       onMinimize: handleMinimizeRunPanel,
+      getDock: () => state.toolDock,
+      onToggleDock: toggleToolDock,
       onRerun: handleRerunTerminal,
       onStop: handleStopTerminal,
       onClear: (id) => runWindow && typeof runWindow.clear === "function" && runWindow.clear(id),
@@ -2161,7 +2247,9 @@ export function mount(container, api, _options = {}) {
     rebuildTerminalWindows();
     refreshBottomVisibility();
     // 窗口由隐藏（收起）变为可见后，xterm 需按真实尺寸重算（隐藏期 fit 会得到 0 尺寸）。
-    fitTerminalPanel();
+    // 右侧停靠先等宿主全屏，再按代码预览那一列的宽度适配。
+    if (state.toolDock === "right") void ensureRightDock();
+    else fitTerminalPanel();
     syncSidebar();
     syncRunToolbar();
     void createTerminalForId(term);
@@ -2406,6 +2494,8 @@ export function mount(container, api, _options = {}) {
     const requestId = ++previewRequestId;
     saveRequestId++;
     state.selected = entry.path;
+    // 终端占着右侧时先让回底栏，这次点击的文件才能显示在代码预览里。
+    yieldRightDockToCode();
 
     // 先立刻切到「正在读取」并渲染，保证点击后马上看到反馈。
     // 全屏联动可能等待宿主 React 更新数帧（见 ensureRightPanelFullscreen），
@@ -2678,16 +2768,19 @@ export function mount(container, api, _options = {}) {
     toolbar.appendChild(syncIndicatorWrap);
     toolbar.appendChild(actions);
     body.appendChild(toolbar);
+    // 工具栏以下单独成行：底栏时纵排，右侧停靠时主视图与工具窗口横排。
+    const bodyMain = el("div", "sfe-body-main");
     const mainView = el("div", "sfe-main-view");
-    body.appendChild(mainView);
-    // 底部工具窗口：两个独立窗口（终端 / 运行），都挂在主体下方，随主视图重建而不消失；
+    bodyMain.appendChild(mainView);
+    // 工具窗口：两个独立窗口（终端 / 运行），随主视图重建而不消失；
     // 默认隐藏，由 refreshBottomVisibility 按 state.bottomView 互斥显隐（内容在首次打开时按需渲染）。
     const runWindowEl = el("div", "sfe-tool-window sfe-run-window");
     runWindowEl.hidden = true;
-    body.appendChild(runWindowEl);
+    bodyMain.appendChild(runWindowEl);
     const terminalWindowEl = el("div", "sfe-tool-window sfe-terminal-window");
     terminalWindowEl.hidden = true;
-    body.appendChild(terminalWindowEl);
+    bodyMain.appendChild(terminalWindowEl);
+    body.appendChild(bodyMain);
     layout.appendChild(body);
     root.appendChild(layout);
     container.appendChild(root);
@@ -2704,6 +2797,7 @@ export function mount(container, api, _options = {}) {
       runSideDot,
       terminalSideBtn,
       body,
+      bodyMain,
       mainView,
       runWindowEl,
       terminalWindowEl,
@@ -2792,7 +2886,8 @@ export function mount(container, api, _options = {}) {
     if (!layoutEls || !layoutEls.gitViewSwitchWrap) return;
     const wrap = layoutEls.gitViewSwitchWrap;
     const gp = state.gitPreview;
-    if (state.mainView !== "git" || !gp || !isRightPanelFullscreen()) {
+    const terminalOwnsRight = state.toolDock === "right" && (state.bottomView === "run" || state.bottomView === "terminal");
+    if (state.mainView !== "git" || !gp || !isRightPanelFullscreen() || terminalOwnsRight) {
       if (wrap.firstChild) wrap.replaceChildren();
       wrap.hidden = true;
       return;
@@ -3082,6 +3177,13 @@ export function mount(container, api, _options = {}) {
       const now = isRightPanelFullscreen();
       if (now === lastFullscreen) return;
       lastFullscreen = now;
+      // 右侧布局依赖全屏。用户退出全屏时终端回到底栏，避免和代码预览抢同一列。
+      if (!now && state.toolDock === "right" && (state.bottomView === "run" || state.bottomView === "terminal")) {
+        state.toolDock = "bottom";
+        saveToolDock();
+        applyToolDock();
+        fitTerminalPanel();
+      }
       renderGitViewSwitchInToolbar();
     });
     fullscreenObserver.observe(document.body, {
@@ -3124,7 +3226,7 @@ export function mount(container, api, _options = {}) {
   let unsubProjects = null;
   ensureIcons();
   (async () => {
-    const [initialRoot, viewSettings, diffMode, commitMode] = await Promise.all([
+    const [initialRoot, viewSettings, diffMode, commitMode, toolDock] = await Promise.all([
       resolveRoot(),
       loadViewSettings(api),
       loadDiffViewMode(api),
@@ -3138,11 +3240,22 @@ export function mount(container, api, _options = {}) {
         }
         return null;
       })(),
+      (async () => {
+        try {
+          if (api.storage && typeof api.storage.getJson === "function") {
+            return await api.storage.getJson("toolDock");
+          }
+        } catch {
+          // 忽略读取失败，默认底栏
+        }
+        return null;
+      })(),
     ]);
     if (disposed) return;
     state.rootPath = initialRoot || "";
     state.viewSettings = viewSettings;
     if (commitMode === "commitAndPush") state.gitCommitMode = "commitAndPush";
+    if (toolDock === "right") state.toolDock = "right";
     state.diffMode = diffMode;
     render();
     if (state.rootPath) {

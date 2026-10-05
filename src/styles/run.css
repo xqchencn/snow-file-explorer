@@ -285,6 +285,50 @@
   display: none;
 }
 
+/* 右侧停靠：跟代码预览同一套分栏。左侧列表保持侧栏宽度，工具窗口占满剩余空间。
+   代码预览让出右侧，两者不同时出现。仅在窗口打开时由 data-tool-dock="right" 生效。 */
+.sfe-body[data-tool-dock="right"] .sfe-body-main {
+  flex-direction: row;
+}
+
+.sfe-body[data-tool-dock="right"] .sfe-main-view {
+  flex: 0 0 auto;
+  width: auto;
+  min-width: 0;
+  max-width: none;
+}
+
+.sfe-body[data-tool-dock="right"] .sfe-tree-pane,
+.sfe-body[data-tool-dock="right"] .sfe-git-pane {
+  width: var(--right-panel-width, 380px);
+  min-width: 340px;
+  max-width: 500px;
+  flex: none;
+  border-right: 1px solid var(--border-color, var(--border-light));
+}
+
+.sfe-body[data-tool-dock="right"] .sfe-preview-pane,
+.sfe-body[data-tool-dock="right"] .sfe-git-preview-pane {
+  display: none;
+}
+
+/* 全屏规则会把预览设成 display:flex，这里用更高优先级压回去。 */
+:is(:root, html):is(:has(.right-panel.fullscreen), :has(.app-shell.right-panel-fullscreen)) .sfe-body[data-tool-dock="right"] :is(.sfe-preview-pane, .sfe-git-preview-pane) {
+  display: none;
+}
+
+.sfe-body[data-tool-dock="right"] .sfe-tool-window {
+  flex: 1 1 auto;
+  width: auto;
+  height: auto;
+  min-width: 0;
+  min-height: 0;
+  max-height: none;
+  align-self: stretch;
+  border-top: none;
+  border-left: none;
+}
+
 /* ── 运行窗口工具栏：重跑 ⟳ / 停止 ■ / 滚动到底 ⬇ / 清空 🗑 / ⋮ ── */
 .sfe-run-toolbar-bar {
   display: flex;
@@ -498,6 +542,11 @@
 .sfe-run-collapse:hover {
   background: var(--bg-hover);
   color: var(--text-primary);
+}
+
+/* 停靠在右侧时，按钮用强调色标出当前不是底栏。 */
+.sfe-run-collapse.dock.active {
+  color: var(--accent-color);
 }
 
 /* 终端窗口的「＋新建」：排在最后一个 tab 右侧，与 tab 之间用左侧分隔线隔开。 */

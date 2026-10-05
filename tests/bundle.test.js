@@ -122,6 +122,8 @@ test('宿主加载模拟: 通过 Data URI (Blob URL 等效) 动态 import 并挂
     };
     node.setAttribute = () => {};
     node.getAttribute = () => null;
+    // 文件图标与工具窗口停靠都写在 dataset 上（iconName / toolDock）。
+    node.dataset = {};
     node.addEventListener = () => {};
     // 插件在同步栏等组件里使用 classList（标准 DOM API），mock 必须建模，
     // 否则挂载路径会抛 "Cannot read properties of undefined (reading 'add')"。

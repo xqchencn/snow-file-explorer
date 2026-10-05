@@ -66,6 +66,8 @@ function iconButton(className, iconName, title, size = 14) {
  * @param {Function} [options.onNewTerminal] 仅 kind=terminal：点击左侧「＋新建」：() => void
  * @param {Function} [options.onCloseTerminal] 关闭某 tab：(id) => void
  * @param {Function} [options.onMinimize] 收起窗口（不终止进程）
+ * @param {Function} [options.getDock] 当前停靠："bottom" 底栏 | "right" 右侧
+ * @param {Function} [options.onToggleDock] 在底栏与右侧之间切换：() => void
  * @param {Function} [options.onRerun] 仅 kind=run：重跑该 tab：(id) => void
  * @param {Function} [options.onStop] 仅 kind=run：停止该 tab：(id) => void
  * @param {Function} [options.onClear] 清空该 tab 输出：(id) => void
@@ -76,7 +78,7 @@ function iconButton(className, iconName, title, size = 14) {
  * @param {Function} [options.onCopyTab] 复制该 tab 的标识（命令 / 标题）：(id) => void
  * @param {Function} [options.onCopySelection] 仅 kind=run：复制当前 tab 的选中文本：(id, text) => void
  * @param {Function} [options.onPasteText] 终端右键「粘贴」的剪贴板文本来源：() => Promise<string>
- * @returns {{rebuild: Function, syncActive: Function, write: Function, getSizes: Function, fit: Function, focus: Function, clear: Function, scrollToBottom: Function, dispose: Function}}
+ * @returns {{rebuild: Function, syncActive: Function, syncDock: Function, write: Function, getSizes: Function, fit: Function, focus: Function, clear: Function, scrollToBottom: Function, dispose: Function}}
  */
 export function renderToolWindow(container, options) {
   const {
@@ -89,6 +91,8 @@ export function renderToolWindow(container, options) {
     onNewTerminal,
     onCloseTerminal,
     onMinimize,
+    getDock,
+    onToggleDock,
     onRerun,
     onStop,
     onClear,
@@ -119,6 +123,18 @@ export function renderToolWindow(container, options) {
     newTabBtn.addEventListener("click", () => onNewTerminal());
   }
 
+  // 停靠切换紧挨最小化左侧：底栏 ↔ 右侧（与代码预览同一侧）。
+  const dockBtn = iconButton(
+    "sfe-run-collapse dock",
+    "panelRight",
+    t("run.dockRight", "放到右侧"),
+    13,
+  );
+  dockBtn.addEventListener("click", () => {
+    if (typeof onToggleDock === "function") onToggleDock();
+  });
+  tabsBar.appendChild(dockBtn);
+
   const minimizeBtn = iconButton(
     "sfe-run-collapse minimize",
     "minus",
@@ -129,6 +145,18 @@ export function renderToolWindow(container, options) {
     if (typeof onMinimize === "function") onMinimize();
   });
   tabsBar.appendChild(minimizeBtn);
+
+  /** 按当前停靠刷新按钮图标与提示（底栏时指向右侧，右侧时指向底栏）。 */
+  function syncDock() {
+    const right = (typeof getDock === "function" ? getDock() : "bottom") === "right";
+    const title = right ? t("run.dockBottom", "放到底栏") : t("run.dockRight", "放到右侧");
+    dockBtn.title = title;
+    dockBtn.setAttribute("aria-label", title);
+    dockBtn.setAttribute("aria-pressed", right ? "true" : "false");
+    dockBtn.classList.toggle("active", right);
+    dockBtn.replaceChildren(createActionIcon(right ? "panelBottom" : "panelRight", 13));
+  }
+  syncDock();
   container.appendChild(tabsBar);
 
   // ── 工具栏：仅运行窗口有（重跑 / 停止 / 复制选中文本 / 滚动到底 / 清空 / ⋮）──
@@ -633,6 +661,8 @@ export function renderToolWindow(container, options) {
       const entry = active ? views.get(active.id) : null;
       if (entry) entry.view.fit();
     },
+    /** 停靠变化后刷新右上角切换按钮（不重建终端）。 */
+    syncDock,
     /** 窗口可见时聚焦激活终端（打开即可直接输入）。 */
     focus() {
       const active = activeTerminal();

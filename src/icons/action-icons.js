@@ -38,6 +38,8 @@ import {
   Terminal,
   X,
   Eraser,
+  PanelRight,
+  PanelBottom,
 } from 'lucide';
 import { fileIconMarkup } from "./file-icons.js";
 
@@ -81,6 +83,9 @@ const ICON_MAP = {
   terminal: Terminal,
   close: X,
   eraser: Eraser,
+  // 工具窗口停靠：右侧（与代码预览同侧）/ 底栏
+  panelRight: PanelRight,
+  panelBottom: PanelBottom,
 };
 
 /**

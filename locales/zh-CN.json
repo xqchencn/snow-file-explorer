@@ -99,6 +99,8 @@
   "run.copySelection": "复制选中文本",
   "run.collapse": "收起运行面板",
   "run.minimize": "最小化终端面板",
+  "run.dockRight": "放到右侧",
+  "run.dockBottom": "放到底栏",
   "run.showPanel": "显示终端面板",
   "run.newTerminal": "新建终端",
   "run.terminal": "终端",
