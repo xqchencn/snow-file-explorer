@@ -22,6 +22,9 @@ import {
   readWails2Commands,
   readWails3Commands,
   readGoCommands,
+  findJavaMainCandidates,
+  readMavenCommands,
+  readGradleCommands,
 } from "./ecosystems.js";
 
 /** 递归扫描时跳过的目录名（海量 / 无关 / 生成物）。 */
@@ -59,7 +62,7 @@ const GO_TEST_DIRS = new Set(["tests", "test"]);
  * @description 用户规矩——**服务端（Go / Wails）展示在前端（Node）之前**。
  *   仅在「同一目录层级」内比较，父包在前的既有层级规则不受影响。
  */
-const ECOSYSTEM_PRIORITY = { go: 0, node: 1 };
+const ECOSYSTEM_PRIORITY = { go: 0, maven: 1, gradle: 1, node: 2 };
 
 /**
  * 规范化根目录键：统一分隔符、小写、去尾部分隔符。
@@ -115,6 +118,44 @@ function buildGoCommands(pkg, prefix) {
   return readGoCommands(pkg.entries, { prefix, cmdDirs: pkg.cmdDirs });
 }
 
+function buildJvmCommands(pkg, prefix) {
+  if (pkg.ecosystem === "maven") {
+    return readMavenCommands({
+      prefix,
+      pomText: pkg.pomText,
+      mainCandidates: pkg.mainCandidates,
+      wrapper: pkg.wrapper,
+      springBoot: pkg.springBoot,
+    });
+  }
+  return readGradleCommands({
+    prefix,
+    buildText: pkg.buildText,
+    settingsText: pkg.settingsText,
+    mainCandidates: pkg.mainCandidates,
+    wrapper: pkg.wrapper,
+    modulePath: pkg.modulePath,
+    forceJvm: pkg.forceJvm,
+  });
+}
+
+/**
+ * 把 JVM 构建标记转换为生态命令组；没有源码 main 的聚合根仍保留基础构建命令。
+ */
+function buildJvmEcosystem(pkg, prefix) {
+  const kind = pkg.ecosystem;
+  const commands = buildJvmCommands(pkg, prefix);
+  return {
+    kind,
+    id: prefix ? `${kind}:${prefix}` : kind,
+    label: prefix ? `${kind === "maven" ? "Maven" : "Gradle"} · ${prefix}` : kind === "maven" ? "Maven" : "Gradle",
+    markers: kind === "maven" ? ["pom.xml"] : ["build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts"],
+    dir: prefix,
+    entry: null,
+    commands,
+  };
+}
+
 /**
  * 纯函数：由「已发现的包」列表生成命令集合。
  * @description 每个包由标记类型（node / go）+ 相对根目录的路径前缀描述；
@@ -144,6 +185,13 @@ export function detectProjectCommands(packages) {
         commands,
       });
       summary.push({ id: prefix || "go", dir: prefix, ecosystem: "go", commandCount: commands.length });
+      continue;
+    }
+
+    if (pkg.ecosystem === "maven" || pkg.ecosystem === "gradle") {
+      const eco = buildJvmEcosystem(pkg, prefix);
+      ecosystems.push(eco);
+      summary.push({ id: eco.id, dir: prefix, ecosystem: pkg.ecosystem, commandCount: eco.commands.length });
       continue;
     }
 
@@ -181,21 +229,18 @@ export async function scanProjectCommands(rootPath) {
   const snow = typeof window !== "undefined" ? window.snow : null;
   const canRead = snow && typeof snow.readFileContent === "function";
   const packages = [];
+  const MAX_SOURCE_FILES = 240;
 
-  /** 读取文本文件内容；读取失败或二进制返回 null（识别只在读得到文本时才产命令）。 */
   const readText = async (entry) => {
     if (!canRead || !entry || !entry.path) return null;
     try {
       const result = await snow.readFileContent(entry.path);
-      if (result && typeof result.content === "string" && !result.isBinary) return result.content;
+      return result && typeof result.content === "string" && !result.isBinary ? result.content : null;
     } catch {
-      // 读取失败：不产命令
+      return null;
     }
-    return null;
   };
-
-  /** 读取并解析 package.json；解析失败返回 null（仅保留包标记，不产命令）。 */
-  const readPackageJson = async (entry) => {
+  const readJson = async (entry) => {
     const text = await readText(entry);
     if (text == null) return null;
     try {
@@ -204,27 +249,96 @@ export async function scanProjectCommands(rootPath) {
       return null;
     }
   };
+  const findFile = (entries, name) => entries.find((entry) => entry && entry.name === name && entry.isDirectory !== true);
+  const findDir = (entries, name) => entries.find((entry) => entry && entry.name === name && entry.isDirectory === true);
+  const hasFile = (entries, name) => Boolean(findFile(entries, name));
+  const isGoModule = (entries) =>
+    hasFile(entries, "go.mod") || hasFile(entries, "Taskfile.yml") || hasFile(entries, "Taskfile.yaml") || hasFile(entries, "wails.json");
 
-  /** 该目录是否为 Go module：有 go.mod，或（根目录/无 package.json 时）有 Taskfile / wails.json。 */
-  const isGoModule = (entries) => {
-    const has = (name) => entries.some((e) => e && e.name === name && e.isDirectory !== true);
-    return has("go.mod") || has("Taskfile.yml") || has("Taskfile.yaml") || has("wails.json");
+  // JVM 源码只从标准源码根读取，且有文件数上限，避免扫描生成物或巨型仓库卡死。
+  const collectJvmSources = async (sourceRoot, rootRel, result, budget, state) => {
+    if (!sourceRoot || state.count >= budget) return;
+    let entries;
+    try {
+      entries = await readDirectoryEntries(sourceRoot);
+    } catch {
+      return;
+    }
+    if (!Array.isArray(entries)) return;
+    for (const entry of entries) {
+      if (!entry || !entry.path || state.count >= budget) break;
+      if (entry.isDirectory === true) {
+        if (SCAN_SKIP_DIRS.has(String(entry.name || "").toLowerCase()) || /^(?:test|generated)$/i.test(entry.name || "")) continue;
+        await collectJvmSources(entry.path, `${rootRel}/${entry.name}`, result, budget, state);
+        continue;
+      }
+      if (!/\.(?:java|kt)$/i.test(entry.name || "")) continue;
+      state.count += 1;
+      const text = await readText(entry);
+      if (text == null) continue;
+      const candidates = findJavaMainCandidates(text, entry.name).map((candidate) => ({
+        ...candidate,
+        sourcePath: entry.path,
+      }));
+      result.push(...candidates);
+    }
   };
 
-  /** 收集 go 包识别信息：探测 wails 版本（wails.json / go.mod 依赖）与 cmd/ 入口候选。 */
+  const findSourceRoots = async (baseEntries) => {
+    const roots = [];
+    for (const language of ["java", "kotlin"]) {
+      const src = findDir(baseEntries, "src");
+      if (!src) continue;
+      try {
+        const srcEntries = await readDirectoryEntries(src.path);
+        const mainDir = findDir(srcEntries, "main");
+        if (mainDir) {
+          const mainEntries = await readDirectoryEntries(mainDir.path);
+          const root = findDir(mainEntries, language);
+          if (root) roots.push({ path: root.path, rel: `src/main/${language}` });
+        }
+      } catch {
+        // 某个标准源码根读取失败时继续检查其它根。
+      }
+    }
+    return roots;
+  };
+
+  const buildJvmPackage = async (dirRel, entries, ecosystem, inheritedWrapper) => {
+    const mainCandidates = [];
+    const scanState = { count: 0 };
+    const roots = await findSourceRoots(entries);
+    for (const root of roots) await collectJvmSources(root.path, root.rel, mainCandidates, MAX_SOURCE_FILES, scanState);
+    const prefix = dirRel;
+    const wrapperName = ecosystem === "maven" ? "mvnw.cmd" : "gradlew.bat";
+    const wrapper = findFile(entries, wrapperName) ? wrapperName : inheritedWrapper;
+    const buildEntry = ecosystem === "maven" ? findFile(entries, "pom.xml") : findFile(entries, "build.gradle.kts") || findFile(entries, "build.gradle");
+    const settingsEntry = findFile(entries, "settings.gradle.kts") || findFile(entries, "settings.gradle");
+    const buildText = buildEntry ? await readText(buildEntry) : "";
+    const settingsText = settingsEntry ? await readText(settingsEntry) : "";
+    return {
+      dir: dirRel,
+      ecosystem,
+      pomText: ecosystem === "maven" ? buildText || "" : "",
+      buildText: ecosystem === "gradle" ? buildText || "" : "",
+      settingsText: settingsText || "",
+      mainCandidates,
+      wrapper,
+      modulePath: prefix ? `:${prefix.split("/").join(":")}` : "",
+      // 只有 Gradle application 插件才给 main 生成 run；Android 插件由 readGradleCommands 专门处理。
+      forceJvm: false,
+      springBoot: ecosystem === "maven" && /spring-boot-maven-plugin/.test(buildText || ""),
+    };
+  };
+
   const buildGoPackage = async (dirRel, entries) => {
-    const findFile = (name) => entries.find((e) => e && e.name === name && e.isDirectory !== true);
-    const goModText = (await readText(findFile("go.mod"))) || "";
-    // 标准布局的入口候选：cmd/ 下的子目录名（每个通常是一个 main 包）。
-    // 根无 main.go 时生成 `go run ./cmd/<name>`；根有 main.go 时走 `go run .`（见 readGoCommands）。
-    const cmdEntry = entries.find((e) => e && e.name === "cmd" && e.isDirectory === true);
+    const goModText = (await readText(findFile(entries, "go.mod"))) || "";
+    const cmdEntry = findDir(entries, "cmd");
     let cmdDirs = [];
     if (cmdEntry) {
       try {
-        const cmdChildren = await readDirectoryEntries(cmdEntry.path);
-        cmdDirs = (Array.isArray(cmdChildren) ? cmdChildren : [])
-          .filter((e) => e && e.isDirectory === true && e.name)
-          .map((e) => e.name);
+        const children = await readDirectoryEntries(cmdEntry.path);
+        cmdDirs = (Array.isArray(children) ? children : []).filter((entry) => entry && entry.isDirectory && entry.name).map((entry) => entry.name);
       } catch {
         cmdDirs = [];
       }
@@ -233,13 +347,13 @@ export async function scanProjectCommands(rootPath) {
       dir: dirRel,
       ecosystem: "go",
       entries,
-      hasWails2: Boolean(findFile("wails.json")),
+      hasWails2: Boolean(findFile(entries, "wails.json")),
       hasWails3: /wailsapp\/wails\/v3/.test(goModText),
       cmdDirs,
     };
   };
 
-  const walk = async (dirPath, relNames, depth, inheritedManager = "npm") => {
+  const inspectDirectory = async (dirPath, relNames, depth, inheritedManager, inheritedMvnw, inheritedGradlew) => {
     if (depth > MAX_SCAN_DEPTH || packages.length >= MAX_PACKAGES) return;
     let entries;
     try {
@@ -248,35 +362,25 @@ export async function scanProjectCommands(rootPath) {
       return;
     }
     if (!Array.isArray(entries)) return;
+    const rel = joinRel(relNames);
+    const last = relNames[relNames.length - 1];
+    if (relNames.length && GO_TEST_DIRS.has(last) && isGoModule(entries)) return;
 
-    // 独立的 go 测试模块（xxx/tests 自带 go.mod）：不是产品入口，整体跳过（不下探、不产命令）。
-    const lastSeg = relNames[relNames.length - 1];
-    if (relNames.length > 0 && GO_TEST_DIRS.has(lastSeg) && isGoModule(entries)) return;
-
-    const pkgEntry = entries.find((e) => e && e.name === "package.json" && e.isDirectory !== true);
-    const packageJson = pkgEntry ? await readPackageJson(pkgEntry) : null;
-    // workspace 子包默认继承根包管理器；子包自己的 packageManager / 锁文件可以显式覆盖。
-    const packageManager = pkgEntry
-      ? detectPackageManager(packageJson, entries, inheritedManager)
-      : inheritedManager;
-    // 同一目录可同时是 Node 包与 Go module（如 wails 项目根目录既有 package.json 又有 go.mod），
-    // 两个生态都要收集，不能用 else——否则有 package.json 就漏掉 Go/Wails。
-    if (pkgEntry) {
-      packages.push({
-        dir: joinRel(relNames),
-        packageJson,
-        packageManager,
-        entries,
-      });
+    const pkgEntry = findFile(entries, "package.json");
+    const packageJson = pkgEntry ? await readJson(pkgEntry) : null;
+    const packageManager = pkgEntry ? detectPackageManager(packageJson, entries, inheritedManager) : inheritedManager;
+    const mvnw = findFile(entries, "mvnw.cmd") ? "mvnw.cmd" : inheritedMvnw;
+    const gradlew = findFile(entries, "gradlew.bat") ? "gradlew.bat" : inheritedGradlew;
+    if (pkgEntry) packages.push({ dir: rel, packageJson, packageManager, entries });
+    if (isGoModule(entries)) packages.push(await buildGoPackage(rel, entries));
+    if (hasFile(entries, "pom.xml")) packages.push(await buildJvmPackage(rel, entries, "maven", mvnw));
+    if (hasFile(entries, "build.gradle") || hasFile(entries, "build.gradle.kts") || hasFile(entries, "settings.gradle") || hasFile(entries, "settings.gradle.kts")) {
+      packages.push(await buildJvmPackage(rel, entries, "gradle", gradlew));
     }
-    if (isGoModule(entries)) {
-      packages.push(await buildGoPackage(joinRel(relNames), entries));
-    }
-
-    const subDirs = entries.filter((e) => e && e.isDirectory === true && !SCAN_SKIP_DIRS.has(e.name));
+    const subDirs = entries.filter((entry) => entry && entry.isDirectory === true && !SCAN_SKIP_DIRS.has(String(entry.name || "").toLowerCase()));
     for (const sub of subDirs) {
       if (packages.length >= MAX_PACKAGES) break;
-      await walk(sub.path, relNames.concat(sub.name), depth + 1, packageManager);
+      await inspectDirectory(sub.path, relNames.concat(sub.name), depth + 1, packageManager, mvnw, gradlew);
     }
   };
 
@@ -287,31 +391,22 @@ export async function scanProjectCommands(rootPath) {
     return empty;
   }
   if (!Array.isArray(rootEntries)) return empty;
-
-  // 已在根目录列出条目：直接复用，避免 walk 再列一次根目录。
-  const rootPkgEntry = rootEntries.find((e) => e && e.name === "package.json" && e.isDirectory !== true);
-  let rootPackageManager = "npm";
-  if (rootPkgEntry) {
-    const rootPackageJson = await readPackageJson(rootPkgEntry);
-    rootPackageManager = detectPackageManager(rootPackageJson, rootEntries, "npm");
-    packages.push({
-      dir: "",
-      packageJson: rootPackageJson,
-      packageManager: rootPackageManager,
-      entries: rootEntries,
-    });
+  const rootPkg = findFile(rootEntries, "package.json");
+  const rootJson = rootPkg ? await readJson(rootPkg) : null;
+  const rootManager = rootPkg ? detectPackageManager(rootJson, rootEntries, "npm") : "npm";
+  if (rootPkg) packages.push({ dir: "", packageJson: rootJson, packageManager: rootManager, entries: rootEntries });
+  if (isGoModule(rootEntries)) packages.push(await buildGoPackage("", rootEntries));
+  const rootMvnw = findFile(rootEntries, "mvnw.cmd") ? "mvnw.cmd" : null;
+  const rootGradlew = findFile(rootEntries, "gradlew.bat") ? "gradlew.bat" : null;
+  if (hasFile(rootEntries, "pom.xml")) packages.push(await buildJvmPackage("", rootEntries, "maven", rootMvnw));
+  if (hasFile(rootEntries, "build.gradle") || hasFile(rootEntries, "build.gradle.kts") || hasFile(rootEntries, "settings.gradle") || hasFile(rootEntries, "settings.gradle.kts")) {
+    packages.push(await buildJvmPackage("", rootEntries, "gradle", rootGradlew));
   }
-  // 根目录也可能同时是 Go module（wails 项目根既有 package.json 又有 go.mod）：两个生态都收。
-  if (isGoModule(rootEntries)) {
-    packages.push(await buildGoPackage("", rootEntries));
-  }
-  for (const sub of rootEntries.filter((e) => e && e.isDirectory === true && !SCAN_SKIP_DIRS.has(e.name))) {
+  for (const sub of rootEntries.filter((entry) => entry && entry.isDirectory === true && !SCAN_SKIP_DIRS.has(String(entry.name || "").toLowerCase()))) {
     if (packages.length >= MAX_PACKAGES) break;
-    await walk(sub.path, [sub.name], 1, rootPackageManager);
+    await inspectDirectory(sub.path, [sub.name], 1, rootManager, rootMvnw, rootGradlew);
   }
-
-  const detected = detectProjectCommands(packages);
-  return { rootPath, ...detected };
+  return { rootPath, ...detectProjectCommands(packages) };
 }
 
 /**
@@ -346,20 +441,39 @@ function compareEcosystem(a, b) {
 }
 
 /**
- * 汇总所有包的命令为扁平列表（供右键菜单 / 运行控件直接渲染）。
- * @description 每条命令携带 `dir`（所属包目录，根包 ""）与 `group`（分组显示名，根包 null），
- *   且整体按「父包在前」排序：渲染层据此按文件夹分组、并在组名变化处插入分组标题。
+ * 判断命令是否应进入顶栏运行配置列表。
+ * @description 根 JVM 项目的 test/package/build 等公共命令只显示一次；子模块只显示真实
+ *   源码 main 和 Android 专用任务。子模块的完整 test/package 仍保留在 ecosystem.commands，
+ *   供模块级数据和后续入口使用，但不再污染顶栏的扁平列表。
+ */
+function isVisibleJvmCommand(eco, command, dir, commands) {
+  if (eco.kind !== "maven" && eco.kind !== "gradle") return true;
+  if (!dir) {
+    // Gradle application 已有源码 main 时，隐藏无具体入口的通用 run，避免同一入口出现两次。
+    return !(command.runKind === "gradle-application" && commands.some((item) => item.mainClass));
+  }
+  return command.runKind === "spring-boot" || command.runKind === "gradle-application-main" || command.runKind === "android-task";
+}
+
+/**
+ * 汇总所有包的可见命令为扁平列表（供右键菜单 / 运行控件直接渲染）。
+ * @description JVM 多模块保留模块层级信息，但顶栏只显示根项目公共命令和模块真实入口；
+ *   模块的 test/package/build 不在顶栏重复展开。
  * @param {Object|null} projectCommands 识别结果
+ * @param {{includeHidden?: boolean}} [options] includeHidden=true 时返回所有模块 main，供代码查看器匹配源码行
  * @returns {Array<{id: string, labelKey: string|null, labelFallback: string, cmd: string, ecosystem: string, dir: string, group: string|null}>}
  */
-export function flattenCommands(projectCommands) {
+export function flattenCommands(projectCommands, options = {}) {
   const out = [];
+  const includeHidden = options.includeHidden === true;
   const ecosystems = projectCommands && Array.isArray(projectCommands.ecosystems) ? projectCommands.ecosystems : [];
   const ordered = [...ecosystems].sort(compareEcosystem);
   for (const eco of ordered) {
     const dir = eco.dir || "";
     const group = nodeGroupLabel(dir);
-    for (const command of eco.commands || []) {
+    const commands = Array.isArray(eco.commands) ? eco.commands : [];
+    for (const command of commands) {
+      if (!includeHidden && !isVisibleJvmCommand(eco, command, dir, commands)) continue;
       out.push({ ...command, ecosystem: eco.id, dir, group });
     }
   }

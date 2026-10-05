@@ -1032,3 +1032,43 @@ test('预览区右键菜单: 运行分组按包显示组标题（根目录 / 子
   renderCodeViewer(host, { preview: null, copied: false, onCopy: () => {}, t });
 });
 
+test('代码预览: Java/Kotlin main sourcePath + mainLine 显示 14x14 运行按钮并回传命令', () => {
+  const host = document.createElement('div');
+  const command = {
+    id: 'maven:app:main:demo-App',
+    labelKey: null,
+    labelFallback: 'app/run demo.App',
+    cmd: '..\\mvnw.cmd spring-boot:run -Dspring-boot.run.main-class=demo.App',
+    icon: 'java',
+    sourcePath: 'D:/repo/app/src/main/java/demo/App.java',
+    mainLine: 3,
+    mainClass: 'demo.App',
+    runKind: 'spring-boot',
+  };
+  const calls = [];
+  renderCodeViewer(host, {
+    preview: {
+      kind: 'text',
+      name: 'App.java',
+      path: 'd:\\repo\\app\\src\\main\\java\\demo\\App.java',
+      text: ['package demo;', 'public class App {', '  public static void main(String[] args) {}', '}'].join('\n'),
+      highlightedHtml: '<span>code</span>',
+      isMarkdown: false,
+      mode: 'preview',
+    },
+    copied: false,
+    onCopy: () => {},
+    runCommands: () => [command],
+    onRunCommand: (value) => calls.push(value),
+    t,
+  });
+  const buttons = host.querySelectorAll('.sfe-file-viewer-gutter-run');
+  assert.equal(buttons.length, 1);
+  const svg = buttons[0].querySelector('svg');
+  assert.equal(svg.getAttribute('width'), '14');
+  assert.equal(svg.getAttribute('height'), '14');
+  buttons[0].click();
+  assert.deepEqual(calls, [command]);
+});
+
+

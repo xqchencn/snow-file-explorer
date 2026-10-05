@@ -236,3 +236,34 @@ test("运行控件: 多包命令按文件夹分组，组名变化处显示分组
   // 分组标题不是可点命令项
   assert.equal(wrap.querySelectorAll(".sfe-run-dropdown-item").length, 2);
 });
+
+
+test("运行控件: Maven 多模块只显示根 test/package 和真实模块 main，不显示模块重复构建命令", () => {
+  const commands = [
+    { id: "maven:test", labelKey: null, label: "test", labelFallback: "test", cmd: "mvn test", dir: "", group: null },
+    { id: "maven:package", labelKey: null, label: "package", labelFallback: "package", cmd: "mvn package", dir: "", group: null },
+    {
+      id: "maven:admin:main:com-nzygyt-GytApplication",
+      labelKey: null,
+      label: "GytApplication",
+      labelFallback: "admin/GytApplication",
+      cmd: "mvn spring-boot:run -Dspring-boot.run.main-class=com.nzygyt.GytApplication",
+      dir: "nzygyt-admin",
+      group: "nzygyt-admin",
+      mainClass: "com.nzygyt.GytApplication",
+    },
+  ];
+  const { wrap } = mount(
+    makeOpts({ getState: () => ({ commands, ready: true, isCommandRunning: () => false, runningCommands: [] }) })
+  );
+  wrap.querySelector(".sfe-run-config").click();
+  assert.deepEqual(
+    [...wrap.querySelectorAll(".sfe-run-dropdown-group")].map((node) => node.textContent),
+    ["根目录", "nzygyt-admin"]
+  );
+  assert.deepEqual(
+    [...wrap.querySelectorAll(".sfe-run-dropdown-label")].map((node) => node.textContent),
+    ["test", "package", "GytApplication"]
+  );
+});
+

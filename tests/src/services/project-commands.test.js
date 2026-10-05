@@ -9,6 +9,9 @@ import {
   readWails3Commands,
   readWails2Commands,
   readGoCommands,
+  findJavaMainCandidates,
+  readMavenCommands,
+  readGradleCommands,
 } from "../../../src/services/ecosystems.js";
 
 function file(name, path) {
@@ -290,6 +293,145 @@ test("detectProjectCommands：wails3 项目固定 wails3 task dev/package/build"
   );
 });
 
+test("JVM 生态：识别 Java main、跳过注释中的伪 main，并生成 Maven 命令", () => {
+  const source = [
+    "package com.example;",
+    "// public static void main(String[] args) {}",
+    "public class App {",
+    "  public static void main(String[] args) {}",
+    "}",
+  ].join("\n");
+  const [candidate] = findJavaMainCandidates(source, "App.java");
+  assert.deepEqual(candidate, { mainClass: "com.example.App", line: 4, language: "java" });
+  const commands = readMavenCommands({
+    prefix: "admin",
+    wrapper: "mvnw.cmd",
+    pomText: "<artifactId>app</artifactId><artifactId>spring-boot-maven-plugin</artifactId>",
+    mainCandidates: [{ ...candidate, sourcePath: "D:/repo/admin/src/main/java/App.java" }],
+  });
+  assert.equal(commands[0].cmd, "../mvnw.cmd test");
+  const run = commands.find((command) => command.mainClass === "com.example.App");
+  assert.equal(run.cmd, "../mvnw.cmd spring-boot:run -Dspring-boot.run.main-class=com.example.App");
+  assert.equal(run.runKind, "spring-boot");
+  assert.equal(run.sourcePath, "D:/repo/admin/src/main/java/App.java");
+});
+
+test("JVM 生态：块注释结束后仍识别 Java main，避免 Javadoc 吞掉后续源码", () => {
+  const source = [
+    "/**",
+    " * 文档中的伪 main：public static void main(String[] args)",
+    " */",
+    "package com.example;",
+    "public class App {",
+    "  public static void main(String[] args) {}",
+    "}",
+  ].join("\n");
+  assert.deepEqual(findJavaMainCandidates(source, "App.java"), [
+    { mainClass: "com.example.App", line: 6, language: "java" },
+  ]);
+});
+
+test("JVM 生态：Gradle apply false 根聚合器不生成 Android 专用任务", () => {
+  const commands = readGradleCommands({
+    buildText: [
+      "plugins {",
+      '    id("com.android.application") version "9.2.0" apply false',
+      "}",
+    ].join("\n"),
+  });
+  assert.deepEqual(commands, []);
+});
+
+test("JVM 生态：识别 Kotlin 顶层和 object main，普通 Maven 使用 exec:java", () => {
+  const top = findJavaMainCandidates("package demo\nfun main(args: Array<String>) {}", "Launcher.kt");
+  assert.deepEqual(top, [{ mainClass: "demo.LauncherKt", line: 2, language: "kotlin" }]);
+  const objectMain = findJavaMainCandidates("package demo\nobject Launcher {\n  fun main() {}\n}", "Launcher.kt");
+  assert.deepEqual(objectMain, [{ mainClass: "demo.Launcher", line: 3, language: "kotlin" }]);
+  const run = readMavenCommands({ prefix: "tools", mainCandidates: [{ ...top[0], sourcePath: "D:/repo/tools/Launcher.kt" }] }).find((command) => command.mainClass);
+  assert.equal(run.cmd, "mvn compile exec:java -Dexec.mainClass=demo.LauncherKt");
+  assert.equal(run.runKind, "maven-exec");
+});
+
+test("JVM 生态：Maven 无 wrapper 始终使用系统 mvn，不生成相对路径", () => {
+  const commands = readMavenCommands({
+    prefix: "admin",
+    pomText: "<artifactId>spring-boot-maven-plugin</artifactId>",
+    mainCandidates: [{ mainClass: "com.nzygyt.GytApplication", line: 12 }],
+  });
+  const commandTexts = commands.map((command) => command.cmd);
+
+  assert.deepEqual(commandTexts, [
+    "mvn test",
+    "mvn package",
+    "mvn spring-boot:run -Dspring-boot.run.main-class=com.nzygyt.GytApplication",
+  ]);
+  assert.ok(commandTexts.every((command) => !command.startsWith("../mvn ")));
+});
+
+test("JVM 生态：Gradle 无 wrapper 使用系统 gradle，真实 wrapper 从根目录调用", () => {
+  const fallback = readGradleCommands({
+    prefix: "tools",
+    buildText: 'plugins { kotlin("jvm") ; application }',
+  });
+  assert.deepEqual(
+    fallback.map((command) => command.cmd),
+    ["gradle :tools:build", "gradle :tools:test", "gradle :tools:run"]
+  );
+  assert.ok(fallback.every((command) => !command.cmd.startsWith("../gradlew.bat ")));
+
+  const wrapper = readGradleCommands({
+    prefix: "tools",
+    wrapper: "gradlew.bat",
+    buildText: 'plugins { kotlin("jvm") ; application }',
+  });
+  assert.ok(wrapper.some((command) => command.cmd === "gradlew.bat :tools:build"));
+});
+
+test("Gradle：Android 只生成 Android 任务，JVM application 生成 module run 和 main 元数据", () => {
+  const android = readGradleCommands({
+    prefix: "app",
+    wrapper: "gradlew.bat",
+    buildText: 'plugins { id("com.android.application") }',
+    mainCandidates: [{ mainClass: "com.example.MainActivity", line: 10 }],
+  });
+  assert.deepEqual(android.map((command) => command.cmd), [
+    "gradlew.bat :app:assembleDebug",
+    "gradlew.bat :app:testDebugUnitTest",
+    "gradlew.bat :app:lint",
+  ]);
+  assert.ok(android.every((command) => command.runDir === ""), "根项目 Gradle 任务必须从根目录执行");
+  assert.ok(android.every((command) => !command.mainClass), "Android Activity 不得被当成 main");
+
+  const jvm = readGradleCommands({
+    prefix: "tools",
+    wrapper: "gradlew.bat",
+    buildText: 'plugins { kotlin("jvm") ; application }',
+    mainCandidates: [{ mainClass: "demo.LauncherKt", line: 3, sourcePath: "D:/repo/tools/Launcher.kt" }],
+  });
+  assert.ok(jvm.some((command) => command.cmd === "gradlew.bat :tools:build"));
+  assert.ok(jvm.some((command) => command.cmd === "gradlew.bat :tools:run" && command.mainClass === "demo.LauncherKt"));
+  assert.ok(jvm.every((command) => command.runDir === ""), "Gradle 根项目任务必须从根目录执行");
+});
+
+test("detectProjectCommands：Maven/Gradle 多模块保留 dir、id 和 JVM 命令组，但顶栏只显示根公共命令与模块入口", () => {
+  const result = detectProjectCommands([
+    { dir: "", ecosystem: "maven", pomText: "<packaging>pom</packaging>", mainCandidates: [] },
+    { dir: "admin", ecosystem: "maven", pomText: "spring-boot-maven-plugin", mainCandidates: [{ mainClass: "demo.App", line: 2, sourcePath: "D:/repo/admin/App.java" }], wrapper: "mvnw.cmd" },
+    { dir: "common", ecosystem: "maven", pomText: "", mainCandidates: [{ mainClass: "demo.Tool", line: 2, sourcePath: "D:/repo/common/Tool.java" }], wrapper: "mvnw.cmd" },
+    { dir: "app", ecosystem: "gradle", buildText: 'plugins { id("com.android.application") }', mainCandidates: [], wrapper: "gradlew.bat", modulePath: ":app" },
+  ]);
+  const flat = flattenCommands(result);
+  assert.deepEqual(
+    flat.map((command) => `${command.group || "root"}:${command.label}`),
+    ["root:test", "root:package", "admin:App", "app:assembleDebug", "app:testDebugUnitTest", "app:lint"]
+  );
+  assert.ok(flat.some((command) => command.id === "maven:admin:main:demo-App" && command.dir === "admin"));
+  assert.ok(flat.every((command) => command.id && command.labelFallback && command.icon));
+  assert.ok(!flat.some((command) => command.dir === "common"));
+  assert.ok(flattenCommands(result, { includeHidden: true }).some((command) => command.mainClass === "demo.Tool"));
+  assert.ok(!flat.some((command) => command.dir === "admin" && ["test", "package"].includes(command.label)));
+});
+
 test("detectProjectCommands：纯 Go 定位 main 包入口（build/run）+ 模块级 test/vet", () => {
   const result = detectProjectCommands([
     { dir: "server", ecosystem: "go", entries: [directory("cmd", "D:/g/server/cmd")], cmdDirs: ["server"] },
@@ -427,6 +569,46 @@ test("scanProjectCommands：根目录同时有 package.json 与 go.mod → Node 
     const wailsIdx = flat.findIndex((c) => c.cmd === "wails3 task dev");
     const nodeIdx = flat.findIndex((c) => c.cmd === "npm run dev");
     assert.ok(wailsIdx < nodeIdx);
+  } finally {
+    if (previous === undefined) delete globalThis.window;
+    else globalThis.window = previous;
+  }
+});
+
+test("scanProjectCommands：Maven 根聚合器与子模块读取标准源码 main，子模块使用根 wrapper 相对路径", async () => {
+  const root = "D:/repo";
+  const admin = `${root}/admin`;
+  const src = `${admin}/src`;
+  const main = `${src}/main`;
+  const java = `${main}/java`;
+  const app = `${java}/App.java`;
+  const directories = new Map([
+    [root, [file("pom.xml", `${root}/pom.xml`), file("mvnw.cmd", `${root}/mvnw.cmd`), directory("admin", admin)]],
+    [admin, [file("pom.xml", `${admin}/pom.xml`), directory("src", src)]],
+    [src, [directory("main", main)]],
+    [main, [directory("java", java)]],
+    [java, [file("App.java", app)]],
+  ]);
+  const contents = new Map([
+    [`${root}/pom.xml`, "<packaging>pom</packaging><modules><module>admin</module></modules>"],
+    [`${admin}/pom.xml`, "spring-boot-maven-plugin"],
+    [app, ["package demo;", "public class App {", "  public static void main(String[] args) {}", "}"].join("\\n")],
+  ]);
+  const previous = globalThis.window;
+  globalThis.window = {
+    snow: {
+      readDirectoryEntries: async (dirPath) => directories.get(dirPath) || [],
+      readFileContent: async (filePath) => ({ content: contents.get(filePath) || "", isBinary: false }),
+    },
+  };
+  try {
+    const result = await scanProjectCommands(root);
+    const adminRun = flattenCommands(result).find((command) => command.dir === "admin" && command.mainClass === "demo.App");
+    assert.ok(adminRun);
+    assert.equal(adminRun.cmd, "../mvnw.cmd spring-boot:run -Dspring-boot.run.main-class=demo.App");
+    assert.equal(adminRun.sourcePath, app);
+    assert.ok(result.ecosystems.some((eco) => eco.id === "maven"));
+    assert.ok(result.ecosystems.some((eco) => eco.id === "maven:admin"));
   } finally {
     if (previous === undefined) delete globalThis.window;
     else globalThis.window = previous;

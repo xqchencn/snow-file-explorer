@@ -145,6 +145,39 @@ function buildGoMainCommandMap(preview, runCommands, rootPath) {
   return map;
 }
 
+function normalizeMainSourcePath(path) {
+  return String(path || "")
+    .trim()
+    .replace(/\\/g, "/")
+    .replace(/\/+/g, "/")
+    .replace(/^\.\//, "")
+    .replace(/\/+$/, "")
+    .toLowerCase();
+}
+
+/**
+ * 若当前预览是 Java/Kotlin main 源文件，按 sourcePath + mainLine 映射行内运行命令。
+ * @description sourcePath 比较统一大小写和分隔符；命令元数据来自 JVM 扫描器，避免查看器重复解析源码。
+ * @param {Object|null} preview 预览状态
+ * @param {Function} [runCommands] 读取扁平命令列表
+ * @returns {Map<number, Object>}
+ */
+function buildJvmMainCommandMap(preview, runCommands) {
+  const map = new Map();
+  if (!preview || preview.kind !== "text" || !/\.(?:java|kt)$/i.test(preview.name || "")) return map;
+  if (typeof runCommands !== "function") return map;
+  const sourcePath = normalizeMainSourcePath(preview.path);
+  if (!sourcePath) return map;
+  for (const command of runCommands() || []) {
+    const commandPath = normalizeMainSourcePath(command?.sourcePath);
+    const line = Number(command?.mainLine);
+    if (commandPath && commandPath === sourcePath && Number.isInteger(line) && line > 0) {
+      map.set(line, command);
+    }
+  }
+  return map;
+}
+
 /** 关闭预览区右键菜单及 document 级监听，避免预览重绘后菜单残留。 */
 function closeViewerContextMenu(bodyEl) {
   const bindingCleanup = bodyEl && bodyEl[VIEWER_CONTEXT_MENU_BINDING];
@@ -602,9 +635,11 @@ export function renderCodeViewer(
       // 运行入口 ▶ 的行号映射（行号槽 / 虚拟行内渲染，两分支共用）：
       //   - package.json：scripts 各行 → 对应 npm/pnpm… 命令；
       //   - Go 源文件：`func main()` 行 → 该 module 的 go run 入口。
+      // Java/Kotlin 源文件：扫描器已提供 sourcePath/mainLine，按绝对路径映射到 main 行。
       const runLineMap = new Map([
         ...buildScriptCommandMap(preview, runCommands, rootPath),
         ...buildGoMainCommandMap(preview, runCommands, rootPath),
+        ...buildJvmMainCommandMap(preview, runCommands),
       ]);
 
       // 大文件已被高亮熔断降级为纯文本，逐行渲染不会切坏跨行 token；

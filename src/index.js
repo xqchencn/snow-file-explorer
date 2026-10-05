@@ -2062,7 +2062,10 @@ export function mount(container, api, _options = {}) {
     // 运行中拦截：同一命令已有未结束的运行终端 → 忽略（要么运行，要么停止）。
     if (runCountForCommand(command) > 0) return;
     // 模式 A：一次性运行，跑完 shell 退出 → onPtyExit 回传退出码 → 工具栏回到 Run。
-    const cwd = command.dir ? joinPath(state.rootPath, command.dir) : state.rootPath;
+    // `command.dir` 是显示/源码归属目录；Gradle 根项目任务可显式提供 `runDir` 覆盖实际工作目录。
+    // 没有 `runDir` 的 Node、Go、Maven 等命令继续在所属包目录执行。
+    const commandDir = typeof command.runDir === "string" ? command.runDir : command.dir;
+    const cwd = commandDir ? joinPath(state.rootPath, commandDir) : state.rootPath;
     handleNewTerminal({
       command: command.cmd,
       commandId: command.id || null,
@@ -2659,8 +2662,8 @@ export function mount(container, api, _options = {}) {
       onCopyPath: handlePreviewCopyPath,
       onCopyRelativePath: handlePreviewCopyRelativePath,
       onRefresh: handlePreviewRefresh,
-      // 运行入口（预览 package.json 时的 gutter ▶ 与右键「运行」分组共用同一份命令列表）
-      runCommands: () => flattenCommands(state.projectCommands),
+      // 运行入口：代码查看器需要完整源码 main 列表，顶栏仍使用过滤后的可见命令列表。
+      runCommands: () => flattenCommands(state.projectCommands, { includeHidden: true }),
       onRunCommand: handleRunCommand,
       editable: state.preview.editable === true,
       saving: state.preview.saveState === "saving",

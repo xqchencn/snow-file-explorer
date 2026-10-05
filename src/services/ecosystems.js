@@ -253,3 +253,248 @@ export function readGoCommands(entries, opts = {}) {
   specs.push(["vet", "go vet ./..."]);
   return specs.map(([name, cmd]) => makeCommand("go", prefix, name, cmd, cmd, "go"));
 }
+
+/* ─────────────────────────── Java / Kotlin / JVM ─────────────────────────── */
+
+/**
+ * 去除 Java/Kotlin 注释但保留换行，确保行号稳定且注释中的 main 不会被识别。
+ * 字符串和字符字面量不会把其中的 // 或 /* 当成注释起点。
+ * @param {string} text Java 或 Kotlin 源码
+ * @returns {string} 保留换行的可扫描源码
+ */
+function stripJvmComments(text) {
+  const source = String(text == null ? "" : text);
+  let output = "";
+  let state = "code";
+  let quote = "";
+  for (let i = 0; i < source.length; i += 1) {
+    const ch = source[i];
+    const next = source[i + 1];
+    if (state === "line") {
+      if (ch === "\n" || ch === "\r") {
+        output += ch;
+        state = "code";
+      } else {
+        output += " ";
+      }
+      continue;
+    }
+    if (state === "block") {
+      if (ch === "*" && next === "/") {
+        output += "  ";
+        i += 1;
+        state = "code";
+      } else {
+        output += ch === "\n" || ch === "\r" ? ch : " ";
+      }
+      continue;
+    }
+    if (state === "string") {
+      output += ch === "\n" || ch === "\r" ? ch : " ";
+      if (ch === "\\") {
+        if (i + 1 < source.length) {
+          output += source[i + 1] === "\n" || source[i + 1] === "\r" ? source[i + 1] : " ";
+          i += 1;
+        }
+      } else if (ch === quote) {
+        state = "code";
+      }
+      continue;
+    }
+    if (ch === "/" && next === "/") {
+      output += "  ";
+      i += 1;
+      state = "line";
+    } else if (ch === "/" && next === "*") {
+      output += "  ";
+      i += 1;
+      state = "block";
+    } else if (ch === '"' || ch === "'") {
+      output += " ";
+      quote = ch;
+      state = "string";
+    } else {
+      output += ch;
+    }
+  }
+  return output;
+}
+
+function joinJvmName(pkg, name) {
+  return pkg ? `${pkg}.${name}` : name;
+}
+
+/**
+ * 识别 Java/Kotlin 的 main 声明，并返回可供构建工具运行的类名和源码行。
+ * @param {string} text Java/Kotlin 源码
+ * @param {string} fileName 源文件名（用于 Kotlin 顶层 main 的 FileNameKt）
+ * @returns {Array<{mainClass: string, line: number, language: "java"|"kotlin"}>}
+ */
+export function findJavaMainCandidates(text, fileName = "Main.java") {
+  const clean = stripJvmComments(text);
+  const lines = clean.split(/\r\n|\r|\n/);
+  const packageMatch = clean.match(/^\s*package\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*;?/m);
+  const pkg = packageMatch ? packageMatch[1] : "";
+  const base = String(fileName || "Main").replace(/^.*[\\/]/, "").replace(/\.(?:java|kt)$/i, "") || "Main";
+  const candidates = [];
+  const add = (mainClass, line, language) => {
+    if (!mainClass || !line || candidates.some((item) => item.mainClass === mainClass && item.line === line)) return;
+    candidates.push({ mainClass, line, language });
+  };
+
+  // Java 的 main 必须是静态 void 方法；类名取当前文件中最外层/首个声明类。
+  let javaClass = null;
+  for (const line of lines) {
+    const match = /\b(?:public\s+)?(?:final\s+|abstract\s+)?class\s+([A-Za-z_$][\w$]*)/.exec(line);
+    if (match) {
+      javaClass = match[1];
+      break;
+    }
+  }
+  if (javaClass) {
+    for (let index = 0; index < lines.length; index += 1) {
+      if (/\b(?:public\s+)?static\s+void\s+main\s*\(\s*String(?:\s*\[\s*\]|\s+\w+\s*\[\s*\])/.test(lines[index])) {
+        add(joinJvmName(pkg, javaClass), index + 1, "java");
+      }
+    }
+  }
+
+  // Kotlin 顶层函数编译为 FileNameKt；object/class 内的 main 运行所属对象/类。
+  let currentObject = null;
+  for (let index = 0; index < lines.length; index += 1) {
+    const objectMatch = /\bobject\s+([A-Za-z_$][\w$]*)/.exec(lines[index]);
+    if (objectMatch) currentObject = objectMatch[1];
+    const classMatch = /\bclass\s+([A-Za-z_$][\w$]*)/.exec(lines[index]);
+    if (classMatch && !currentObject) currentObject = classMatch[1];
+    if (/\bfun\s+main\s*\(\s*(?:args\s*:\s*Array\s*<\s*String\s*>\s*)?\)\s*(?::\s*Unit)?/.test(lines[index])) {
+      add(joinJvmName(pkg, currentObject || `${base}Kt`), index + 1, "kotlin");
+    }
+  }
+  return candidates;
+}
+
+function normalizeJvmPrefix(prefix) {
+  return typeof prefix === "string" ? prefix.replace(/^\/+|\/+$/g, "") : "";
+}
+
+function wrapperCommand(wrapper, prefix, fallback) {
+  const value = String(wrapper || "").trim();
+  const command = String(fallback || "").trim();
+  if (!value) return command || "mvn";
+  if (/^(?:[A-Za-z]:[\\/]|[\\/])/.test(value)) return value;
+  if (!prefix || /[\\/]/.test(value.replace(/^\.\.?[\\/]/, ""))) return value;
+  const depth = normalizeJvmPrefix(prefix).split("/").filter(Boolean).length;
+  return `${"../".repeat(depth)}${value.replace(/^\.\//, "")}`;
+}
+
+function jvmMainLabel(mainClass) {
+  const value = String(mainClass || "");
+  return value.split(".").pop() || value;
+}
+
+function jvmCommand(kind, prefix, name, cmd, label, icon, metadata = {}) {
+  return {
+    id: prefix ? `${kind}:${prefix}:${name}` : `${kind}:${name}`,
+    labelKey: null,
+    label: label || name,
+    labelFallback: prefix ? `${prefix}/${label || name}` : label || name,
+    cmd,
+    icon,
+    ...metadata,
+  };
+}
+
+/**
+ * 生成 Maven 基础命令和源码 main 命令。调用方负责把 cwd 切到 prefix 对应模块。
+ * @param {{prefix?: string, pomText?: string, mainCandidates?: Array, wrapper?: string, mvn?: string, springBoot?: boolean}} opts
+ * @returns {Array<Object>}
+ */
+export function readMavenCommands(opts = {}) {
+  const prefix = normalizeJvmPrefix(opts.prefix);
+  const mvn = wrapperCommand(opts.wrapper, prefix, opts.mvn || "mvn");
+  const commands = [
+    jvmCommand("maven", prefix, "test", `${mvn} test`, "test", "java"),
+    jvmCommand("maven", prefix, "package", `${mvn} package`, "package", "java"),
+  ];
+  const springBoot = opts.springBoot === true || /spring-boot-maven-plugin/.test(String(opts.pomText || ""));
+  for (const candidate of Array.isArray(opts.mainCandidates) ? opts.mainCandidates : []) {
+    if (!candidate || !candidate.mainClass) continue;
+    const suffix = String(candidate.mainClass).replace(/[^A-Za-z0-9_$]+/g, "-");
+    const cmd = springBoot
+      ? `${mvn} spring-boot:run -Dspring-boot.run.main-class=${candidate.mainClass}`
+      : `${mvn} compile exec:java -Dexec.mainClass=${candidate.mainClass}`;
+    commands.push(
+      jvmCommand(
+        "maven",
+        prefix,
+        `main:${suffix}`,
+        cmd,
+        jvmMainLabel(candidate.mainClass),
+        "java",
+        {
+          sourcePath: candidate.sourcePath,
+          mainLine: candidate.line,
+          mainClass: candidate.mainClass,
+          runKind: springBoot ? "spring-boot" : "maven-exec",
+        }
+      )
+    );
+  }
+  return commands;
+}
+
+/**
+ * 生成 Gradle/Kotlin DSL 命令。Android application 只生成 Android 任务，不把 Activity 当 main。
+ * @param {{prefix?: string, buildText?: string, settingsText?: string, mainCandidates?: Array, wrapper?: string, gradle?: string, modulePath?: string}} opts
+ * @returns {Array<Object>}
+ */
+export function readGradleCommands(opts = {}) {
+  const prefix = normalizeJvmPrefix(opts.prefix);
+  const buildText = String(opts.buildText || "");
+  // `apply false` 只是根聚合器预声明插件，不代表当前项目是 Android application/library。
+  // 只按同一行实际应用的插件判断，避免把 Gradle 根项目生成 Android 专用任务。
+  const android = buildText
+    .split(/\r\n|\r|\n/)
+    .some((line) => /com\.android\.(?:application|library)/.test(line) && !/\bapply\s+false\b/.test(line));
+  const application = !android && /(?:^|[\s"'`])(?:application|org\.gradle\.application)(?:[\s"'`]|$)/.test(buildText);
+  const jvm = !android && /java|org\.jetbrains\.kotlin\.jvm|kotlin\("jvm"\)/.test(buildText);
+  const modulePath = String(opts.modulePath || (prefix ? `:${prefix.split("/").join(":")}` : ""));
+  // Gradle 的 `:module:task` 是根项目任务路径，必须从工作区根目录启动。
+  // `command.dir` 仍保留模块目录用于分组和源码匹配，运行时改用 `runDir`。
+  const runDir = "";
+  const wrapper = wrapperCommand(opts.wrapper, runDir, opts.gradle || "gradle");
+  const task = (name) => `${wrapper}${modulePath ? ` ${modulePath}:${name}` : ` ${name}`}`;
+  const commands = [];
+  if (android) {
+    for (const name of ["assembleDebug", "testDebugUnitTest", "lint"]) {
+      commands.push(jvmCommand("gradle", prefix, name, task(name), name, "java", { runKind: "android-task", runDir }));
+    }
+    return commands;
+  }
+  if (!jvm && !application && !opts.forceJvm) return commands;
+  for (const name of ["build", "test"]) commands.push(jvmCommand("gradle", prefix, name, task(name), name, "java", { runDir }));
+  if (application) {
+    commands.push(jvmCommand("gradle", prefix, "run", task("run"), "run", "java", { runKind: "gradle-application", runDir }));
+    for (const candidate of Array.isArray(opts.mainCandidates) ? opts.mainCandidates : []) {
+      if (!candidate || !candidate.mainClass) continue;
+      commands.push(
+        jvmCommand(
+          "gradle",
+          prefix,
+          `main:${String(candidate.mainClass).replace(/[^A-Za-z0-9_$]+/g, "-")}`,
+          task("run"),
+          jvmMainLabel(candidate.mainClass),
+          "java",
+          {
+            runDir,
+            sourcePath: candidate.sourcePath,
+            mainLine: candidate.line,
+            mainClass: candidate.mainClass,
+            runKind: "gradle-application-main",
+          }
+        )
+      );
+    }
+  }
+  return commands;
+}
