@@ -32,15 +32,26 @@ export const DEFAULT_ROWS = 24;
  * @returns {string} 退出指令
  */
 export function shellExitCommand(family, shellPath) {
-  if (family === "powershell") return "exit $LASTEXITCODE";
-  if (family) return "exit";
+  const resolved = family || detectShellFamilyByName(shellPath);
+  return resolved === "powershell" ? "exit $LASTEXITCODE" : "exit";
+}
+
+/**
+ * 按可执行文件名推断 shell 家族（与宿主 native `detect_shell_family` 的规则对齐）。
+ * @param {string} shellPath shell 可执行文件路径
+ * @returns {string} powershell | cmd | wsl | gitbash | posix
+ */
+function detectShellFamilyByName(shellPath) {
   const name = String(shellPath || "")
     .replace(/\\/g, "/")
     .split("/")
     .pop()
-    .toLowerCase()
-    .replace(/\.exe$/, "");
-  return /^(pwsh|powershell)$/.test(name) ? "exit $LASTEXITCODE" : "exit";
+    .toLowerCase();
+  if (/pwsh|powershell/.test(name)) return "powershell";
+  if (/cmd/.test(name)) return "cmd";
+  if (/wsl/.test(name)) return "wsl";
+  if (/git/.test(name) && /(bash|sh)/.test(name)) return "gitbash";
+  return "posix";
 }
 
 /**
@@ -94,6 +105,106 @@ export async function resolveRunShell() {
     return { shellPath: first.path, exitCommand: shellExitCommand(first.family, first.path) };
   }
   return { shellPath: undefined, exitCommand: "exit" };
+}
+
+/**
+ * 脚本文件扩展名 → 运行它所需的 shell 家族。
+ * @description bat/cmd 只能由 cmd 跑；ps1 只能由 powershell 跑；sh 需要 POSIX 兼容 shell
+ *   （posix / gitbash / wsl）。family 是「能力」而非具体程序：任一 gitbash 都能跑 sh。
+ */
+const SCRIPT_EXTENSION_FAMILY = {
+  bat: ["cmd"],
+  cmd: ["cmd"],
+  ps1: ["powershell"],
+  sh: ["posix", "gitbash", "wsl"],
+};
+
+/** 扩展名 → 所需 shell 家族的展示名（提示文案用）。 */
+const SCRIPT_FAMILY_LABEL = { cmd: "cmd", powershell: "PowerShell", posix: "sh", gitbash: "sh", wsl: "sh" };
+
+/** 取脚本文件扩展名（小写，不含点）；无扩展名返回空串。 */
+function scriptExtension(sourcePath) {
+  const name = String(sourcePath || "")
+    .replace(/\\/g, "/")
+    .split("/")
+    .pop();
+  const dot = name.lastIndexOf(".");
+  return dot > 0 ? name.slice(dot + 1).toLowerCase() : "";
+}
+
+/** 在检测到的终端里挑出第一个家族匹配项。 */
+function pickTerminalByFamilies(terminals, families) {
+  for (const family of families) {
+    const hit = terminals.find((item) => item && item.family === family && item.path);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+/**
+ * 为一个脚本文件解析运行它所需的 shell。
+ *
+ * @description 脚本必须由**对应类型的解释器**执行（bat→cmd、ps1→powershell、sh→POSIX），
+ *   不能用默认 shell 硬跑。返回的 shellPath 是「解释器本身」（ptyCreate 用它启动），
+ *   runCommand 是要在该 shell 里敲入的执行行。
+ *   解析顺序：用户显式配置的终端 shell（若类型匹配）→ 系统检测到的同类型终端 → 找不到则不支持。
+ * @param {string} sourcePath 脚本文件绝对路径（据扩展名判定类型）
+ * @returns {Promise<{supported: boolean, shellPath?: string, family?: string, runCommand?: string, exitCommand?: string, extension?: string, requiredLabel?: string}>}
+ */
+export async function resolveScriptShell(sourcePath) {
+  const extension = scriptExtension(sourcePath);
+  const families = SCRIPT_EXTENSION_FAMILY[extension];
+  if (!families) return { supported: false, extension };
+  const requiredLabel = SCRIPT_FAMILY_LABEL[families[0]];
+
+  const snow = getSnow();
+  // 用脚本所在目录的相对路径（cwd 即脚本目录）：cmd/ps 用 .\，POSIX 用 ./——
+  // 避免把 Windows 绝对路径喂给 git-bash 导致无法解析。
+  const baseName = String(sourcePath || "")
+    .replace(/\\/g, "/")
+    .split("/")
+    .pop();
+  const runCommandFor = (family) => {
+    if (family === "powershell") return `& ".\\${baseName}"`;
+    if (family === "cmd") return `".\\${baseName}"`;
+    return `"./${baseName}"`;
+  };
+
+  let terminals = [];
+  try {
+    if (snow && typeof snow.detectTerminals === "function") {
+      const detected = await snow.detectTerminals();
+      terminals = Array.isArray(detected) ? detected : [];
+    }
+  } catch {
+    terminals = [];
+  }
+
+  // 1) 用户显式配置的终端 shell：类型匹配才用它跑脚本，否则继续找系统里的同类型终端。
+  try {
+    if (snow && typeof snow.getSystemSettingValue === "function") {
+      const raw = await snow.getSystemSettingValue(TERMINAL_SETTING_CODE);
+      const configured = raw ? (JSON.parse(raw) || {}).shellPath : "";
+      if (typeof configured === "string" && configured.trim()) {
+        const family = detectShellFamilyByName(configured);
+        if (families.includes(family)) {
+          return { supported: true, shellPath: configured, family, runCommand: runCommandFor(family), exitCommand: shellExitCommand(family), extension };
+        }
+      }
+    }
+  } catch {
+    // 终端设置缺失 / 非法：继续用系统检测结果。
+  }
+
+  // 2) 系统检测到的同类型终端。
+  const hit = pickTerminalByFamilies(terminals, families);
+  if (hit) {
+    const family = hit.family;
+    return { supported: true, shellPath: hit.path, family, runCommand: runCommandFor(family), exitCommand: shellExitCommand(family), extension };
+  }
+
+  // 3) 找不到能跑该脚本的 shell：明确不支持。
+  return { supported: false, extension, requiredLabel };
 }
 
 /**

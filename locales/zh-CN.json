@@ -91,6 +91,7 @@
   "run.noEntry": "无入口文件",
   "run.noCommands": "未发现可运行的命令",
   "run.terminalUnavailable": "当前宿主未提供终端能力",
+  "run.scriptUnsupported": "当前终端不支持运行 {{ext}} 脚本{{need}}",
   "run.stop": "停止",
   "run.stopAndClose": "停止并关闭",
   "run.close": "收起运行面板",

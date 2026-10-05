@@ -91,6 +91,7 @@
   "run.noEntry": "無進入點檔案",
   "run.noCommands": "未發現可執行的命令",
   "run.terminalUnavailable": "目前宿主未提供終端能力",
+  "run.scriptUnsupported": "目前終端不支援執行 {{ext}} 指令碼{{need}}",
   "run.stop": "停止",
   "run.stopAndClose": "停止並關閉",
   "run.close": "收合執行面板",

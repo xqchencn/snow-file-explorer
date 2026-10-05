@@ -4,6 +4,7 @@ import { detectProjectCommands, flattenCommands, scanProjectCommands } from "../
 import {
   resolveNodeEntry,
   readNodeScripts,
+  readScriptCommands,
   nodeEntryFallback,
   detectPackageManager,
   readWails3Commands,
@@ -315,6 +316,70 @@ test("scanProjectCommands：workspace 子包继承根目录 packageManager 并�
     assert.equal(command.packageManager, "pnpm");
     assert.equal(command.cmd, "pnpm run dev");
     assert.equal(command.dir, "apps/web");
+  } finally {
+    if (previous === undefined) delete globalThis.window;
+    else globalThis.window = previous;
+  }
+});
+
+/* ─────────────────────── Script files 生态 ─────────────────────── */
+
+test("readScriptCommands：为 bat/ps1/sh 生成运行命令（仅脚本路径，解释器交给运行层），忽略非脚本与目录", () => {
+  const entries = [
+    file("build.bat", "D:/repo/build.bat"),
+    file("deploy.ps1", "D:/repo/deploy.ps1"),
+    file("start.sh", "D:/repo/start.sh"),
+    file("readme.md", "D:/repo/readme.md"),
+    directory("scripts", "D:/repo/scripts"),
+  ];
+  const commands = readScriptCommands(entries);
+  // 命令文本就是脚本文件名；解释器由运行层按扩展名选（bat→cmd / ps1→powershell / sh→POSIX）。
+  assert.deepEqual(commands.map((c) => c.cmd), ["build.bat", "deploy.ps1", "start.sh"]);
+  assert.deepEqual(commands.map((c) => c.label), ["build.bat", "deploy.ps1", "start.sh"]);
+  assert.ok(commands.every((c) => c.runKind === "script" && c.icon === "terminal"));
+  assert.equal(commands[0].id, "script:build.bat");
+  assert.equal(commands[0].sourcePath, "D:/repo/build.bat");
+});
+
+test("readScriptCommands：prefix 只标记所属包目录并进入 id / labelFallback", () => {
+  const [command] = readScriptCommands([file("run.sh", "D:/repo/tools/run.sh")], { prefix: "tools" });
+  assert.equal(command.cmd, "run.sh");
+  assert.equal(command.id, "script:tools:run.sh");
+  assert.equal(command.labelFallback, "tools/run.sh");
+  assert.equal(command.label, "run.sh");
+});
+
+test("detectProjectCommands：script 生态生成 Scripts 命令组", () => {
+  const result = detectProjectCommands([
+    { dir: "tools", ecosystem: "script", entries: [file("build.bat", "D:/repo/tools/build.bat")] },
+  ]);
+  const eco = result.ecosystems[0];
+  assert.equal(eco.kind, "script");
+  assert.equal(eco.id, "script:tools");
+  assert.equal(eco.label, "Scripts · tools");
+  assert.deepEqual(eco.commands.map((c) => c.cmd), ["build.bat"]);
+});
+
+test("scanProjectCommands：目录含脚本文件时识别为 script 包并保留 sourcePath", async () => {
+  const root = "D:/repo";
+  const directories = new Map([
+    [root, [file("build.bat", `${root}/build.bat`), file("deploy.ps1", `${root}/deploy.ps1`)]],
+  ]);
+  const previous = globalThis.window;
+  globalThis.window = {
+    snow: {
+      readDirectoryEntries: async (dirPath) => directories.get(dirPath) || [],
+      readFileContent: async () => ({ content: "", isBinary: false }),
+    },
+  };
+  try {
+    const result = await scanProjectCommands(root);
+    assert.ok(result.packages.some((item) => item.ecosystem === "script"));
+    // 脚本命令默认不进顶栏下拉，需 includeHidden 才出现在扁平列表里。
+    assert.deepEqual(flattenCommands(result), []);
+    const flat = flattenCommands(result, { includeHidden: true });
+    assert.deepEqual(flat.map((c) => c.cmd).sort(), ["build.bat", "deploy.ps1"].sort());
+    assert.equal(flat.find((c) => c.cmd === "build.bat").sourcePath, `${root}/build.bat`);
   } finally {
     if (previous === undefined) delete globalThis.window;
     else globalThis.window = previous;

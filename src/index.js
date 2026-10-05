@@ -72,6 +72,7 @@ import {
   createPtySession,
   isTerminalAvailable,
   resolveRunShell,
+  resolveScriptShell,
   DEFAULT_COLS,
   DEFAULT_ROWS,
 } from "./services/terminal-runner.js";
@@ -187,6 +188,8 @@ export function mount(container, api, _options = {}) {
     // 项目识别与终端：projectCommands 为懒加载的识别结果（含 rootPath 缓存键）；
     // terminals 为终端集合（IDEA 式多 tab：一个终端一个 tab），activeTerminalId 标记当前 tab。
     projectCommands: null,
+    // 脚本命令（bat/sh/ps1）默认不进顶栏 Run 下拉；只有用户手动点过文件行内 ▶ 才临时登记在此。
+    manualScriptCommands: [],
     terminals: [],
     // 终端窗口（mode B）的激活 tab。
     activeTerminalId: null,
@@ -274,6 +277,7 @@ export function mount(container, api, _options = {}) {
     if (terminalWindow && typeof terminalWindow.dispose === "function") terminalWindow.dispose();
     if (runWindow && typeof runWindow.dispose === "function") runWindow.dispose();
     state.projectCommands = null;
+    state.manualScriptCommands = [];
     state.terminals = [];
     state.activeTerminalId = null;
     state.activeRunTerminalId = null;
@@ -1748,6 +1752,20 @@ export function mount(container, api, _options = {}) {
   }
 
   /**
+   * 合并顶栏命令与「手动登记」的脚本命令（同 id 去重，顶栏命令在前）。
+   * @param {Array} commands flattenCommands 结果
+   * @param {Array} extra 手动登记的脚本命令
+   * @returns {Array}
+   */
+  function mergeRunCommands(commands, extra) {
+    const base = Array.isArray(commands) ? commands : [];
+    const list = Array.isArray(extra) ? extra : [];
+    if (!list.length) return base;
+    const ids = new Set(base.map((command) => command && command.id));
+    return [...base, ...list.filter((command) => command && !ids.has(command.id))];
+  }
+
+  /**
    * 渲染 / 同步工具栏运行控件。
    * @description 控制器只创建一次并复用（避免重复注册 document 监听）；骨架重建后自动重建。
    */
@@ -1763,7 +1781,7 @@ export function mount(container, api, _options = {}) {
     runToolbar = renderRunToolbar(wrap, {
       t,
       getState: () => {
-        const commands = flattenCommands(state.projectCommands);
+        const commands = mergeRunCommands(flattenCommands(state.projectCommands), state.manualScriptCommands);
         return {
           commands,
           // 识别完成（无论是否命中生态）才算 ready，避免未扫描时误显示按钮。
@@ -1809,7 +1827,8 @@ export function mount(container, api, _options = {}) {
   function handleRerunTerminal(id) {
     const term = findTerminal(id);
     if (!term || !term.commandId) return;
-    const command = flattenCommands(state.projectCommands).find((c) => c.id === term.commandId);
+    // 含隐藏命令：脚本命令不在顶栏下拉里，但 rerun 仍要能找到它。
+    const command = flattenCommands(state.projectCommands, { includeHidden: true }).find((c) => c.id === term.commandId);
     if (!command) return;
     // 运行中才需要杀旧进程；已结束的会话 session 已为 null，不动。
     if (term.exited !== true && term.session && typeof term.session.kill === "function") {
@@ -1951,6 +1970,8 @@ export function mount(container, api, _options = {}) {
       onInput: null,
       onResize: null,
       pendingCommand: command,
+      // 脚本文件路径：非空时本 tab 用「脚本对应解释器」跑（见 createTerminalForId）。
+      scriptPath: typeof opts.scriptPath === "string" ? opts.scriptPath : "",
       // 运行命令使用所属 package.json 目录；交互式终端默认使用项目根目录。
       cwd: typeof opts.cwd === "string" && opts.cwd ? opts.cwd : state.rootPath,
       // pty 启动阶段令牌：重跑复用同一 tab 时用于作废旧 pty 的迟到 onData/onExit。
@@ -2003,7 +2024,27 @@ export function mount(container, api, _options = {}) {
     // 不写死 shell——跨 Windows / macOS / Linux 跟随宿主配置；退出写法按 shell 家族选择
     // （powershell 需 `exit $LASTEXITCODE`，cmd / posix / wsl 用裸 `exit` 继承退出码）。
     // 模式 B 不指定 shellPath，走宿主默认检测，保持交互能力。
-    const runShell = term.mode === "run" ? await resolveRunShell() : null;
+    // 脚本命令（term.scriptPath）：改用**脚本对应类型的解释器**（bat→cmd / ps1→powershell /
+    // sh→POSIX），系统里找不到该类型 shell 时提示「不支持」，不再用默认 shell 硬跑。
+    let runShell = null;
+    let runCommand = "";
+    let exitCommand = "";
+    if (term.mode === "run") {
+      if (term.scriptPath) {
+        const scriptShell = await resolveScriptShell(term.scriptPath);
+        if (!scriptShell.supported) {
+          const ext = scriptShell.extension ? `.${scriptShell.extension}` : "";
+          const need = scriptShell.requiredLabel ? `（需要 ${scriptShell.requiredLabel}）` : "";
+          setOperationStatus(false, t("run.scriptUnsupported", "当前终端不支持运行 {{ext}} 脚本{{need}}", { ext, need }));
+          return;
+        }
+        runShell = { shellPath: scriptShell.shellPath, exitCommand: scriptShell.exitCommand };
+        runCommand = scriptShell.runCommand;
+      } else {
+        runShell = await resolveRunShell();
+      }
+      exitCommand = runShell.exitCommand;
+    }
 
     const result = await createPtySession({
       cwd: term.cwd || state.rootPath,
@@ -2040,11 +2081,12 @@ export function mount(container, api, _options = {}) {
     term.session = result;
     // 带命令创建：把命令文本 + 回车写入 shell，等价于用户手动敲入并回车执行。
     if (term.pendingCommand) {
-      const cmd = term.pendingCommand;
+      // 脚本命令：写解析出的执行行（引号包裹的脚本路径）；其余命令：写命令原文。
+      const cmd = term.scriptPath && runCommand ? runCommand : term.pendingCommand;
       term.pendingCommand = "";
       result.write(`${cmd}\r`);
       // 模式 A：命令之后写入 shell 退出指令，让 shell 退出以回传真实退出码。
-      if (term.mode === "run" && runShell) result.write(`${runShell.exitCommand}\r`);
+      if (term.mode === "run" && exitCommand) result.write(`${exitCommand}\r`);
     }
     syncRunToolbar();
     syncSidebar();
@@ -2059,6 +2101,8 @@ export function mount(container, api, _options = {}) {
    */
   function handleRunCommand(command) {
     if (disposed || !command || !command.cmd) return;
+    // 脚本命令（bat/sh/ps1）默认不进顶栏 Run 下拉：手动点过文件行内 ▶ 后才登记进下拉。
+    rememberManualScriptCommand(command);
     // 运行中拦截：同一命令已有未结束的运行终端 → 忽略（要么运行，要么停止）。
     if (runCountForCommand(command) > 0) return;
     // 模式 A：一次性运行，跑完 shell 退出 → onPtyExit 回传退出码 → 工具栏回到 Run。
@@ -2072,7 +2116,21 @@ export function mount(container, api, _options = {}) {
       cwd,
       mode: "run",
       title: command.cmd,
+      // 脚本命令：带上源文件路径，createTerminalForId 会按扩展名选对应解释器。
+      scriptPath: command.runKind === "script" ? command.sourcePath : "",
     });
+  }
+
+  /**
+   * 手动登记脚本命令：脚本命令（bat/sh/ps1）默认只出现在文件行内 ▶，不进顶栏 Run 下拉；
+   *   用户点过一次 ▶ 后，把它临时并入下拉（本会话有效，切换项目时清空）。
+   * @param {{runKind?: string, id?: string}} command 命令对象
+   */
+  function rememberManualScriptCommand(command) {
+    if (!command || command.runKind !== "script" || !command.id) return;
+    if (state.manualScriptCommands.some((item) => item.id === command.id)) return;
+    state.manualScriptCommands.push(command);
+    renderRunToolbarView();
   }
 
   // 文件树空白区右键：命中具体条目时由行自身处理并 stopPropagation（见 tree-view.js），

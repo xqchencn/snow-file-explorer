@@ -4,6 +4,7 @@ import {
   createPtySession,
   isTerminalAvailable,
   resolveRunShell,
+  resolveScriptShell,
   shellExitCommand,
   DEFAULT_COLS,
   DEFAULT_ROWS,
@@ -302,5 +303,91 @@ test("resolveRunShell：优先终端设置 shellPath，其次系统检测，均�
     assert.equal(r.exitCommand, "exit");
   } finally {
     broken.restore();
+  }
+});
+
+test("resolveScriptShell：bat→cmd、ps1→powershell、sh→POSIX，按扩展名选对应解释器", async () => {
+  const env = withSnow({
+    getSystemSettingValue: async () => null,
+    detectTerminals: async () => [
+      { name: "PowerShell", path: "C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe", family: "powershell" },
+      { name: "Command Prompt", path: "C:/Windows/System32/cmd.exe", family: "cmd" },
+      { name: "Git Bash", path: "C:/Program Files/Git/bin/bash.exe", family: "gitbash" },
+    ],
+  });
+  try {
+    const bat = await resolveScriptShell("D:/repo/build.bat");
+    assert.equal(bat.supported, true);
+    assert.equal(bat.family, "cmd");
+    assert.equal(bat.shellPath, "C:/Windows/System32/cmd.exe");
+    assert.equal(bat.runCommand, '".\\build.bat"');
+    assert.equal(bat.exitCommand, "exit");
+
+    const ps1 = await resolveScriptShell("D:/repo/deploy.ps1");
+    assert.equal(ps1.supported, true);
+    assert.equal(ps1.family, "powershell");
+    assert.equal(ps1.runCommand, '& ".\\deploy.ps1"');
+    assert.equal(ps1.exitCommand, "exit $LASTEXITCODE");
+
+    const sh = await resolveScriptShell("D:/repo/start.sh");
+    assert.equal(sh.supported, true);
+    assert.equal(sh.family, "gitbash");
+    assert.equal(sh.shellPath, "C:/Program Files/Git/bin/bash.exe");
+    assert.equal(sh.runCommand, '"./start.sh"');
+  } finally {
+    env.restore();
+  }
+});
+
+test("resolveScriptShell：缺少对应解释器时返回不支持（macOS/Linux 无 cmd/powershell，Windows 无 sh）", async () => {
+  // 类 Unix：只有 posix，没有 cmd / powershell
+  const posixOnly = withSnow({
+    getSystemSettingValue: async () => null,
+    detectTerminals: async () => [{ name: "zsh", path: "/bin/zsh", family: "posix" }],
+  });
+  try {
+    assert.equal((await resolveScriptShell("/repo/build.bat")).supported, false);
+    assert.equal((await resolveScriptShell("/repo/deploy.ps1")).supported, false);
+    const sh = await resolveScriptShell("/repo/start.sh");
+    assert.equal(sh.supported, true);
+    assert.equal(sh.family, "posix");
+    assert.equal(sh.runCommand, '"./start.sh"');
+  } finally {
+    posixOnly.restore();
+  }
+
+  // Windows：只有 cmd / powershell，没有 POSIX → sh 不支持
+  const windowsOnly = withSnow({
+    getSystemSettingValue: async () => null,
+    detectTerminals: async () => [
+      { name: "PowerShell", path: "C:/pwsh.exe", family: "powershell" },
+      { name: "Command Prompt", path: "C:/cmd.exe", family: "cmd" },
+    ],
+  });
+  try {
+    const sh = await resolveScriptShell("D:/repo/start.sh");
+    assert.equal(sh.supported, false);
+    assert.equal(sh.extension, "sh");
+    assert.equal(sh.requiredLabel, "sh");
+  } finally {
+    windowsOnly.restore();
+  }
+});
+
+test("resolveScriptShell：显式配置的终端 shell 类型匹配时优先使用", async () => {
+  const env = withSnow({
+    getSystemSettingValue: async () => JSON.stringify({ shellPath: "C:/Program Files/PowerShell/7/pwsh.exe" }),
+    detectTerminals: async () => [{ name: "cmd", path: "C:/Windows/System32/cmd.exe", family: "cmd" }],
+  });
+  try {
+    // ps1 与配置的 pwsh 匹配 → 用配置的 pwsh
+    const ps1 = await resolveScriptShell("D:/repo/deploy.ps1");
+    assert.equal(ps1.shellPath, "C:/Program Files/PowerShell/7/pwsh.exe");
+    // bat 与配置的 pwsh 不匹配 → 退回系统检测到的 cmd
+    const bat = await resolveScriptShell("D:/repo/build.bat");
+    assert.equal(bat.family, "cmd");
+    assert.equal(bat.shellPath, "C:/Windows/System32/cmd.exe");
+  } finally {
+    env.restore();
   }
 });

@@ -142,6 +142,9 @@ export function createXtermView(host, options = {}) {
   const handleContextMenu = (event) => {
     if (typeof onContextMenu !== "function") return;
     event.preventDefault();
+    // 阻断冒泡：xterm 自身的右键菜单（选中→复制 / 粘贴 / 全选）必须先落地，
+    //   否则事件会冒到工具窗口 body 的空白区监听器，被 tab 菜单（只有「复制命令」）覆盖。
+    event.stopPropagation();
     onContextMenu(event.clientX, event.clientY);
   };
   if (typeof host.addEventListener === "function") host.addEventListener("contextmenu", handleContextMenu);

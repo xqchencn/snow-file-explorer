@@ -178,6 +178,23 @@ function buildJvmMainCommandMap(preview, runCommands) {
   return map;
 }
 
+/**
+ * 若当前预览是 bat / PowerShell / sh 脚本，把第一行作为脚本级运行入口。
+ * @description 脚本命令已经由项目扫描器绑定真实 sourcePath；不解析脚本正文，也不把普通文本行误判成多个入口。
+ */
+function buildScriptFileCommandMap(preview, runCommands) {
+  const map = new Map();
+  if (!preview || preview.kind !== "text" || !/\.(?:bat|ps1|sh)$/i.test(preview.name || "")) return map;
+  if (typeof runCommands !== "function") return map;
+  const sourcePath = normalizeMainSourcePath(preview.path);
+  if (!sourcePath) return map;
+  const command = (runCommands() || []).find(
+    (item) => item?.runKind === "script" && normalizeMainSourcePath(item.sourcePath) === sourcePath
+  );
+  if (command) map.set(1, command);
+  return map;
+}
+
 /** 关闭预览区右键菜单及 document 级监听，避免预览重绘后菜单残留。 */
 function closeViewerContextMenu(bodyEl) {
   const bindingCleanup = bodyEl && bodyEl[VIEWER_CONTEXT_MENU_BINDING];
@@ -638,6 +655,7 @@ export function renderCodeViewer(
       // Java/Kotlin 源文件：扫描器已提供 sourcePath/mainLine，按绝对路径映射到 main 行。
       const runLineMap = new Map([
         ...buildScriptCommandMap(preview, runCommands, rootPath),
+        ...buildScriptFileCommandMap(preview, runCommands),
         ...buildGoMainCommandMap(preview, runCommands, rootPath),
         ...buildJvmMainCommandMap(preview, runCommands),
       ]);

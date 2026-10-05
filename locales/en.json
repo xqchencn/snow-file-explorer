@@ -91,6 +91,7 @@
   "run.noEntry": "no entry file",
   "run.noCommands": "No runnable commands found",
   "run.terminalUnavailable": "The host does not provide terminal capability",
+  "run.scriptUnsupported": "This terminal cannot run {{ext}} scripts{{need}}",
   "run.stop": "Stop",
   "run.stopAndClose": "Stop and close",
   "run.close": "Collapse run panel",

@@ -18,6 +18,7 @@ import { readDirectoryEntries } from "./file-service.js";
 import {
   readNodeScripts,
   nodeEntryFallback,
+  readScriptCommands,
   detectPackageManager,
   readWails2Commands,
   readWails3Commands,
@@ -64,7 +65,7 @@ const GO_TEST_DIRS = new Set(["tests", "test"]);
  * @description 用户规矩——**服务端（Go / Wails）展示在前端（Node）之前**。
  *   仅在「同一目录层级」内比较，父包在前的既有层级规则不受影响。
  */
-const ECOSYSTEM_PRIORITY = { go: 0, maven: 1, gradle: 1, python: 1, node: 2 };
+const ECOSYSTEM_PRIORITY = { go: 0, maven: 1, gradle: 1, python: 1, script: 2, node: 2 };
 
 /**
  * 规范化根目录键：统一分隔符、小写、去尾部分隔符。
@@ -128,6 +129,10 @@ function buildPythonCommands(pkg, prefix) {
     packageManager: pkg.packageManager,
     modules: pkg.pythonModules,
   });
+}
+
+function buildScriptCommands(pkg, prefix) {
+  return readScriptCommands(pkg.entries, { prefix });
 }
 
 function buildJvmCommands(pkg, prefix) {
@@ -217,6 +222,22 @@ export function detectProjectCommands(packages) {
       continue;
     }
 
+    if (pkg.ecosystem === "script") {
+      const commands = buildScriptCommands(pkg, prefix);
+      const eco = {
+        kind: "script",
+        id: prefix ? `script:${prefix}` : "script",
+        label: prefix ? `Scripts · ${prefix}` : "Scripts",
+        markers: ["*.bat", "*.ps1", "*.sh"],
+        dir: prefix,
+        entry: null,
+        commands,
+      };
+      ecosystems.push(eco);
+      summary.push({ id: eco.id, dir: prefix, ecosystem: "script", commandCount: commands.length });
+      continue;
+    }
+
     if (pkg.ecosystem === "maven" || pkg.ecosystem === "gradle") {
       const eco = buildJvmEcosystem(pkg, prefix);
       ecosystems.push(eco);
@@ -302,6 +323,10 @@ export async function scanProjectCommands(rootPath) {
         /^(?:main|app|cli|run|server)\.py$/i.test(entry.name)
       );
     });
+  const isScriptProject = (entries) =>
+    (Array.isArray(entries) ? entries : []).some(
+      (entry) => entry && entry.isDirectory !== true && typeof entry.name === "string" && /\.(?:bat|ps1|sh)$/i.test(entry.name)
+    );
 
   // JVM 源码只从标准源码根读取，且有文件数上限，避免扫描生成物或巨型仓库卡死。
   const collectJvmSources = async (sourceRoot, rootRel, result, budget, state) => {
@@ -390,6 +415,13 @@ export async function scanProjectCommands(rootPath) {
     };
   };
 
+  const buildScriptPackage = (dirRel, entries) => ({
+    dir: dirRel,
+    ecosystem: "script",
+    entries,
+    markers: ["*.bat", "*.ps1", "*.sh"],
+  });
+
   const buildJvmPackage = async (dirRel, entries, ecosystem, inheritedWrapper) => {
     const mainCandidates = [];
     const scanState = { count: 0 };
@@ -460,6 +492,7 @@ export async function scanProjectCommands(rootPath) {
     if (pkgEntry) packages.push({ dir: rel, packageJson, packageManager, entries });
     if (isGoModule(entries)) packages.push(await buildGoPackage(rel, entries));
     if (isPythonProject(entries)) packages.push(await buildPythonPackage(rel, entries));
+    if (isScriptProject(entries)) packages.push(buildScriptPackage(rel, entries));
     if (hasFile(entries, "pom.xml")) packages.push(await buildJvmPackage(rel, entries, "maven", mvnw));
     if (hasFile(entries, "build.gradle") || hasFile(entries, "build.gradle.kts") || hasFile(entries, "settings.gradle") || hasFile(entries, "settings.gradle.kts")) {
       packages.push(await buildJvmPackage(rel, entries, "gradle", gradlew));
@@ -484,6 +517,7 @@ export async function scanProjectCommands(rootPath) {
   if (rootPkg) packages.push({ dir: "", packageJson: rootJson, packageManager: rootManager, entries: rootEntries });
   if (isGoModule(rootEntries)) packages.push(await buildGoPackage("", rootEntries));
   if (isPythonProject(rootEntries)) packages.push(await buildPythonPackage("", rootEntries));
+  if (isScriptProject(rootEntries)) packages.push(buildScriptPackage("", rootEntries));
   const rootMvnw = findFile(rootEntries, "mvnw.cmd") ? "mvnw.cmd" : null;
   const rootGradlew = findFile(rootEntries, "gradlew.bat") ? "gradlew.bat" : null;
   if (hasFile(rootEntries, "pom.xml")) packages.push(await buildJvmPackage("", rootEntries, "maven", rootMvnw));
@@ -530,11 +564,14 @@ function compareEcosystem(a, b) {
 
 /**
  * 判断命令是否应进入顶栏运行配置列表。
- * @description 根 JVM 项目的 test/package/build 等公共命令只显示一次；子模块只显示真实
+ * @description 脚本命令（bat/sh/ps1）默认**不进**顶栏下拉——只在文件里提供行内 ▶；
+ *   手动点过 ▶ 的命令由调用方（index.js）单独并入下拉。
+ *   根 JVM 项目的 test/package/build 等公共命令只显示一次；子模块只显示真实
  *   源码 main 和 Android 专用任务。子模块的完整 test/package 仍保留在 ecosystem.commands，
  *   供模块级数据和后续入口使用，但不再污染顶栏的扁平列表。
  */
-function isVisibleJvmCommand(eco, command, dir, commands) {
+function isVisibleInTopbar(eco, command, dir, commands) {
+  if (eco.kind === "script") return false;
   if (eco.kind !== "maven" && eco.kind !== "gradle") return true;
   if (!dir) {
     // Gradle application 已有源码 main 时，隐藏无具体入口的通用 run，避免同一入口出现两次。
@@ -561,7 +598,7 @@ export function flattenCommands(projectCommands, options = {}) {
     const group = nodeGroupLabel(dir);
     const commands = Array.isArray(eco.commands) ? eco.commands : [];
     for (const command of commands) {
-      if (!includeHidden && !isVisibleJvmCommand(eco, command, dir, commands)) continue;
+      if (!includeHidden && !isVisibleInTopbar(eco, command, dir, commands)) continue;
       out.push({ ...command, ecosystem: eco.id, dir, group });
     }
   }

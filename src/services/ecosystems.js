@@ -165,6 +165,40 @@ export function nodeEntryFallback(packageJson, entries) {
   ];
 }
 
+/* ─────────────────────────── Script files ─────────────────────────── */
+
+/** 归一化命令前缀（相对根目录的 POSIX 路径）：去首尾斜杠。 */
+function normalizePrefix(prefix) {
+  return typeof prefix === "string" ? prefix.replace(/^\/+|\/+$/g, "") : "";
+}
+
+/**
+ * 为目录中的可执行脚本生成运行命令。
+ * @description 脚本由调用方在所属目录执行；这里只生成运行命令，不执行脚本、不解析脚本内容。
+ *   命令文本就是脚本文件路径——**解释器由运行层按扩展名选择**（bat→cmd、ps1→powershell、
+ *   sh→POSIX），这里不写死解释器前缀。
+ * @param {Array<{name: string, path: string, isDirectory?: boolean}>} entries 目录直接条目
+ * @param {{prefix?: string}} opts 命令所属包路径
+ * @returns {Array<Object>}
+ */
+export function readScriptCommands(entries, opts = {}) {
+  const prefix = normalizePrefix(opts.prefix);
+  const scripts = (Array.isArray(entries) ? entries : [])
+    .filter((entry) => entry && entry.isDirectory !== true && typeof entry.name === "string" && /\.(?:bat|ps1|sh)$/i.test(entry.name))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  return scripts.map((entry) => ({
+    id: prefix ? `script:${prefix}:${entry.name}` : `script:${entry.name}`,
+    labelKey: null,
+    label: entry.name,
+    labelFallback: prefix ? `${prefix}/${entry.name}` : entry.name,
+    // 命令文本即脚本文件名；解释器由运行层按扩展名选（bat→cmd / ps1→powershell / sh→POSIX）。
+    cmd: entry.name,
+    icon: "terminal",
+    runKind: "script",
+    sourcePath: entry.path,
+  }));
+}
+
 /* ─────────────────────────── Python ─────────────────────────── */
 
 const PYTHON_ENTRY_CANDIDATES = ["main.py", "app.py", "cli.py", "run.py", "server.py", "__main__.py"];
@@ -263,11 +297,6 @@ export function readPythonCommands(opts = {}) {
 }
 
 /* ─────────────────────────── Go / Wails ─────────────────────────── */
-
-/** 归一化命令前缀（相对根目录的 POSIX 路径）：去首尾斜杠。 */
-function normalizePrefix(prefix) {
-  return typeof prefix === "string" ? prefix.replace(/^\/+|\/+$/g, "") : "";
-}
 
 /**
  * 生成命令对象的公共外壳（与 readNodeScripts 产物同构，供渲染层统一消费）。
