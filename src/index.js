@@ -223,7 +223,9 @@ export function mount(container, api, _options = {}) {
         console.warn("[FileExplorer] 项目命令识别失败", err);
       }
       if (disposed || token !== startupToken || pathKey(state.rootPath) !== rootToken) return;
-      // 识别已经结束，提前解析 xterm。第一次打开控制台直接用这份结果。
+      // 识别已经结束：解析 xterm，并提前确定运行命令要用的 shell。
+      // 否则点击运行后要先等 detectTerminals，PowerShell 才会启动。
+      void cachedRunShell();
       void loadChunk("terminal").catch((err) => {
         console.warn("[FileExplorer] 终端组件预载失败", err);
       });
@@ -2223,6 +2225,26 @@ export function mount(container, api, _options = {}) {
       exitCommand = runShell.exitCommand;
     }
 
+    const commandText = term.pendingCommand
+      ? (term.scriptPath && runCommand ? runCommand : term.pendingCommand)
+      : "";
+    // 进程刚 spawn 就写入会堵住 PowerShell 的第一屏输出。等它先吐出内容再敲命令。
+    let shellSpoke = false;
+    let commandSent = false;
+    let session = null;
+    const sendCommand = () => {
+      if (commandSent || !session || !commandText) return;
+      if (disposed || term.phase !== phase || !state.terminals.includes(term)) return;
+      commandSent = true;
+      if (term.commandTimer) {
+        clearTimeout(term.commandTimer);
+        term.commandTimer = null;
+      }
+      term.pendingCommand = "";
+      session.write(`${commandText}\r`);
+      if (term.mode === "run" && exitCommand) session.write(`${exitCommand}\r`);
+    };
+
     const result = await createPtySession({
       cwd: term.cwd || state.rootPath,
       cols,
@@ -2231,7 +2253,9 @@ export function mount(container, api, _options = {}) {
       shellPath: runShell ? runShell.shellPath : undefined,
       onData: (data) => {
         if (disposed || term.phase !== phase) return;
+        shellSpoke = true;
         if (win && typeof win.write === "function") win.write(term.id, data);
+        sendCommand();
       },
       onExit: (exitCode) => {
         // 重跑已启动新一轮（phase 变化）：旧 pty 的退出事件作废，避免清掉新一轮的运行态。
@@ -2256,14 +2280,16 @@ export function mount(container, api, _options = {}) {
       return;
     }
     term.session = result;
-    // 带命令创建：把命令文本 + 回车写入 shell，等价于用户手动敲入并回车执行。
-    if (term.pendingCommand) {
-      // 脚本命令：写解析出的执行行（引号包裹的脚本路径）；其余命令：写命令原文。
-      const cmd = term.scriptPath && runCommand ? runCommand : term.pendingCommand;
-      term.pendingCommand = "";
-      result.write(`${cmd}\r`);
-      // 模式 A：命令之后写入 shell 退出指令，让 shell 退出以回传真实退出码。
-      if (term.mode === "run" && exitCommand) result.write(`${exitCommand}\r`);
+    session = result;
+    if (commandText) {
+      if (shellSpoke) sendCommand();
+      else {
+        term.commandTimer = setTimeout(() => {
+          term.commandTimer = null;
+          if (term.phase !== phase) return;
+          sendCommand();
+        }, 800);
+      }
     }
     syncRunToolbar();
     syncSidebar();
