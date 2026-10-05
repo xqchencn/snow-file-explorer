@@ -113,6 +113,21 @@ test('文件过滤: 开关打开时过滤命中项，同时命中两条规则也
   assert.equal(filtered.length, 0);
 });
 
+test('文件过滤: 搜索结果条目（path/name/relativePath/isDirectory）同样按规则过滤', () => {
+  // 搜索结果形状：宿主 FileSearchResult（path / relativePath / name / isDirectory / matchedName / lineMatches）
+  const results = [
+    { name: 'app.js', path: 'D:/repo/src/app.js', relativePath: 'src/app.js', isDirectory: false, matchedName: false, lineMatches: [] },
+    { name: 'debug.log', path: 'D:/repo/debug.log', relativePath: 'debug.log', isDirectory: false, matchedName: true, lineMatches: [] },
+    { name: '.git', path: 'D:/repo/.git', relativePath: '.git', isDirectory: true, matchedName: true, lineMatches: [] },
+  ];
+  const filtered = filterExcludedEntries(results, 'D:/repo', {
+    excludeMeta: true,
+    useGitignore: true,
+    gitignoreRules: parseGitignore('*.log'),
+  });
+  assert.deepEqual(filtered.map((r) => r.name), ['app.js']);
+});
+
 test('文件过滤: 未命中规则的条目不带浅色标记', () => {
   const entry = { name: 'src', path: 'D:/repo/src', isDirectory: true };
   const result = filterExcludedEntries([entry], 'D:/repo', {

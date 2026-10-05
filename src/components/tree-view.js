@@ -60,6 +60,9 @@ export function renderTreeView(parentEl, options) {
     onToggleDir,
     onSelectFile,
     onContextMenu,
+    onOpenFileEdit,
+    onSelectionChange,
+    onTreeKeyDown,
     t,
   } = options;
 
@@ -87,14 +90,21 @@ export function renderTreeView(parentEl, options) {
 
   const rows = [];
   flattenTree(rootNodes, 0, expanded, rows);
+  // 当前可见行路径（顺序即视觉顺序）：shift 范围选择与 Ctrl+A 全选据此计算。
+  const visiblePaths = rows.map((row) => row.entry.path);
 
   const list = el("div", "sfe-list");
+  list.tabIndex = -1;
+  // 键盘：Ctrl/Cmd+A 全选可见行、Escape 清空选择（由 index.js 处理，传入可见路径）。
+  list.addEventListener("keydown", (e) => {
+    if (typeof onTreeKeyDown === "function") onTreeKeyDown(e, visiblePaths);
+  });
   for (const row of rows) {
     const entry = row.entry;
     const isDir = !!entry.isDirectory;
     const displayName = entry.displayName || entry.name;
     const isExpanded = expanded[entry.path] === true;
-    const isSelected = !isDir && selected === entry.path;
+    const isSelected = selected && typeof selected.has === "function" ? selected.has(entry.path) : false;
 
     // 解析当前项的 Git 状态：文件取自身状态；文件夹取子孙聚合状态（对齐 VS Code）
     const gitStatus = isDir
@@ -137,17 +147,7 @@ export function renderTreeView(parentEl, options) {
     nameWrap.appendChild(nameText);
     item.appendChild(nameWrap);
 
-    // 4. Git 状态标识：文件用字母徽章；文件夹用圆点（对齐 VS Code，文件夹不带字母）
-    if (gitStatus) {
-      if (isDir) {
-        item.appendChild(createFolderGitDot(gitStatus, t));
-      } else {
-        const badge = createGitBadge(gitStatus);
-        if (badge) item.appendChild(badge);
-      }
-    }
-
-    // 5. 辅助信息（子项数或文件大小）
+    // 4. 辅助信息（子项数或文件大小）：紧跟名称，Git 标记排在其后
     if (isDir) {
       if (Array.isArray(entry.children)) {
         item.appendChild(el("span", "sfe-tree-folder-count", String(entry.children.length)));
@@ -157,13 +157,43 @@ export function renderTreeView(parentEl, options) {
       if (sizeStr) item.appendChild(el("span", "sfe-file-size", sizeStr));
     }
 
+    // 5. Git 状态标识（行尾）：文件用字母徽章 U/M/A/D/R，文件夹用圆点。
+    //    排序约定：文件「名称 大小 U/M」、文件夹「名称 数字 •」。
+    if (gitStatus) {
+      if (isDir) {
+        item.appendChild(createFolderGitDot(gitStatus, t));
+      } else {
+        const badge = createGitBadge(gitStatus);
+        if (badge) item.appendChild(badge);
+      }
+    }
+
     // 6. 点击事件绑定
     item.addEventListener("click", (e) => {
       e.stopPropagation();
+      // 让树容器获得焦点，保证 Ctrl+A / Escape 键盘操作可用。
+      try {
+        list.focus({ preventScroll: true });
+      } catch {
+        list.focus();
+      }
+      const additive = e.ctrlKey || e.metaKey;
+      const range = e.shiftKey;
+      // ctrl/cmd（切换）与 shift（范围）只改选中，不打开文件、不展开目录。
+      if (additive || range) {
+        if (typeof onSelectionChange === "function") {
+          onSelectionChange({ path: entry.path, additive, range, visiblePaths });
+        }
+        return;
+      }
+      // 普通点击：先单选（就地高亮），再展开目录或打开文件。
+      if (typeof onSelectionChange === "function") {
+        onSelectionChange({ path: entry.path, additive: false, range: false, visiblePaths });
+      }
       if (isDir) {
         if (typeof onToggleDir === "function") onToggleDir(entry);
-      } else {
-        if (typeof onSelectFile === "function") onSelectFile(entry);
+      } else if (typeof onSelectFile === "function") {
+        onSelectFile(entry);
       }
     });
 
@@ -173,6 +203,12 @@ export function renderTreeView(parentEl, options) {
       if (typeof onContextMenu === "function") {
         onContextMenu(entry, e.clientX, e.clientY);
       }
+    });
+
+    // 双击文件：进入快速编辑（目录双击仍走单击的展开/折叠，不额外处理）。
+    item.addEventListener("dblclick", (e) => {
+      e.stopPropagation();
+      if (!isDir && typeof onOpenFileEdit === "function") onOpenFileEdit(entry);
     });
 
     list.appendChild(item);
@@ -209,10 +245,7 @@ export function paintTreeGitStatus(parentEl, { rootPath, gitStatusMap = {}, t })
     for (const old of item.querySelectorAll(".sfe-git-badge, .sfe-git-dot")) old.remove();
     if (!gitStatus) continue;
     const marker = isDir ? createFolderGitDot(gitStatus, t) : createGitBadge(gitStatus);
-    if (!marker) continue;
-    const sizeEl = item.querySelector(".sfe-tree-folder-count, .sfe-file-size");
-    if (sizeEl) item.insertBefore(marker, sizeEl);
-    else item.appendChild(marker);
+    if (marker) item.appendChild(marker);
   }
 }
 

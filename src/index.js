@@ -13,6 +13,7 @@ import {
   writeFileContent,
   renameFileSystemEntry,
   deleteFileSystemEntry,
+  deleteFileSystemEntries,
   relativePath,
   resolveActiveDirectoryPath,
   detectJvmProject,
@@ -27,7 +28,7 @@ import {
 } from "./services/git-service.js";
 import { shouldVirtualize } from "./components/highlight-policy.js";
 import { loadChunk } from "./services/lazy-chunk.js";
-import { installFileIcons, refreshInstalledIcons } from "./icons/file-icons.js";
+import { installFileIcons, refreshInstalledIcons, createFileIconNode } from "./icons/file-icons.js";
 import { mapPool } from "./utils/async.js";
 import { renderTreeView, paintTreeGitStatus } from "./components/tree-view.js";
 import { loadJvmPackageTree } from "./services/java-project.js";
@@ -279,7 +280,16 @@ export function mount(container, api, _options = {}) {
     // 主视图：始终二选一 —— "files"（文件树）/ "git"（Git 变更）；由左侧入口栏顶部切换，不可都关。
     mainView: "files",
     expanded: Object.create(null),
-    selected: null,
+    // 文件树选中集合（多选）：Set<绝对路径>。空集=无选中；size>1 时右键菜单切批量操作。
+    selected: new Set(),
+    // shift 范围选择的锚点（最近一次普通/ctrl 点击的路径）。
+    selectionAnchor: null,
+    // 文件搜索：查询词、结果（宿主 searchFiles 返回）、进行中标志。
+    searchQuery: "",
+    searchResults: [],
+    searching: false,
+    // 搜索结果点击「跳行」：预览渲染后要滚动到的目标行（一次性消费）。
+    pendingRevealLine: null,
     status: "",
     copied: false,
     gitStatusMap: Object.create(null),
@@ -371,7 +381,12 @@ export function mount(container, api, _options = {}) {
     runToolbar = null;
     // 同步指示器状态随新项目刷新（getState 读 state，控制器可复用，无需销毁）。
     state.expanded = Object.create(null);
-    state.selected = null;
+    state.selected = new Set();
+    state.selectionAnchor = null;
+    state.searchQuery = "";
+    state.searchResults = [];
+    state.searching = false;
+    state.pendingRevealLine = null;
     state.contextMenu = null;
     state.confirmDialog = null;
     state.operationBusy = false;
@@ -401,12 +416,150 @@ export function mount(container, api, _options = {}) {
     };
     render();
     if (!state.rootPath) {
+      stopDirectoryWatch();
       state.status = "";
       renderToolbar();
       return;
     }
     // 先列出根目录。图标、JVM 和 Git 在树出现之后补；运行识别再等它们结束。
     await loadRoot({ followups: true });
+    startDirectoryWatch();
+  }
+
+  // ------------------------------------------------------------------
+  // 目录实时监听：文件系统变化时静默刷新「已加载」目录，保留展开态与滚动位置
+  // （对标 snow-app 资源管理器；数据源为宿主 preload 的 startDirectoryWatch / onDirectoryChanged）
+  // ------------------------------------------------------------------
+  let dirWatchPath = "";        // 当前已 startDirectoryWatch 的根路径
+  let unsubDirChanged = null;   // onDirectoryChanged 取消订阅句柄
+  let dirRefreshTimer = null;   // 变化事件防抖定时器（一次写盘可能连发多次）
+
+  /** 停止目录监听并解绑事件。 */
+  function stopDirectoryWatch() {
+    if (dirRefreshTimer) {
+      clearTimeout(dirRefreshTimer);
+      dirRefreshTimer = null;
+    }
+    if (typeof unsubDirChanged === "function") {
+      unsubDirChanged();
+      unsubDirChanged = null;
+    }
+    if (dirWatchPath) {
+      const snow = snowApi();
+      if (snow && typeof snow.stopDirectoryWatch === "function") {
+        void snow.stopDirectoryWatch(dirWatchPath).catch(() => undefined);
+      }
+      dirWatchPath = "";
+    }
+  }
+
+  /**
+   * 启动目录监听：仅监听工作区根目录，事件到达后刷新「已加载」目录（含根）。
+   * @description 只刷新已经展开过、已读盘过的目录，未加载目录不主动读盘（惰性展开语义不变）；
+   *   变更事件做 250ms 防抖，避免一次写盘触发的连发事件反复读盘。宿主未提供能力时静默降级。
+   */
+  function startDirectoryWatch() {
+    stopDirectoryWatch();
+    if (disposed || !state.rootPath) return;
+    const snow = snowApi();
+    if (!snow || typeof snow.startDirectoryWatch !== "function" || typeof snow.onDirectoryChanged !== "function") {
+      return;
+    }
+    dirWatchPath = state.rootPath;
+    void snow.startDirectoryWatch(dirWatchPath).catch(() => undefined);
+    unsubDirChanged = snow.onDirectoryChanged((changedPath) => {
+      if (disposed) return;
+      const root = state.rootPath;
+      if (!root) return;
+      const changedKey = pathKey(changedPath);
+      // 只关心当前工作区内的变化（宿主 watcher 可能推送其它项目的路径）。
+      if (changedPath && changedKey !== pathKey(root) && !changedKey.startsWith(pathKey(root) + "/")) {
+        return;
+      }
+      if (dirRefreshTimer) clearTimeout(dirRefreshTimer);
+      dirRefreshTimer = setTimeout(() => {
+        dirRefreshTimer = null;
+        void refreshLoadedDirectories();
+      }, 250);
+    });
+  }
+
+  /** 收集所有「已加载」目录路径：根 + 每个已展开且已加载子项的目录（前序，浅层在前）。 */
+  function collectLoadedDirPaths() {
+    const paths = [];
+    if (state.rootPath) paths.push(state.rootPath);
+    const walk = (nodes) => {
+      if (!Array.isArray(nodes)) return;
+      for (const entry of nodes) {
+        if (entry && entry.isDirectory && state.expanded[entry.path] && Array.isArray(entry.children)) {
+          paths.push(entry.path);
+          walk(entry.children);
+        }
+      }
+    };
+    walk(state.rootNodes);
+    return paths;
+  }
+
+  /**
+   * 用新读取的直接子项替换目录 children，但保留同名子目录已加载的更深层 children。
+   * @description 刷新根目录时新节点是全新对象；若不迁移旧 children，所有已展开子目录会丢展开态。
+   * @param {Array} newNodes 新读取并排序过滤后的条目
+   * @param {Array} oldNodes 旧的同级条目（用于迁移已加载 children）
+   * @returns {Array} 合并后的条目
+   */
+  function mergeLoadedChildren(newNodes, oldNodes) {
+    const oldByKey = new Map();
+    if (Array.isArray(oldNodes)) {
+      for (const node of oldNodes) {
+        if (node && node.path) oldByKey.set(pathKey(node.path), node);
+      }
+    }
+    return newNodes.map((node) => {
+      const previous = oldByKey.get(pathKey(node.path));
+      if (previous && node.isDirectory && Array.isArray(previous.children)) {
+        return { ...node, children: previous.children };
+      }
+      return node;
+    });
+  }
+
+  /**
+   * 静默刷新所有已加载目录：重新读取直接子项，就地替换 children。
+   * @description 不重建整棵树，只重渲染列表（renderTree 自身保留 scrollTop）；保留展开态与选中态。
+   */
+  async function refreshLoadedDirectories() {
+    if (disposed || !state.rootPath) return;
+    const root = state.rootPath;
+    const dirPaths = collectLoadedDirPaths();
+    for (const dirPath of dirPaths) {
+      try {
+        const entries = await readDirectoryEntries(dirPath);
+        if (disposed || pathKey(root) !== pathKey(state.rootPath)) return;
+        if (pathKey(dirPath) === pathKey(root)) {
+          await appendGitignoreFromEntries(dirPath, entries);
+          if (disposed || pathKey(root) !== pathKey(state.rootPath)) return;
+          const nextNodes = sortEntries(filterExcludedEntries(entries, root, viewFilterOpts()));
+          state.rootNodes = mergeLoadedChildren(nextNodes, state.rootNodes);
+        } else {
+          const node = findTreeEntry(state.rootNodes, dirPath);
+          if (!node || !node.isDirectory) continue;
+          await appendGitignoreFromEntries(dirPath, entries);
+          const nextChildren = sortEntries(filterExcludedEntries(entries, root, viewFilterOpts()));
+          node.children = mergeLoadedChildren(nextChildren, node.children);
+        }
+      } catch {
+        // 目录可能已被删除或暂时不可读：跳过，不打断其它目录的刷新。
+      }
+    }
+    if (disposed) return;
+    renderTree();
+    // 已展开目录的 .gitignore 可能变化：刷新后重算 Git 染色（轻量，不重建树）。
+    paintTreeGitStatus(layoutEls && layoutEls.treePane, {
+      rootPath: state.rootPath,
+      gitStatusMap: state.gitStatusMap,
+      t,
+    });
   }
 
   // 刷新 JVM 项目识别结果：与目录树并行，避免阻塞 Git 状态刷新。
@@ -1126,7 +1279,10 @@ export function mount(container, api, _options = {}) {
       expanded[remapPath(path, oldPath, newPath)] = state.expanded[path];
     }
     state.expanded = expanded;
-    state.selected = remapPath(state.selected, oldPath, newPath);
+    const nextSelected = new Set();
+    for (const path of state.selected) nextSelected.add(remapPath(path, oldPath, newPath));
+    state.selected = nextSelected;
+    if (state.selectionAnchor) state.selectionAnchor = remapPath(state.selectionAnchor, oldPath, newPath);
     if (state.preview && state.preview.path) {
       state.preview.path = remapPath(state.preview.path, oldPath, newPath);
       state.preview.name = basename(state.preview.path);
@@ -1176,6 +1332,19 @@ export function mount(container, api, _options = {}) {
     closeContextMenu();
     const result = await runSystemWriteAction("showItemInFolder", { path: entry.path });
     if (result.ok !== true) setOperationStatus(false, result.error);
+  }
+
+  /** 读取宿主 preload API（window.snow）；插件沙箱内完整可用。 */
+  function snowApi() {
+    return typeof window !== "undefined" ? window.snow : null;
+  }
+
+  /** 在终端中打开：目录→该目录；文件→其所在目录（与系统「在此处打开终端」一致）。 */
+  function handleOpenInTerminal(entry) {
+    if (!entry || state.operationBusy) return;
+    closeContextMenu();
+    const target = entry.isDirectory ? entry.path : parentDirectoryPath(entry.path);
+    handleNewTerminal({ cwd: target || state.rootPath, mode: "terminal" });
   }
 
   async function handleGitRevealFile(file) {
@@ -1261,8 +1430,20 @@ export function mount(container, api, _options = {}) {
   function handleDelete(entry) {
     if (!entry || state.operationBusy || state.confirmDialog) return;
 
+    // 多选（选中集合含该条目且不止一个）：右键菜单切批量删除。
+    const isMulti = state.selected.size > 1 && state.selected.has(entry.path);
     // 菜单先同步移除，再显示插件内的异步确认弹窗，避免阻塞宿主渲染线程。
     closeContextMenu();
+    if (isMulti) {
+      const count = state.selected.size;
+      openConfirmDialog({
+        title: t("action.delete", "删除"),
+        message: t("action.deleteSelectedConfirm", "确定删除选中的 {{count}} 项吗？此操作不可撤销。", { count }),
+        confirmLabel: t("action.delete", "删除"),
+        onConfirm: () => deleteSelectedEntries(),
+      });
+      return;
+    }
     openConfirmDialog({
       title: t("action.delete", "删除"),
       message: t("action.deleteConfirm", "确定删除“{{name}}”吗？此操作不可撤销。", {
@@ -1299,6 +1480,48 @@ export function mount(container, api, _options = {}) {
     }
   }
 
+  /** 若当前预览文件位于被删除路径之下，则清空预览（避免继续显示已不存在的内容）。 */
+  function resetPreviewForDeletedPaths(deletedPaths) {
+    const currentPath = state.preview && state.preview.path;
+    if (!currentPath) return false;
+    const currentKey = pathKey(currentPath);
+    const hit = deletedPaths.some((p) => {
+      const dk = pathKey(p);
+      return currentKey === dk || currentKey.startsWith(dk + "/");
+    });
+    if (!hit) return false;
+    state.preview = {
+      kind: "empty",
+      name: "",
+      path: "",
+      text: "",
+      highlightedHtml: "",
+      isMarkdown: false,
+      mode: "preview",
+      html: "",
+      editable: false,
+      saveState: "idle",
+      saveMessage: "",
+    };
+    renderPreview();
+    return true;
+  }
+
+  /** 从选中集合与 shift 锚点中移除被删除路径及其子路径。 */
+  function pruneSelectionForDeletedPaths(deletedPaths) {
+    const keys = deletedPaths.map(pathKey);
+    const hit = (p) => {
+      const pk = pathKey(p);
+      return keys.some((dk) => pk === dk || pk.startsWith(dk + "/"));
+    };
+    const next = new Set();
+    for (const p of state.selected) {
+      if (!hit(p)) next.add(p);
+    }
+    state.selected = next;
+    if (state.selectionAnchor && hit(state.selectionAnchor)) state.selectionAnchor = null;
+  }
+
   async function deleteEntry(entry) {
     if (!entry || state.operationBusy) return;
 
@@ -1315,30 +1538,59 @@ export function mount(container, api, _options = {}) {
         return;
       }
 
-      const selectedPath = pathKey(state.selected);
-      const deletedPath = pathKey(entry.path);
-      if (selectedPath && (selectedPath === deletedPath || selectedPath.startsWith(`${deletedPath}/`))) {
-        // 删除当前预览文件或其父目录时，不能继续显示已经不存在的内容。
-        state.selected = null;
-        state.preview = {
-          kind: "empty",
-          name: "",
-          path: "",
-          text: "",
-          highlightedHtml: "",
-          isMarkdown: false,
-          mode: "preview",
-          html: "",
-          editable: false,
-          saveState: "idle",
-          saveMessage: "",
-        };
-        renderPreview();
-      }
+      resetPreviewForDeletedPaths([entry.path]);
+      pruneSelectionForDeletedPaths([entry.path]);
 
       await refreshFileTreeAfterMutation();
       await refreshGitAll();
       setOperationStatus(true);
+    } catch (err) {
+      if (!disposed) {
+        setOperationStatus(false, err && err.message ? err.message : String(err));
+      }
+    } finally {
+      if (!disposed) {
+        state.operationBusy = false;
+        renderToolbar();
+        renderTree();
+      }
+    }
+  }
+
+  /** 批量删除当前选中条目：单次 IPC 调宿主批量接口，部分失败时提示失败数量。 */
+  async function deleteSelectedEntries() {
+    if (state.operationBusy) return;
+    const paths = Array.from(state.selected);
+    if (!paths.length) return;
+
+    state.operationBusy = true;
+    renderToolbar();
+    renderTree();
+
+    try {
+      const result = await deleteFileSystemEntries(api, state.rootPath, paths);
+      if (disposed) return;
+
+      if (result.ok !== true) {
+        setOperationStatus(false, result.error);
+        return;
+      }
+
+      const data = result.data || {};
+      const deleted = Array.isArray(data.deleted) ? data.deleted : [];
+      const failed = Array.isArray(data.failed) ? data.failed : [];
+      if (deleted.length) {
+        resetPreviewForDeletedPaths(deleted);
+        pruneSelectionForDeletedPaths(deleted);
+      }
+
+      await refreshFileTreeAfterMutation();
+      await refreshGitAll();
+      if (failed.length) {
+        setOperationStatus(false, t("action.batchDeletePartial", "{{count}} 项删除失败", { count: failed.length }));
+      } else {
+        setOperationStatus(true);
+      }
     } catch (err) {
       if (!disposed) {
         setOperationStatus(false, err && err.message ? err.message : String(err));
@@ -1569,6 +1821,23 @@ export function mount(container, api, _options = {}) {
           input.select();
         }
       }, 0);
+    } else if (entry && state.selected.size > 1 && state.selected.has(entry.path)) {
+      // 多选批量操作模式：复制 N 条路径（换行分隔）/ 删除 N 项（单次 IPC 批量删除）。
+      const count = state.selected.size;
+      addItem(
+        t("action.copySelectedPaths", "复制 {{count}} 条路径", { count }),
+        () => {
+          closeContextMenu();
+          void copyPathText(Array.from(state.selected).join("\n"));
+        },
+        disabled,
+      );
+      separator();
+      addItem(
+        t("action.deleteSelected", "删除 {{count}} 项", { count }),
+        () => handleDelete(entry),
+        disabled,
+      );
     } else if (!entry) {
       // 空白区右键：无具体条目，仅提供工作区级操作（刷新 / 打开工作区 / 复制工作区路径）
       addItem(t("action.refresh", "刷新"), () => handleRefresh(), disabled);
@@ -1594,7 +1863,9 @@ export function mount(container, api, _options = {}) {
         disabled,
       );
       separator();
+      addItem(t("action.openInTerminal", "在终端中打开"), () => handleOpenInTerminal(entry), disabled);
       addItem(t("action.revealInExplorer", "在资源管理器中打开"), () => handleRevealInExplorer(entry), disabled);
+      separator();
       addItem(t("action.copyPath", "复制路径"), () => copyPathText(entry.path), disabled);
       addItem(
         t("action.copyRelativePath", "复制相对路径"),
@@ -1624,8 +1895,63 @@ export function mount(container, api, _options = {}) {
     menu.style.top = `${top}px`;
   }
 
+  /** 文件树多选：普通=单选并置锚点；ctrl/cmd=切换；shift=从锚点按可见顺序范围选择。 */
+  function handleTreeSelectionChange({ path, additive, range, visiblePaths }) {
+    if (range) {
+      const anchor = state.selectionAnchor;
+      const anchorIndex = anchor ? visiblePaths.indexOf(anchor) : -1;
+      const currentIndex = visiblePaths.indexOf(path);
+      if (anchorIndex >= 0 && currentIndex >= 0) {
+        const from = Math.min(anchorIndex, currentIndex);
+        const to = Math.max(anchorIndex, currentIndex);
+        state.selected = new Set(visiblePaths.slice(from, to + 1));
+      } else {
+        state.selected = new Set([path]);
+        state.selectionAnchor = path;
+      }
+      applyTreeSelectionHighlight();
+      return;
+    }
+    if (additive) {
+      const next = new Set(state.selected);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      state.selected = next;
+      state.selectionAnchor = path;
+      applyTreeSelectionHighlight();
+      return;
+    }
+    state.selected = new Set([path]);
+    state.selectionAnchor = path;
+    applyTreeSelectionHighlight();
+  }
+
+  /** 文件树键盘：Ctrl/Cmd+A 全选可见行、Escape 清空选择。 */
+  function handleTreeKeyDown(event, visiblePaths) {
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "a") {
+      event.preventDefault();
+      state.selected = new Set(Array.isArray(visiblePaths) ? visiblePaths : []);
+      state.selectionAnchor =
+        visiblePaths && visiblePaths.length ? visiblePaths[visiblePaths.length - 1] : null;
+      applyTreeSelectionHighlight();
+      return;
+    }
+    if (event.key === "Escape") {
+      state.selected = new Set();
+      state.selectionAnchor = null;
+      applyTreeSelectionHighlight();
+    }
+  }
+
   function handleContextMenu(entry, x, y) {
     if (state.operationBusy || state.confirmDialog) return;
+    // 右键多选区域中的条目时保留整个选中集合；右键未选中条目则单选它。
+    if (entry) {
+      const next = state.selected.has(entry.path) ? state.selected : new Set([entry.path]);
+      state.selected = next;
+      state.selectionAnchor = entry.path;
+      applyTreeSelectionHighlight();
+    }
     state.contextMenu = { entry, x, y };
     renderContextMenu();
   }
@@ -2556,11 +2882,204 @@ export function mount(container, api, _options = {}) {
     };
   }
 
+  /**
+   * 双击文件：打开该文件并直接进入快速编辑（复用右侧预览的内联编辑态）。
+   * @description 单击已负责打开预览；双击在此之上叠加「进入编辑」，避免新增独立弹窗组件。
+   *   二进制 / 图片 / 非文本预览不支持编辑，setPreviewEditable 内部会拒绝。
+   */
+  async function handleOpenFileEdit(entry) {
+    if (!entry || entry.isDirectory || state.operationBusy) return;
+    await previewFile(entry);
+    if (disposed || !state.preview || pathKey(state.preview.path) !== pathKey(entry.path)) return;
+    if (state.preview.kind !== "text") return;
+    setPreviewEditable(true);
+  }
+
+  // ------------------------------------------------------------------
+  // 文件搜索：宿主 searchFiles 同时搜索文件名与文件内容，300ms 防抖 + 序列号防过期
+  // （对标 snow-app 资源管理器；搜索模式下文件树替换为结果列表）
+  // ------------------------------------------------------------------
+  let searchTimer = null;
+  let searchSeq = 0;
+
+  /** 搜索框输入：防抖调用宿主 searchFiles；空查询即退出搜索模式。 */
+  function handleSearchInput(value) {
+    state.searchQuery = String(value ?? "");
+    if (searchTimer) {
+      clearTimeout(searchTimer);
+      searchTimer = null;
+    }
+    const query = state.searchQuery.trim();
+    if (!query || !state.rootPath) {
+      state.searching = false;
+      state.searchResults = [];
+      renderTree();
+      return;
+    }
+    state.searching = true;
+    renderTree();
+    const seq = ++searchSeq;
+    const root = state.rootPath;
+    searchTimer = setTimeout(async () => {
+      searchTimer = null;
+      const snow = snowApi();
+      let results = [];
+      if (snow && typeof snow.searchFiles === "function") {
+        try {
+          results = await snow.searchFiles(root, query);
+        } catch {
+          results = [];
+        }
+      }
+      if (disposed || seq !== searchSeq || pathKey(root) !== pathKey(state.rootPath)) return;
+      // 开启「按 .gitignore 过滤」时，搜索结果同样排除元数据项（.git 等）与被 .gitignore 命中的项。
+      // 说明：宿主 searchFiles 无排除参数、且其遍历不读 .gitignore，插件只能在结果上过滤；
+      // 这不会减少宿主的磁盘扫描量（搜索前的剪枝需要改宿主 Rust 侧）。
+      let list = Array.isArray(results) ? results : [];
+      if (state.viewSettings.respectGitignore) {
+        list = filterExcludedEntries(list, root, viewFilterOpts());
+      }
+      state.searchResults = list;
+      state.searching = false;
+      renderTree();
+    }, 300);
+  }
+
+  /** 退出搜索模式：清空查询、结果与防抖计时器，恢复文件树。 */
+  function clearSearch() {
+    if (searchTimer) {
+      clearTimeout(searchTimer);
+      searchTimer = null;
+    }
+    searchSeq++;
+    state.searchQuery = "";
+    state.searchResults = [];
+    state.searching = false;
+    // 必须同步清空输入框：否则框里仍留着关键词，看上去像「点了没反应」。
+    if (layoutEls && layoutEls.searchInput) layoutEls.searchInput.value = "";
+    renderTree();
+  }
+
+  /** 点击搜索结果：选中该文件、退出搜索、打开预览，并把侧边栏与代码都定位到目标（行）。 */
+  async function handleSearchResultOpen(result, line) {
+    if (!result || !result.path) return;
+    state.selected = new Set([result.path]);
+    state.selectionAnchor = result.path;
+    const target = {
+      name: result.name || basename(result.path),
+      path: result.path,
+      isDirectory: !!result.isDirectory,
+    };
+    // 必须先 await 展开祖先目录：否则下面重建的树里没有该行，侧边栏无法定位。
+    await expandTreeToPath(target.path);
+    if (disposed) return;
+    clearSearch();
+    // 文件树已重建且目标行已存在：把侧边栏滚动到该行（选中高亮由 .selected 承担）。
+    scrollTreeToSelected();
+    if (target.isDirectory) return;
+    if (typeof line === "number") state.pendingRevealLine = line;
+    void previewFile(target);
+  }
+
+  /**
+   * 展开目标文件的所有祖先目录，使其在文件树中可见。
+   * @description 从根逐级在真实树里找到对应目录条目并 loadDirectoryChildren（写回 entry.children），
+   *   再置 expanded；只处理缺失的层级，某级不可读时静默中止，不影响预览打开。
+   */
+  async function expandTreeToPath(targetPath) {
+    if (!state.rootPath) return;
+    const rootKey = pathKey(state.rootPath);
+    const rootNorm = normalizePath(state.rootPath);
+    const rel = normalizePath(targetPath).slice(rootNorm.length).replace(/^[/\\]+/, "");
+    if (!rel) return;
+    const segments = rel.split(/[/\\]+/).filter(Boolean);
+    if (segments.length <= 1) return; // 目标就在根目录下，无需展开
+    let currentPath = state.rootPath;
+    for (let i = 0; i < segments.length - 1; i++) {
+      currentPath = joinPath(currentPath, segments[i]);
+      if (state.expanded[currentPath]) continue;
+      const entry = findTreeEntry(state.rootNodes, currentPath);
+      if (!entry || !entry.isDirectory) return;
+      if (!Array.isArray(entry.children)) {
+        try {
+          await loadDirectoryChildren(entry);
+        } catch {
+          entry.children = [];
+        }
+      }
+      if (disposed || pathKey(rootKey) !== pathKey(state.rootPath)) return;
+      state.expanded[currentPath] = true;
+    }
+  }
+
+  /** 把文件树滚动到当前选中行并高亮（搜索定位用；树未渲染该行时忽略）。 */
+  function scrollTreeToSelected() {
+    if (disposed || !layoutEls) return;
+    const body = layoutEls.treeBody || layoutEls.treePane;
+    if (!body || !state.selected || state.selected.size === 0) return;
+    const [selectedPath] = state.selected;
+    const row = [...body.querySelectorAll(".sfe-file-item")].find(
+      (node) => pathKey(node.dataset.path) === pathKey(selectedPath)
+    );
+    if (!row) return;
+    // 用 rect 换算相对滚动容器的偏移，避免 offsetParent 不是 treeBody 时 offsetTop 失真。
+    const bodyRect = body.getBoundingClientRect();
+    const rowRect = row.getBoundingClientRect();
+    const rowTop = rowRect.top - bodyRect.top + body.scrollTop;
+    const rowBottom = rowTop + rowRect.height;
+    if (rowTop < body.scrollTop) body.scrollTop = rowTop;
+    else if (rowBottom > body.scrollTop + body.clientHeight) body.scrollTop = rowBottom - body.clientHeight;
+  }
+
+  /** 预览渲染后把代码滚动容器定位到目标行（按可视行元素精确测量，兼容虚拟列表）。 */
+  function revealPreviewLine(line) {
+    if (disposed || !layoutEls || !layoutEls.previewPane) return;
+    const pane = layoutEls.previewPane;
+    const scroller = pane.querySelector(".sfe-file-viewer-code-scroll, .sfe-file-viewer-edit-scroll");
+    if (!scroller) return;
+    // 大文件走虚拟列表：只有 scrollToIndex 能定位到未渲染行。
+    const vlist = pane.__sfeVList;
+    if (vlist && typeof vlist.scrollToIndex === "function") {
+      vlist.scrollToIndex(line - 1);
+      return;
+    }
+    // 整块高亮态：行号槽逐行有元素，按行号取真实元素定位最准。
+    const gutterRow = pane.querySelector(`.sfe-file-viewer-gutter-row:nth-child(${line})`);
+    if (gutterRow) {
+      scroller.scrollTop = Math.max(0, gutterRow.offsetTop - 4);
+      return;
+    }
+    // 编辑态：按 textarea 行高换算（textarea 高度贴合内容）。
+    const textarea = pane.querySelector(".sfe-file-viewer-textarea");
+    if (textarea) {
+      let lh = 20;
+      try {
+        const parsed = parseFloat(window.getComputedStyle(textarea).lineHeight);
+        if (parsed > 0) lh = parsed;
+      } catch {
+        /* 测试环境可能无 getComputedStyle */
+      }
+      scroller.scrollTop = Math.max(0, (line - 1) * lh);
+      return;
+    }
+    let lineHeight = 20;
+    try {
+      const probe = pane.querySelector(".sfe-file-viewer-code-content");
+      const parsed = probe ? parseFloat(window.getComputedStyle(probe).lineHeight) : NaN;
+      if (parsed > 0) lineHeight = parsed;
+    } catch {
+      /* 测试环境可能无 getComputedStyle：沿用默认行高 */
+    }
+    scroller.scrollTop = Math.max(0, (line - 1) * lineHeight);
+  }
+
   // 5. 选中并预览文件
   async function previewFile(entry) {
     const requestId = ++previewRequestId;
     saveRequestId++;
-    state.selected = entry.path;
+    // 单选打开：选中集合收敛为当前文件。
+    state.selected = new Set([entry.path]);
+    state.selectionAnchor = entry.path;
     // 终端占着右侧时先让回底栏，这次点击的文件才能显示在代码预览里。
     yieldRightDockToCode();
 
@@ -2590,15 +3109,24 @@ export function mount(container, api, _options = {}) {
 
     try {
       const result = await readFileContent(entry.path);
-      if (disposed || requestId !== previewRequestId || pathKey(entry.path) !== pathKey(state.selected)) return;
+      if (disposed || requestId !== previewRequestId || !state.selected.has(entry.path)) return;
       state.preview = buildFilePreview(entry, result);
       renderPreview();
+      if (state.pendingRevealLine) {
+        const line = state.pendingRevealLine;
+        state.pendingRevealLine = null;
+        if (state.preview.kind === "text") {
+          requestAnimationFrame(() => {
+            if (!disposed) revealPreviewLine(line);
+          });
+        }
+      }
       if (state.preview.kind === "text" && state.preview.isMarkdown && state.preview.mode === "preview") {
         void hydrateFileMarkdown(requestId);
       }
       return;
     } catch (err) {
-      if (disposed || requestId !== previewRequestId || pathKey(entry.path) !== pathKey(state.selected)) return;
+      if (disposed || requestId !== previewRequestId || !state.selected.has(entry.path)) return;
       state.preview = {
         kind: "error",
         name: entry.name,
@@ -3003,6 +3531,43 @@ export function mount(container, api, _options = {}) {
     const treePane = el("div", "sfe-tree-pane");
     // 空白区右键：行内条目自行处理并阻止冒泡，其余区域在此兜底弹出工作区级菜单
     treePane.addEventListener("contextmenu", handleTreePaneContextMenu);
+
+    // 文件搜索栏（仅工作区已就绪时显示）：同时搜索文件名与文件内容。
+    const searchBar = el("div", "sfe-search-bar");
+    searchBar.hidden = !state.rootPath;
+    const searchIcon = el("span", "sfe-search-icon");
+    searchIcon.appendChild(createActionIcon("search", 13));
+    const searchInput = el("input", "sfe-search-input");
+    searchInput.type = "text";
+    searchInput.spellcheck = false;
+    searchInput.value = state.searchQuery;
+    searchInput.placeholder = t("search.placeholder", "搜索文件名或内容");
+    searchInput.setAttribute("aria-label", t("search.placeholder", "搜索文件名或内容"));
+    searchInput.addEventListener("input", () => handleSearchInput(searchInput.value));
+    searchInput.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        clearSearch();
+      }
+    });
+    const searchClear = el("button", "sfe-search-clear");
+    searchClear.type = "button";
+    searchClear.title = t("search.clear", "清除搜索");
+    searchClear.setAttribute("aria-label", t("search.clear", "清除搜索"));
+    searchClear.appendChild(createActionIcon("close", 13));
+    searchClear.hidden = !state.searchQuery;
+    searchClear.addEventListener("click", () => clearSearch());
+    searchBar.appendChild(searchIcon);
+    searchBar.appendChild(searchInput);
+    searchBar.appendChild(searchClear);
+    treePane.appendChild(searchBar);
+
+    const treeBody = el("div", "sfe-tree-body");
+    treePane.appendChild(treeBody);
+    layoutEls.treeBody = treeBody;
+    layoutEls.searchInput = searchInput;
+    layoutEls.searchClear = searchClear;
+
     mainView.appendChild(treePane);
     layoutEls.treePane = treePane;
 
@@ -3023,44 +3588,90 @@ export function mount(container, api, _options = {}) {
   }
 
   // 局部：仅切换文件树的选中行高亮，不重建 DOM
-  // @description previewFile 只改 state.selected，不重建整棵树：大目录下整树重建是卡顿根因。
-  //   选中态对文件行只是 .selected class（纯背景色），就地切换与重建后的渲染结果完全等价，
+  // @description previewFile / 多选点击只改 state.selected（Set），不重建整棵树：大目录下整树重建是卡顿根因。
+  //   选中态对行只是 .selected class（纯背景色），就地切换与重建后的渲染结果完全等价，
   //   同时天然保住滚动位置、展开态与行内事件。
   function applyTreeSelectionHighlight() {
     if (disposed || !layoutEls || !layoutEls.treePane) return;
     const pane = layoutEls.treePane;
-    const selectedKey = pathKey(state.selected);
-    pane.querySelectorAll(".sfe-file-item.selected").forEach((node) => {
-      if (pathKey(node.dataset.path) !== selectedKey) node.classList.remove("selected");
-    });
-    if (!state.selected) return;
+    const selectedKeys = new Set(Array.from(state.selected, pathKey));
     for (const node of pane.querySelectorAll(".sfe-file-item")) {
-      if (pathKey(node.dataset.path) === selectedKey) {
-        node.classList.add("selected");
-        return;
-      }
+      node.classList.toggle("selected", selectedKeys.has(pathKey(node.dataset.path)));
     }
   }
 
-  // 局部：文件树（保留滚动位置）
+  // 局部：文件树 / 搜索结果（保留滚动位置）
   function renderTree() {
     if (disposed || !layoutEls || !layoutEls.treePane) return;
-    const pane = layoutEls.treePane;
-    const scroll = pane.scrollTop;
-    renderTreeView(pane, {
-      rootPath: state.rootPath,
-      rootNodes: state.rootNodes,
-      expanded: state.expanded,
-      selected: state.selected,
-      gitStatusMap: state.gitStatusMap,
-      canList: true,
-      canRead: true,
-       onToggleDir: toggleDir,
-       onSelectFile: previewFile,
-       onContextMenu: handleContextMenu,
-       t,
-    });
-    pane.scrollTop = scroll;
+    const body = layoutEls.treeBody || layoutEls.treePane;
+    if (layoutEls.searchClear) layoutEls.searchClear.hidden = !state.searchQuery;
+    const scroll = body.scrollTop;
+    if (state.searchQuery.trim()) {
+      renderSearchResults(body);
+    } else {
+      renderTreeView(body, {
+        rootPath: state.rootPath,
+        rootNodes: state.rootNodes,
+        expanded: state.expanded,
+        selected: state.selected,
+        gitStatusMap: state.gitStatusMap,
+        canList: true,
+        canRead: true,
+        onToggleDir: toggleDir,
+        onSelectFile: previewFile,
+        onContextMenu: handleContextMenu,
+        onOpenFileEdit: handleOpenFileEdit,
+        onSelectionChange: handleTreeSelectionChange,
+        onTreeKeyDown: handleTreeKeyDown,
+        t,
+      });
+    }
+    body.scrollTop = scroll;
+  }
+
+  // 局部：搜索结果列表（文件名 + 内容行匹配；点击打开并跳行）
+  function renderSearchResults(parent) {
+    parent.replaceChildren();
+    if (state.searching && !state.searchResults.length) {
+      parent.appendChild(el("div", "sfe-empty", t("search.searching", "搜索中…")));
+      return;
+    }
+    if (!state.searchResults.length) {
+      parent.appendChild(el("div", "sfe-empty", t("search.noResults", "没有匹配结果")));
+      return;
+    }
+    const count = el(
+      "div",
+      "sfe-search-count",
+      t("search.resultCount", "{{count}} 个文件", { count: state.searchResults.length })
+    );
+    parent.appendChild(count);
+    const list = el("div", "sfe-search-results");
+    for (const result of state.searchResults) {
+      const row = el("div", "sfe-search-result");
+      row.title = result.path;
+      row.dataset.path = result.path;
+      const head = el("div", "sfe-search-result-head");
+      const iconEl = createFileIconNode(result.name, !!result.isDirectory, false);
+      head.appendChild(iconEl);
+      const info = el("div", "sfe-search-result-info");
+      info.appendChild(el("span", "sfe-search-result-name", result.name));
+      info.appendChild(el("span", "sfe-search-result-path", result.relativePath || ""));
+      head.appendChild(info);
+      head.addEventListener("click", () => handleSearchResultOpen(result));
+      row.appendChild(head);
+      // 内容匹配行：点击直接跳转到对应行号。
+      for (const match of result.lineMatches || []) {
+        const lineEl = el("div", "sfe-search-result-line");
+        lineEl.title = `${result.path}:${match.line}`;
+        lineEl.appendChild(el("span", "sfe-search-line-no", String(match.line)));
+        lineEl.appendChild(el("span", "sfe-search-line-text", match.text || ""));
+        lineEl.addEventListener("click", () => handleSearchResultOpen(result, match.line));
+        row.appendChild(lineEl);
+      }
+      list.appendChild(row);
+    }
+    parent.appendChild(list);
   }
 
   // 局部：普通文件预览
@@ -3369,8 +3980,13 @@ export function mount(container, api, _options = {}) {
     if (copiedTimer) clearTimeout(copiedTimer);
     if (operationTimer) clearTimeout(operationTimer);
     if (gitDebounceTimer) clearTimeout(gitDebounceTimer);
+    if (searchTimer) {
+      clearTimeout(searchTimer);
+      searchTimer = null;
+    }
     if (typeof unsubGit === "function") unsubGit();
     if (typeof unsubProjects === "function") unsubProjects();
+    stopDirectoryWatch();
     if (runToolbar && typeof runToolbar.dispose === "function") runToolbar.dispose();
     runToolbar = null;
     if (gitSyncIndicator && typeof gitSyncIndicator.dispose === "function") gitSyncIndicator.dispose();

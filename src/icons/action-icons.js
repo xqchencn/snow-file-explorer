@@ -40,6 +40,7 @@ import {
   Eraser,
   PanelRight,
   PanelBottom,
+  Search,
 } from 'lucide';
 import { fileIconMarkup } from "./file-icons.js";
 
@@ -86,6 +87,8 @@ const ICON_MAP = {
   // 工具窗口停靠：右侧（与代码预览同侧）/ 底栏
   panelRight: PanelRight,
   panelBottom: PanelBottom,
+  // 文件搜索栏
+  search: Search,
 };
 
 /**

@@ -12,6 +12,7 @@ import {
   relativePath,
   renameFileSystemEntry,
   deleteFileSystemEntry,
+  deleteFileSystemEntries,
 } from '../../../src/services/file-service.js';
 
 test('文件服务: basename 与 extname', () => {
@@ -182,6 +183,29 @@ test('文件服务: 删除调用使用真实工作区和条目路径，并透传
   const result = await deleteFileSystemEntry(api, 'D:/repo', 'D:/repo/a.txt');
   assert.equal(result.ok, true);
   assert.deepEqual(calls, [{ rootPath: 'D:/repo', entryPath: 'D:/repo/a.txt' }]);
+});
+
+test('文件服务: 批量删除调用 filesystem.deleteBatch 并透传删除结果', async () => {
+  const calls = [];
+  const api = {
+    write: {
+      run: async (action, params) => {
+        assert.equal(action, 'filesystem.deleteBatch');
+        calls.push(params);
+        return { ok: true, data: { deleted: ['D:/repo/a.txt'], failed: [] } };
+      },
+    },
+  };
+  const result = await deleteFileSystemEntries(api, 'D:/repo', ['D:/repo/a.txt', 'D:/repo/b.txt']);
+  assert.equal(result.ok, true);
+  assert.deepEqual(calls, [{ rootPath: 'D:/repo', entryPaths: ['D:/repo/a.txt', 'D:/repo/b.txt'] }]);
+  assert.deepEqual(result.data.deleted, ['D:/repo/a.txt']);
+});
+
+test('文件服务: 批量删除在宿主未提供能力时明确失败', async () => {
+  const result = await deleteFileSystemEntries({}, 'D:/repo', ['D:/repo/a.txt']);
+  assert.equal(result.ok, false);
+  assert.match(result.error, /未提供批量删除能力/);
 });
 
 test('JVM 检测: 根目录没有构建文件或源文件时不读取子目录', async () => {

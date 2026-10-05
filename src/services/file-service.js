@@ -141,6 +141,23 @@ export function deleteFileSystemEntry(api, rootPath, entryPath) {
 }
 
 /**
+ * 批量删除工作区文件或目录（单次 IPC，避免 N+1 次往返）。
+ * @param {Object|null} api Snow App 插件运行时 API
+ * @param {string} rootPath 工作区根目录
+ * @param {string[]} entryPaths 要删除的条目路径数组
+ * @returns {Promise<{ok: boolean, data?: unknown, error?: string}>}
+ *   data 为宿主 BatchWorkspaceDeleteResult：{ deleted: string[], failed: Array<{path, error}> }
+ */
+export function deleteFileSystemEntries(api, rootPath, entryPaths) {
+  return runWriteAction(
+    api,
+    "deleteBatch",
+    { rootPath, entryPaths: Array.isArray(entryPaths) ? entryPaths : [] },
+    "当前宿主未提供批量删除能力"
+  );
+}
+
+/**
  * 计算工作区内路径的相对路径。
  * @description 使用 Windows 分隔符做大小写不敏感的边界比较，避免把 `repo2` 误判为 `repo` 子路径。
  * @param {string} fromRoot 工作区根路径

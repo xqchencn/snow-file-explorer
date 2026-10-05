@@ -101,13 +101,27 @@ html:has(.app-shell.right-panel-fullscreen) .sfe-preview-pane {
 }
 
 
-/* 编辑态：高亮层与透明输入层叠放，输入仍由真实 textarea 处理。 */
+/* 编辑态：行号槽 + 编辑区横向排布，滚动统一由本容器提供（textarea 自身不滚动）。 */
 .sfe-file-viewer-edit-scroll {
-  position: relative;
+  display: flex;
   flex: 1;
   min-height: 0;
   overflow: auto;
   background: var(--bg-primary);
+}
+
+/* 编辑区：高亮层（absolute 铺满）与 textarea 的定位上下文。 */
+.sfe-file-viewer-edit-area {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+
+/* 编辑态行号槽：顶部 12px 抵消 textarea 的 padding-top；字号 12.5px 使行高 1.6em=20px，
+   与 textarea / 高亮层行高严格一致（否则行号与代码行错位）。 */
+.sfe-file-viewer-edit-gutter {
+  padding-top: 12px;
+  font-size: 12.5px;
 }
 
 .sfe-file-viewer-edit-highlight {
@@ -145,7 +159,9 @@ html:has(.app-shell.right-panel-fullscreen) .sfe-preview-pane {
   border: 0;
   outline: 0;
   resize: none;
-  overflow: visible;
+  /* 高度由 JS 贴合内容（见 code-viewer.js syncEditHeight），滚动统一交给外层
+     .sfe-file-viewer-edit-scroll；textarea 自身绝不能再出滚动条（否则双滚动条且内层无效）。 */
+  overflow: hidden;
   background: transparent;
   color: transparent;
   -webkit-text-fill-color: transparent;
@@ -160,11 +176,6 @@ html:has(.app-shell.right-panel-fullscreen) .sfe-preview-pane {
 .sfe-file-viewer-textarea::selection {
   background: var(--selection-bg);
   color: transparent;
-}
-
-.sfe-file-viewer-textarea:focus {
-  outline: 1px solid var(--accent-color, var(--border-color));
-  outline-offset: -1px;
 }
 
 

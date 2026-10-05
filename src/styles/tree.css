@@ -5,10 +5,162 @@
 
 /* 目录树面板 */
 .sfe-tree-pane {
-  overflow: auto;
+  display: flex;
+  flex-direction: column;
   padding: 4px 0;
   background: var(--bg-primary);
   flex: 1;
+  /* 关键：作为 .sfe-main-view（row flex）的子项，默认 min-width:auto 会被内容最小宽度撑破，
+     非全屏（宽度受限）时导致横向溢出；必须置 0 才能被压缩。 */
+  min-width: 0;
+  min-height: 0;
+}
+
+/* 树主体滚动区（搜索栏固定在顶部，只有这里滚动） */
+.sfe-tree-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+/* 文件搜索栏：同时搜索文件名与文件内容 */
+.sfe-search-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 6px 4px;
+  padding: 4px 8px;
+  border: 1px solid var(--border-color, var(--border-light));
+  border-radius: var(--radius-sm, 4px);
+  background: var(--bg-primary);
+  flex-shrink: 0;
+}
+
+.sfe-search-bar:focus-within {
+  border-color: var(--accent-color);
+}
+
+.sfe-search-icon {
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.sfe-search-input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 12px;
+}
+
+.sfe-search-clear {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm, 4px);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.sfe-search-clear:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+/* 搜索结果列表 */
+.sfe-search-count {
+  padding: 4px 10px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.sfe-search-results {
+  display: flex;
+  flex-direction: column;
+}
+
+.sfe-search-result {
+  padding: 3px 8px;
+  border-bottom: 1px solid var(--border-color, var(--border-light));
+}
+
+.sfe-search-result-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 4px;
+  border-radius: var(--radius-sm, 4px);
+  cursor: pointer;
+}
+
+.sfe-search-result-head:hover {
+  background: var(--bg-hover);
+}
+
+.sfe-search-result-info {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+
+.sfe-search-result-name {
+  font-size: 12px;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sfe-search-result-path {
+  font-size: 10px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sfe-search-result-line {
+  display: flex;
+  gap: 8px;
+  padding: 2px 4px 2px 22px;
+  border-radius: var(--radius-sm, 4px);
+  font-size: 11px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.sfe-search-result-line:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.sfe-search-line-no {
+  flex-shrink: 0;
+  min-width: 26px;
+  text-align: right;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
+.sfe-search-line-text {
+  /* flex 子项默认 min-width:auto，长行不会被压缩出省略号，反而把容器顶宽 → 必须置 0。 */
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* 全屏状态下限制目录树宽度在标准侧栏范围内，给预览区留出最大视野
@@ -27,6 +179,11 @@ html:has(.app-shell.right-panel-fullscreen) .sfe-tree-pane {
 .sfe-list {
   display: flex;
   flex-direction: column;
+}
+
+/* 树容器可编程聚焦以接收 Ctrl+A / Escape，但不显示焦点描边。 */
+.sfe-list:focus {
+  outline: none;
 }
 
 /* 单行条目样式（对标 .git-file-item） */
@@ -119,6 +276,12 @@ html:has(.app-shell.right-panel-fullscreen) .sfe-tree-pane {
   font-family: var(--font-mono);
 }
 
+/* 文件大小仅在 hover 时显示，让常态行更干净（对标 VS Code / snow-app 资源管理器）。
+   用 visibility 而非 display，保留占位避免 hover 时行内容抖动。 */
+.sfe-file-item:not(:hover) .sfe-file-size {
+  visibility: hidden;
+}
+
 /* Java 虚拟包节点：颜色略偏主题强调色，保留普通文件夹行为 */
 .sfe-java-package-row .sfe-file-name {
   color: var(--text-primary);
@@ -176,7 +339,7 @@ html:has(.app-shell.right-panel-fullscreen) .sfe-tree-pane {
   opacity: 0.4;
 }
 
-/* Git 状态字母徽章 (M / U / A / D / R) */
+/* Git 状态字母徽章 (M / U / A / D / R)：常显（仅位置移到文件大小之后）。 */
 .sfe-git-badge {
   display: inline-flex;
   align-items: center;

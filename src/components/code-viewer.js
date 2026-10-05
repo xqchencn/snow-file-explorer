@@ -613,9 +613,29 @@ export function renderCodeViewer(
     }
 
     if (editable) {
-      // 编辑态使用高亮层 + 透明文字 textarea：textarea 负责真实输入，高亮层只负责显示。
-      // 同时复用 sfe-file-viewer-code 作用域，使现有语法 token 配色覆盖编辑层。
+      // 编辑态结构（对标只读态）：
+      //   editScroll（唯一滚动容器，flex 横排）
+      //     ├─ 行号槽（sticky left，按行数生成，输入时同步刷新）
+      //     └─ editArea（relative）
+      //          ├─ editHighlight（absolute 铺满，语法高亮，只负责显示）
+      //          └─ textarea（透明文字，高度贴合内容，负责真实输入）
       const editScroll = el("div", "sfe-file-viewer-edit-scroll");
+
+      // 行号槽：与只读态共用 .sfe-file-viewer-gutter-row / -gutter-no，保证行高与对齐一致。
+      // sfe-file-viewer-edit-gutter 只补顶部 12px 内边距，抵消 textarea 的 padding-top，使行号与代码行对齐。
+      const gutter = el("div", "sfe-file-viewer-line-numbers sfe-file-viewer-edit-gutter");
+      const buildGutter = (lineCount) => {
+        const frag = document.createDocumentFragment();
+        for (let i = 1; i <= lineCount; i++) {
+          const row = el("div", "sfe-file-viewer-gutter-row");
+          row.appendChild(el("span", "sfe-file-viewer-gutter-no", String(i)));
+          frag.appendChild(row);
+        }
+        gutter.replaceChildren(frag);
+      };
+      const countLines = (value) => String(value ?? "").split(/\r\n|\r|\n/).length;
+
+      const editArea = el("div", "sfe-file-viewer-edit-area");
       const editHighlight = el("pre", "sfe-file-viewer-edit-highlight sfe-file-viewer-code");
       editHighlight.setAttribute("aria-hidden", "true");
       let editHighlightTimer = 0;
@@ -655,14 +675,26 @@ export function renderCodeViewer(
       textarea.wrap = "off";
       textarea.spellcheck = false;
       textarea.setAttribute("aria-label", t("action.edit", "编辑文件"));
+      // 高度贴合内容：textarea 自身不滚动，滚动条只由外层 editScroll 提供，
+      // 否则 Chromium 会把 overflow:visible 的 textarea 当 auto，出现「双滚动条」且内层那条滚不动高亮层。
+      const syncEditHeight = () => {
+        textarea.style.height = "auto";
+        textarea.style.height = `${textarea.scrollHeight}px`;
+      };
+      buildGutter(countLines(textarea.value));
       if (typeof onEditInput === "function") {
         textarea.addEventListener("input", () => {
+          syncEditHeight();
+          buildGutter(countLines(textarea.value));
           updateEditHighlight(textarea.value);
           onEditInput(textarea.value);
         });
       }
-      editScroll.appendChild(editHighlight);
-      editScroll.appendChild(textarea);
+      editArea.appendChild(editHighlight);
+      editArea.appendChild(textarea);
+      editScroll.appendChild(gutter);
+      editScroll.appendChild(editArea);
+      syncEditHeight();
       bodyEl.appendChild(editScroll);
     } else {
       // 只读态：小文件整块高亮；大文件用窗口化虚拟列表，只渲染可视行。
