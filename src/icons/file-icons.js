@@ -5,14 +5,28 @@
  */
 
 import { el } from "../utils/dom.js";
-import {
-  EXT_ICONS,
-  NAME_ICONS,
-  ICON_SVGS,
-  FILE,
-  FOLDER,
-  FOLDER_OPEN,
-} from "./icon-data.js";
+
+// 图标数据在 chunks/icons.js，打开面板后安装。安装前退回无 SVG 的占位，避免入口打包整套图标。
+let EXT_ICONS = Object.create(null);
+let NAME_ICONS = Object.create(null);
+let ICON_SVGS = Object.create(null);
+let FILE = "file";
+let FOLDER = "folder";
+let FOLDER_OPEN = "folder-open";
+
+/**
+ * 安装全部文件图标数据。
+ * @param {Object|null} mod chunks/icons.js 的导出
+ */
+export function installFileIcons(mod) {
+  if (!mod || !mod.ICON_SVGS) return;
+  EXT_ICONS = mod.EXT_ICONS || EXT_ICONS;
+  NAME_ICONS = mod.NAME_ICONS || NAME_ICONS;
+  ICON_SVGS = mod.ICON_SVGS;
+  FILE = mod.FILE || FILE;
+  FOLDER = mod.FOLDER || FOLDER;
+  FOLDER_OPEN = mod.FOLDER_OPEN || FOLDER_OPEN;
+}
 
 /**
  * 解析文件名对应的图标 id
@@ -54,4 +68,13 @@ export function createFileIconNode(fileName, isDir, isExpanded) {
     span.innerHTML = svg;
   }
   return span;
+}
+
+/**
+ * 取已安装图标的 SVG 文本。动作图标里的品牌图标（go / wails / nodejs）与文件树共用这一份。
+ * @param {string} id 图标 id
+ * @returns {string}
+ */
+export function fileIconMarkup(id) {
+  return ICON_SVGS[id] || "";
 }

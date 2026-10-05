@@ -36,25 +36,60 @@ async function runBuild() {
 
   const jsEntry = path.join(srcDir, 'index.js');
   const distJsOut = path.join(distDir, 'index.js');
+  const chunksDir = path.join(distDir, 'chunks');
 
   const cssEntry = path.join(srcDir, 'index.css');
   const distCssOut = path.join(distDir, 'index.css');
 
-  // 2. 打包并深度压缩 JavaScript (自包含 ESM)
-  console.log('📦 [Build] 打包并压缩 JavaScript -> dist/index.js...');
-  await esbuild.build({
-    entryPoints: [jsEntry],
-    bundle: true,
-    minify: true,
-    format: 'esm',
-    target: ['es2020', 'chrome80', 'node18'],
-    outfile: distJsOut,
-    treeShaking: true,
-    legalComments: 'none',
-  });
+  fs.mkdirSync(chunksDir, { recursive: true });
+
+  // 入口构建把源码兜底加载器换成空实现，避免 Prism / 图标 / xterm / marked 被打进 index.js。
+  // 宿主用 blob URL 加载入口，相对 import 无法指向这些 chunk，所以每个 chunk 必须自包含。
+  const stubSourceChunk = {
+    name: 'stub-source-chunk',
+    setup(build) {
+      build.onResolve({ filter: /lazy-chunk-source\.js$/ }, (args) => {
+        const importer = String(args.importer || "").replace(/\\/g, "/");
+        if (importer.endsWith("/lazy-chunk.js")) {
+          return { path: "sfe-lazy-source-stub", namespace: "sfe-stub" };
+        }
+        return null;
+      });
+      build.onLoad({ filter: /.*/, namespace: 'sfe-stub' }, () => ({
+        contents: 'export function loadSourceChunk(){ return null; }\n',
+        loader: 'js',
+      }));
+    },
+  };
+
+  async function bundleScript(entry, outfile, plugins = []) {
+    await esbuild.build({
+      entryPoints: [entry],
+      bundle: true,
+      minify: true,
+      format: 'esm',
+      target: ['es2020', 'chrome80', 'node18'],
+      outfile,
+      treeShaking: true,
+      legalComments: 'none',
+      plugins,
+    });
+  }
+
+  // 2. 打包入口与按需块。块之间互不引用，宿主用 readPluginFile 单独加载。
+  console.log('📦 [Build] 打包并压缩 JavaScript -> dist/index.js + dist/chunks/...');
+  await bundleScript(jsEntry, distJsOut, [stubSourceChunk]);
+  await bundleScript(path.join(srcDir, 'lazy', 'icons.js'), path.join(chunksDir, 'icons.js'));
+  await bundleScript(path.join(srcDir, 'lazy', 'highlighter.js'), path.join(chunksDir, 'highlighter.js'));
+  await bundleScript(path.join(srcDir, 'lazy', 'terminal.js'), path.join(chunksDir, 'terminal.js'));
+  await bundleScript(path.join(srcDir, 'lazy', 'markdown.js'), path.join(chunksDir, 'markdown.js'));
 
   const jsStat = fs.statSync(distJsOut);
-  console.log(`✅ [Build] JavaScript 打包压缩完成: ${(jsStat.size / 1024).toFixed(1)} KB`);
+  console.log(`✅ [Build] 入口打包完成: ${(jsStat.size / 1024).toFixed(1)} KB`);
+  for (const name of ['icons.js', 'highlighter.js', 'terminal.js', 'markdown.js']) {
+    const stat = fs.statSync(path.join(chunksDir, name));
+    console.log(`✅ [Build] chunks/${name}: ${(stat.size / 1024).toFixed(1)} KB`);
+  }
 
   // 3. 打包并深度压缩 CSS
   console.log('🎨 [Build] 打包并压缩 CSS -> dist/index.css...');

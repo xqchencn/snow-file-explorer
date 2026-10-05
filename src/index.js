@@ -7,7 +7,6 @@ import { el, copyToClipboard } from "./utils/dom.js";
 import { createActionIcon } from "./icons/action-icons.js";
 import {
   basename,
-  extname,
   sortEntries,
   readDirectoryEntries,
   readFileContent,
@@ -19,7 +18,6 @@ import {
   detectJvmProject,
 } from "./services/file-service.js";
 import {
-  fetchGitStatusMap,
   subscribeGitStatus,
   getRelativeGitPath,
   getGitStatus,
@@ -27,8 +25,10 @@ import {
   gitStatusSignature,
   collectGitFolderPaths,
 } from "./services/git-service.js";
-import { highlightCodeHtml, isLargeText } from "./components/highlighter.js";
-import { renderMarkdownHtml } from "./components/markdown-renderer.js";
+import { shouldVirtualize } from "./components/highlight-policy.js";
+import { loadChunk } from "./services/lazy-chunk.js";
+import { installFileIcons } from "./icons/file-icons.js";
+import { mapPool } from "./utils/async.js";
 import { renderTreeView } from "./components/tree-view.js";
 import { loadJvmPackageTree } from "./services/java-project.js";
 import { renderCodeViewer } from "./components/code-viewer.js";
@@ -78,7 +78,6 @@ import {
 } from "./services/terminal-runner.js";
 import { renderToolWindow } from "./components/tool-window.js";
 import { renderRunToolbar } from "./components/run-toolbar.js";
-import { createXtermView } from "./components/terminal-view.js";
 
 /**
  * 当前面板根目录的规范化键（小写 + 去尾部分隔符）
@@ -172,6 +171,53 @@ export function mount(container, api, _options = {}) {
   let runToolbar = null;
   // 顶栏同步指示器控制器（renderGitSyncIndicator 的返回值）。
   let gitSyncIndicator = null;
+  // 图标块、运行 shell、Git 状态在一次面板生命周期内复用，避免重复解析和重复请求。
+  let iconsPromise = null;
+  let runShellPromise = null;
+  let gitInflight = null;
+  let gitInflightRoot = "";
+
+  /** 加载全部文件图标。与列目录并行，树的第一帧就使用完整图标集。 */
+  function ensureIcons() {
+    if (!iconsPromise) {
+      iconsPromise = loadChunk("icons")
+        .then((mod) => {
+          if (mod) installFileIcons(mod);
+          if (!disposed && runToolbar) renderRunToolbarView();
+        })
+        .catch((err) => {
+          console.warn("[FileExplorer] 图标加载失败", err);
+        });
+    }
+    return iconsPromise;
+  }
+
+  /** 面板空闲后再识别项目命令并预解析终端组件，避免挡住第一帧。 */
+  function scheduleBackgroundWork() {
+    const run = () => {
+      if (disposed) return;
+      void ensureCommands();
+      void loadChunk("terminal").catch(() => {});
+    };
+    if (typeof requestIdleCallback === "function") requestIdleCallback(run, { timeout: 1500 });
+    else setTimeout(run, 300);
+  }
+
+  /** xterm 在终端块里。工具窗口允许工厂返回 Promise，输出会先暂存。 */
+  function createLazyTerminalView(host, opts) {
+    return loadChunk("terminal").then((mod) => {
+      if (!mod || typeof mod.createXtermView !== "function") {
+        throw new Error("终端组件加载失败");
+      }
+      return mod.createXtermView(host, opts);
+    });
+  }
+
+  /** 同一项目内复用 shell 解析结果，运行命令不再每次 detectTerminals。 */
+  function cachedRunShell() {
+    if (!runShellPromise) runShellPromise = resolveRunShell();
+    return runShellPromise;
+  }
 
   // 翻译：api.t 不可用时回退到 defaultValue
   const t = (key, fallback, values) => {
@@ -278,6 +324,7 @@ export function mount(container, api, _options = {}) {
     if (runWindow && typeof runWindow.dispose === "function") runWindow.dispose();
     state.projectCommands = null;
     state.manualScriptCommands = [];
+    runShellPromise = null;
     state.terminals = [];
     state.activeTerminalId = null;
     state.activeRunTerminalId = null;
@@ -321,10 +368,15 @@ export function mount(container, api, _options = {}) {
       renderToolbar();
       return;
     }
-    await reloadGitignore();
-    await refreshAll();
-    // 项目加载即识别一次（IDEA 同款：打开项目就能 Run，无需先点开某个文件）。
-    void ensureCommands();
+    // 先列出根目录。忽略规则、JVM 识别和 Git 状态在树出现之后补。
+    await loadRoot();
+    if (disposed) return;
+    void reloadGitignore().then(() => {
+      if (!disposed && state.rootPath) return loadRoot();
+    });
+    void refreshJavaProject();
+    void refreshGitAll();
+    scheduleBackgroundWork();
   }
 
   // 刷新 JVM 项目识别结果：与目录树并行，避免阻塞 Git 状态刷新。
@@ -338,14 +390,15 @@ export function mount(container, api, _options = {}) {
     state.javaProject = detected;
   }
 
-  // 刷新当前面板全部数据：JVM 项目识别必须先完成，源码根目录展开才有可靠的 sourceRoots。
+  // 刷新当前面板：显式刷新会重扫忽略规则；打开面板和窗口聚焦不走这里。
   async function refreshAll() {
     if (disposed || !state.rootPath) return;
-    await refreshJavaProject();
-    await Promise.all([loadRoot(), refreshGitStatus(), refreshGitViewStatus()]);
+    await reloadGitignore();
+    if (disposed) return;
+    await Promise.all([loadRoot(), refreshJavaProject(), refreshGitAll()]);
   }
 
-  // 2. 拉取 Git 状态
+  // 2. 拉取 Git 状态（文件树染色与变更列表共用同一次 gitStatus）
   // 同源短路：内容未变化时跳过 render。render 会整体 replaceChildren 重建 DOM，
   // 从而销毁滚动位置与文本选区（表现为「一滑就弹回顶部 / 无法选中复制」）。
   function isSameGitMap(a, b) {
@@ -358,46 +411,53 @@ export function mount(container, api, _options = {}) {
     return true;
   }
 
-  async function refreshGitStatus() {
-    if (!state.rootPath || disposed) return;
-    const map = await fetchGitStatusMap(state.rootPath);
-    if (disposed) return;
-    if (isSameGitMap(state.gitStatusMap, map)) return;
-    state.gitStatusMap = map;
-    // 文件树视图才需要文件级染色；Git 变更视图下无需重绘文件树
-    if (state.mainView === "files") renderTree();
+  async function refreshGitViewStatus() {
+    await refreshGitAll();
   }
 
-  // 拉取完整 Git 状态（供 Git 变更视图使用）
-  // 内容未变则跳过重绘：宿主 watcher 会因 git status 自身刷新索引等原因高频触发，
-  // 无条件重建列表会反复销毁行节点——表现为列表持续跳动、hover 出现的行内按钮闪烁。
-  // 仅当签名变化时才重绘，可保住行节点、选中态与滚动位置。
-  async function refreshGitViewStatus() {
-    if (!state.rootPath || disposed) return;
-    const status = await getGitStatus(state.rootPath);
-    if (disposed) return;
+  function gitStatusToMap(status) {
+    const map = Object.create(null);
+    if (status && Array.isArray(status.files)) {
+      for (const item of status.files) {
+        if (!item || !item.path) continue;
+        map[item.path.replace(/\\/g, "/")] = item.status;
+      }
+    }
+    return map;
+  }
+
+  function applyGitStatus(status) {
+    const map = gitStatusToMap(status);
     const prevSig = gitStatusSignature(state.gitStatus);
     const nextSig = gitStatusSignature(status);
     state.gitStatus = status;
-    // 首次获得仓库状态时只初始化一次：已暂存目录默认折叠，变更目录保持展开。
-    // 后续 watcher 刷新不重置集合，保证用户手动展开/折叠的选择不被覆盖。
     if (state.collapsedStaged === null && status && status.isRepo) {
       const { staged } = partitionGitFiles(status.files);
       state.collapsedStaged = collectGitFolderPaths(staged);
     }
-    // 内容未变则跳过重绘（宿主 watcher 高频触发，无条件重建会让列表跳动）。
-    if (prevSig === nextSig && prevSig !== "") return;
-    // 底部同步栏（当前分支名 + ↑/↓ 计数）依赖 gitStatus，文件树视图下同样要刷新，
-    // 否则该视图底栏会一直停在「无分支 / 无计数」的初始态。
+    const mapChanged = !isSameGitMap(state.gitStatusMap, map);
+    if (mapChanged) state.gitStatusMap = map;
+    if (prevSig === nextSig && prevSig !== "" && !mapChanged) return;
+    if (mapChanged && state.mainView === "files") renderTree();
     syncGitIndicator();
-    if (state.mainView !== "git") return;
-    renderGitPane();
+    if (state.mainView === "git" && prevSig !== nextSig) renderGitPane();
   }
 
-  // 统一的 Git 刷新：同时刷新文件树染色、变更视图与底部同步栏。
-  // 等待两个异步刷新完成，调用方 await 后即为「已刷新到最新状态」。
+  // 统一的 Git 刷新：同一次 snow.gitStatus 同时更新染色、变更列表和同步栏。
   async function refreshGitAll() {
-    await Promise.all([refreshGitStatus(), refreshGitViewStatus()]);
+    if (!state.rootPath || disposed) return;
+    const root = state.rootPath;
+    const rootToken = pathKey(root);
+    if (!gitInflight || gitInflightRoot !== rootToken) {
+      gitInflightRoot = rootToken;
+      const request = getGitStatus(root).finally(() => {
+        if (gitInflight === request) gitInflight = null;
+      });
+      gitInflight = request;
+    }
+    const status = await gitInflight;
+    if (disposed || pathKey(state.rootPath) !== rootToken) return;
+    applyGitStatus(status);
   }
 
   // ------------------------------------------------------------------
@@ -625,8 +685,10 @@ export function mount(container, api, _options = {}) {
     ]);
     if (disposed || !state.gitPreview || state.gitPreview.key !== key) return;
 
-    // 工作区完整文件文本（供 VS Code 风格全文件差异比较及未修改行补充）
-    const fullContent = typeof fileRes?.content === "string" ? fileRes.content : null;
+    // 工作区全文用来把未改动行补回差异视图，打开后看到的是整份文件。
+    const fullContent = typeof fileRes?.content === "string" && !fileRes.isBinary && !fileRes.isImage
+      ? fileRes.content
+      : null;
     const diff = { loading: false, result: null, fullContent, error: "" };
     if (!diffRes) {
       diff.error = t("git.diffUnavailable", "无法读取差异");
@@ -640,7 +702,6 @@ export function mount(container, api, _options = {}) {
     state.gitPreview = {
       ...state.gitPreview,
       diff,
-      file: buildFilePreview({ name: basename(relPath), path: absPath }, fileRes),
     };
     renderGitPreview();
   }
@@ -663,13 +724,54 @@ export function mount(container, api, _options = {}) {
     if (!state.gitPreview) return;
     const next = mode === "content" ? "content" : "diff";
     if (state.gitPreview.mode === next) return;
+    const key = state.gitPreview.key;
     state.gitPreview = { ...state.gitPreview, mode: next };
     renderGitPreview();
-    // 切到内容模式且为 Markdown 时，需回填本地图片（内容 DOM 是重建的）
-    const p = state.gitPreview.file;
-    if (next === "content" && p && p.kind === "text" && p.isMarkdown && p.html) {
-      inlineMarkdownImages(p.path);
+    if (next !== "content") return;
+    const existing = state.gitPreview.file;
+    if (existing && existing.kind === "text") {
+      if (existing.isMarkdown && existing.mode === "preview") void hydrateGitMarkdown(key);
+      return;
     }
+    void loadGitPreviewFile(key);
+  }
+
+  async function loadGitPreviewFile(key) {
+    const gp = state.gitPreview;
+    if (!gp || gp.key !== key || !gp.absPath) return;
+    state.gitPreview = {
+      ...gp,
+      file: { kind: "loading", name: gp.name, path: gp.absPath },
+    };
+    renderGitPreview();
+    const fileRes = await readFileContent(gp.absPath);
+    if (disposed || !state.gitPreview || state.gitPreview.key !== key) return;
+    const file = buildFilePreview({ name: gp.name, path: gp.absPath }, fileRes);
+    state.gitPreview = { ...state.gitPreview, file };
+    renderGitPreview();
+    if (file.kind === "text" && file.isMarkdown && file.mode === "preview") {
+      await hydrateGitMarkdown(key);
+    }
+  }
+
+  async function hydrateGitMarkdown(key) {
+    const gp = state.gitPreview;
+    const file = gp && gp.file;
+    if (!file || gp.key !== key || !file.isMarkdown || file.mode !== "preview") return;
+    if (shouldVirtualize(file.text)) {
+      state.gitPreview = { ...state.gitPreview, file: { ...file, mode: "code" } };
+      renderGitPreview();
+      return;
+    }
+    const mod = await loadChunk("markdown");
+    if (disposed || !state.gitPreview || state.gitPreview.key !== key || !state.gitPreview.file) return;
+    if (!mod || typeof mod.renderMarkdownHtml !== "function") return;
+    state.gitPreview = {
+      ...state.gitPreview,
+      file: { ...state.gitPreview.file, html: mod.renderMarkdownHtml(state.gitPreview.file.text || "") },
+    };
+    renderGitPreview();
+    inlineMarkdownImages(state.gitPreview.file.path);
   }
 
   // 切换差异展示模式（unified / split），持久化偏好并仅重绘右侧查看器
@@ -786,33 +888,36 @@ export function mount(container, api, _options = {}) {
    * @param {string} dir 当前扫描目录绝对路径
    * @param {Array} rules 规则累加器
    */
-  async function collectGitignoreRules(dir, rules, _isRoot = false) {
-    if (disposed) return;
+  async function collectGitignoreRules(dir, inherited) {
+    if (disposed) return [];
     let entries;
     try {
       entries = await readDirectoryEntries(dir);
     } catch {
-      return;
+      return [];
     }
+    const own = [];
     const base = getRelativeGitPath(dir, state.rootPath);
     const gitignoreEntry = entries.find((e) => e && e.name === ".gitignore" && !e.isDirectory);
     if (gitignoreEntry) {
       const res = await readFileContent(gitignoreEntry.path);
       if (res && !res.isBinary && typeof res.content === "string") {
-        rules.push(...parseGitignore(res.content, base));
+        own.push(...parseGitignore(res.content, base));
       }
     }
+    const rulesHere = inherited.concat(own);
     const children = entries.filter((e) => {
       if (!e || !e.isDirectory) return false;
-      // 规则始终用于标记浅色条目，同时继续剪枝避免扫描被忽略的大型目录。
       if (isExcludedMeta(e.name)) return false;
       const rel = getRelativeGitPath(e.path, state.rootPath);
-      return !(rel && isIgnoredByRules(rel, true, rules));
+      return !(rel && isIgnoredByRules(rel, true, rulesHere));
     });
-    for (const child of children) {
-      if (disposed) return;
-      await collectGitignoreRules(child.path, rules, false);
+    const nested = await mapPool(children, 8, (child) => collectGitignoreRules(child.path, rulesHere));
+    const rules = own.slice();
+    for (const list of nested) {
+      if (Array.isArray(list)) rules.push(...list);
     }
+    return rules;
   }
 
   // 扫描并重建 .gitignore 规则。无论过滤开关状态如何都保留规则，关闭时只改变显示策略。
@@ -821,9 +926,9 @@ export function mount(container, api, _options = {}) {
       state.gitignoreRules = [];
       return;
     }
-    const rules = [];
-    await collectGitignoreRules(state.rootPath, rules, true);
-    if (disposed) return;
+    const root = state.rootPath;
+    const rules = await collectGitignoreRules(root, []);
+    if (disposed || pathKey(root) !== pathKey(state.rootPath)) return;
     state.gitignoreRules = rules;
   }
 
@@ -852,7 +957,7 @@ export function mount(container, api, _options = {}) {
     state.status = t("status.loading", "加载中…");
     renderToolbar();
     try {
-      const entries = await readDirectoryEntries(state.rootPath);
+      const [entries] = await Promise.all([readDirectoryEntries(state.rootPath), ensureIcons()]);
       if (disposed) return;
       state.rootNodes = sortEntries(filterExcludedEntries(entries, state.rootPath, viewFilterOpts()));
       // 加载成功后清空状态文案（不再显示条目计数）
@@ -1899,7 +2004,7 @@ export function mount(container, api, _options = {}) {
       kind: "terminal",
       getTerminals: terminalModeTerminals,
       getActiveId: () => state.activeTerminalId,
-      createTerminal: createXtermView,
+      createTerminal: createLazyTerminalView,
       onSelectTab: handleSelectTerminal,
       onNewTerminal: () => handleNewTerminal({ mode: "terminal" }),
       onCloseTerminal: handleCloseTerminal,
@@ -1921,7 +2026,7 @@ export function mount(container, api, _options = {}) {
       kind: "run",
       getTerminals: runModeTerminals,
       getActiveId: () => state.activeRunTerminalId,
-      createTerminal: createXtermView,
+      createTerminal: createLazyTerminalView,
       onSelectTab: handleSelectRunTerminal,
       onCloseTerminal: handleCloseTerminal,
       onMinimize: handleMinimizeRunPanel,
@@ -2017,8 +2122,18 @@ export function mount(container, api, _options = {}) {
       if (term.session) term.session.write(data);
     };
     term.onResize = (nextCols, nextRows) => {
-      if (term.session) term.session.resize(nextCols, nextRows);
+      if (term.resizeTimer) clearTimeout(term.resizeTimer);
+      // 面板刚展开时 fit 会连着触发几次。尾沿防抖，避免 ConPTY 每次都整屏重绘。
+      term.resizeTimer = setTimeout(() => {
+        term.resizeTimer = null;
+        if (term.phase !== phase || !term.session) return;
+        term.session.resize(nextCols, nextRows);
+      }, 120);
     };
+
+    if (term.mode === "run" && term.pendingCommand && win && typeof win.write === "function") {
+      win.write(term.id, `\r\n\x1b[90m$ ${term.pendingCommand}\x1b[0m\r\n`);
+    }
 
     // 模式 A：shell 走宿主同源解析链（终端设置 shellPath > detectTerminals()[0]），
     // 不写死 shell——跨 Windows / macOS / Linux 跟随宿主配置；退出写法按 shell 家族选择
@@ -2041,7 +2156,7 @@ export function mount(container, api, _options = {}) {
         runShell = { shellPath: scriptShell.shellPath, exitCommand: scriptShell.exitCommand };
         runCommand = scriptShell.runCommand;
       } else {
-        runShell = await resolveRunShell();
+        runShell = await cachedRunShell();
       }
       exitCommand = runShell.exitCommand;
     }
@@ -2180,26 +2295,18 @@ export function mount(container, api, _options = {}) {
 
     const text = String(result.content || "");
     const isMarkdown = isMarkdownPath(entry.name);
-
-    // 大文件不再截断：由 code-viewer 的虚拟列表只渲染可视行，DOM 与总行数解耦，
-    // 内容保持完整。大文件同时跳过预计算高亮（逐行渲染时也无 token 可复用），
-    // 避免打开即触发昂贵的全量 Prism 分词。
-    const large = isLargeText(text);
-    const highlightedHtml =
-      large || isMarkdown ? "" : highlightCodeHtml(text, extname(entry.name));
-
-    // Markdown 文件默认进入预览模式：额外生成净化 HTML（代码模式复用语法高亮）
-    const html = isMarkdown ? renderMarkdownHtml(text) : "";
+    const virtual = shouldVirtualize(text);
 
     return {
       kind: "text",
       name: entry.name,
       path: entry.path,
       text,
-      highlightedHtml,
+      highlightedHtml: "",
       isMarkdown,
-      mode: "preview",
-      html,
+      // 大 Markdown 先显示源码。小 Markdown 的 HTML 由后续的块加载补上。
+      mode: isMarkdown && virtual ? "code" : "preview",
+      html: "",
       editable: false,
       saveState: "idle",
       saveMessage: "",
@@ -2228,9 +2335,6 @@ export function mount(container, api, _options = {}) {
     // 否则全屏触发与 loading 渲染同处一个同步任务，绘制被推迟，点击后仍会先卡一下。
     await waitForNextFrame();
 
-    // 懒加载项目识别：后台扫描，不阻塞文件读取与 loading 渲染（结果用于右键「运行」菜单与运行面板）。
-    void ensureCommands();
-
     // 智能联动全屏：非全屏模式下点击具体文件自动全屏展开代码大视野
     if (!isRightPanelFullscreen()) {
       const fullscreenReady = await ensureRightPanelFullscreen();
@@ -2244,10 +2348,8 @@ export function mount(container, api, _options = {}) {
       if (disposed || requestId !== previewRequestId || pathKey(entry.path) !== pathKey(state.selected)) return;
       state.preview = buildFilePreview(entry, result);
       renderPreview();
-
-      // 本地相对图片按需读取为 data URL 后回填（异步，不阻塞首屏）
-      if (state.preview.kind === "text" && state.preview.isMarkdown && state.preview.html) {
-        inlineMarkdownImages(entry.path);
+      if (state.preview.kind === "text" && state.preview.isMarkdown && state.preview.mode === "preview") {
+        void hydrateFileMarkdown(requestId);
       }
       return;
     } catch (err) {
@@ -2283,31 +2385,38 @@ export function mount(container, api, _options = {}) {
     );
   }
 
+  async function hydrateFileMarkdown(requestId) {
+    const preview = state.preview;
+    if (!preview || preview.kind !== "text" || !preview.isMarkdown || preview.mode !== "preview") return;
+    if (shouldVirtualize(preview.text)) {
+      if (disposed || requestId !== previewRequestId) return;
+      state.preview = { ...state.preview, mode: "code" };
+      renderPreview();
+      return;
+    }
+    const mod = await loadChunk("markdown");
+    if (disposed || requestId !== previewRequestId || !state.preview || state.preview.mode !== "preview") return;
+    if (!mod || typeof mod.renderMarkdownHtml !== "function") return;
+    state.preview = { ...state.preview, html: mod.renderMarkdownHtml(state.preview.text || "") };
+    renderPreview();
+    inlineMarkdownImages(state.preview.path);
+  }
+
   // 5.2 切换 Markdown 的预览 / 代码模式
   function setPreviewMode(mode) {
     const next = mode === "code" ? "code" : "preview";
     if (state.preview.mode === next) return;
-    // 切到代码模式时补算懒加载的语法高亮：Markdown 打开时默认预览，highlightedHtml 为空，
-    // 仅在用户真正需要看代码时才算，避免大 Markdown 打开即触发全量高亮。
-    const needHighlight =
-      next === "code" &&
-      state.preview.kind === "text" &&
-      !state.preview.highlightedHtml;
+    const requestId = previewRequestId;
     state.preview = {
       ...state.preview,
       mode: next,
-      // Markdown 回到预览模式时强制退出编辑，预览 DOM 永远不可编辑。
       editable: false,
       saveState: "idle",
       saveMessage: "",
-      highlightedHtml: needHighlight
-        ? highlightCodeHtml(state.preview.text, extname(state.preview.name))
-        : state.preview.highlightedHtml,
     };
     renderPreview();
-    // 切回预览模式时需重新触发本地图片内联（预览 DOM 是重建的）
     if (next === "preview" && state.preview.kind === "text" && state.preview.isMarkdown) {
-      inlineMarkdownImages(state.preview.path);
+      void hydrateFileMarkdown(requestId);
     }
   }
 
@@ -2356,14 +2465,14 @@ export function mount(container, api, _options = {}) {
     ) return;
 
     if (result && result.ok === true) {
-      // 保存后与打开时用同一熔断判定：大文件跳过全量 Prism / 转义重算，只保留纯文本虚拟渲染。
-      state.preview.highlightedHtml = isLargeText(content)
-        ? ""
-        : highlightCodeHtml(content, extname(state.preview.name));
-      state.preview.html = state.preview.isMarkdown ? renderMarkdownHtml(content) : "";
+      state.preview.highlightedHtml = "";
+      state.preview.html = "";
       state.preview.saveState = "saved";
       state.preview.saveMessage = "";
       renderPreview();
+      if (state.preview.isMarkdown && state.preview.mode === "preview") {
+        void hydrateFileMarkdown(previewRequestId);
+      }
       await refreshGitAll();
     } else {
       state.preview.saveState = "failed";
@@ -2905,7 +3014,7 @@ export function mount(container, api, _options = {}) {
       const isActiveNow = tabPaneEl.classList.contains("active");
       if (isActiveNow && !wasActive) {
         // 从其他面板切回文件浏览器：自动触发全量刷新
-        refreshAll();
+        refreshGitAll();
       }
       wasActive = isActiveNow;
     });
@@ -2916,7 +3025,7 @@ export function mount(container, api, _options = {}) {
   const handleWindowFocus = () => {
     if (disposed) return;
     if (!tabPaneEl || tabPaneEl.classList.contains("active")) {
-      refreshAll();
+      refreshGitAll();
     }
   };
   if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
@@ -2925,33 +3034,39 @@ export function mount(container, api, _options = {}) {
 
   let unsubGit = null;
   let unsubProjects = null;
+  ensureIcons();
   (async () => {
-    const initialRoot = await resolveRoot();
+    const [initialRoot, viewSettings, diffMode, commitMode] = await Promise.all([
+      resolveRoot(),
+      loadViewSettings(api),
+      loadDiffViewMode(api),
+      (async () => {
+        try {
+          if (api.storage && typeof api.storage.getJson === "function") {
+            return await api.storage.getJson("gitCommitMode");
+          }
+        } catch {
+          // 忽略读取失败，使用默认模式
+        }
+        return null;
+      })(),
+    ]);
     if (disposed) return;
     state.rootPath = initialRoot || "";
-    // 读取持久化的视图开关，并按需加载 .gitignore
-    state.viewSettings = await loadViewSettings(api);
-    if (disposed) return;
-    // 读取持久化的提交按钮模式
-    try {
-      if (api.storage && typeof api.storage.getJson === "function") {
-        const mode = await api.storage.getJson("gitCommitMode");
-        if (mode === "commitAndPush") state.gitCommitMode = "commitAndPush";
-      }
-    } catch {
-      // 忽略读取失败，使用默认模式
-    }
-     // 读取持久化的差异展示模式（unified / split）
-    state.diffMode = await loadDiffViewMode(api);
-    if (disposed) return;
-    await reloadGitignore();
-    if (disposed) return;
-    // 初始渲染只建立骨架；统一刷新会先完成 Java 项目识别，再加载根目录。
+    state.viewSettings = viewSettings;
+    if (commitMode === "commitAndPush") state.gitCommitMode = "commitAndPush";
+    state.diffMode = diffMode;
     render();
-    await refreshAll();
-    // 项目加载即识别一次（IDEA 同款：打开项目就能 Run，无需先点开某个文件）。
-    void ensureCommands();
-    if (disposed) return;
+    if (state.rootPath) {
+      await loadRoot();
+      if (disposed) return;
+      void reloadGitignore().then(() => {
+        if (!disposed && state.rootPath) return loadRoot();
+      });
+      void refreshJavaProject();
+      void refreshGitAll();
+      scheduleBackgroundWork();
+    }
     // 跟随宿主项目切换：订阅 projects 域（live），activeDirectory 变化时全量切换到新项目。
     // 与宿主「打开文件夹」按钮天然一致，插件不自建多开与目录选择。
     if (api && api.metadata && typeof api.metadata.subscribe === "function") {

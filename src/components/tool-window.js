@@ -180,6 +180,10 @@ export function renderToolWindow(container, options) {
   let tabNodes = new Map();
   // 终端视图：id → { view, host }
   let views = new Map();
+  // xterm 仍在加载时的占位：id → { host, cancelled }
+  let pending = new Map();
+  // 视图尚未就绪时暂存的输出，创建完成后一次性写入。
+  let buffers = new Map();
   // 当前右键 / 菜单锚定的 tab id
   let menuTabId = null;
 
@@ -483,11 +487,11 @@ export function renderToolWindow(container, options) {
   /** 为集合中尚未创建视图的终端创建 xterm 并绑定输入/尺寸回调。 */
   function ensureViews() {
     for (const term of list()) {
-      if (views.has(term.id)) continue;
+      if (views.has(term.id) || pending.has(term.id)) continue;
       const host = el("div", "sfe-run-terminal-host");
       host.hidden = true;
       body.appendChild(host);
-      const view = createTerminal(host, {
+      const created = createTerminal(host, {
         // 模式 A（一次性运行）只读：执行期间禁止键盘输入（视图内部用 disableStdin 实现）。
         readOnly: term.mode === "run",
         onData: (data) => {
@@ -501,18 +505,53 @@ export function renderToolWindow(container, options) {
         // 选区变化：刷新「复制选中文本」按钮的可用态（仅运行窗口有该按钮）。
         onSelectionChange: () => syncToolbar(),
       });
-      views.set(term.id, { view, host });
+      if (created && typeof created.then === "function") {
+        const slot = { host, cancelled: false };
+        pending.set(term.id, slot);
+        created.then(
+          (view) => {
+            pending.delete(term.id);
+            if (slot.cancelled || !host.isConnected) {
+              if (view && typeof view.dispose === "function") view.dispose();
+              if (host.parentNode) host.remove();
+              return;
+            }
+            views.set(term.id, { view, host });
+            const buffered = buffers.get(term.id);
+            if (buffered && view && typeof view.write === "function") {
+              buffers.delete(term.id);
+              view.write(buffered);
+            }
+            syncActiveView();
+            syncToolbar();
+          },
+          () => {
+            pending.delete(term.id);
+            if (host.parentNode) host.remove();
+          }
+        );
+      } else {
+        views.set(term.id, { view: created, host });
+      }
     }
   }
 
   /** 销毁已从集合移除的终端视图。 */
   function pruneViews() {
     const ids = new Set(list().map((x) => x.id));
+    for (const [id, slot] of pending) {
+      if (ids.has(id)) continue;
+      slot.cancelled = true;
+      if (slot.host.parentNode) slot.host.remove();
+      pending.delete(id);
+      buffers.delete(id);
+    }
     for (const [id, entry] of views) {
       if (ids.has(id)) continue;
       entry.view.dispose();
       entry.host.remove();
       views.delete(id);
+      buffers.delete(id);
     }
   }
 
@@ -562,10 +601,15 @@ export function renderToolWindow(container, options) {
       syncToolbar();
       syncActiveView();
     },
-    /** 向指定终端写入原始输出（含 ANSI，交给 xterm）。 */
+    /** 向指定终端写入原始输出（含 ANSI，交给 xterm）。视图还在加载时先暂存。 */
     write(id, data) {
+      const text = String(data == null ? "" : data);
       const entry = views.get(id);
-      if (entry) entry.view.write(data);
+      if (entry) {
+        entry.view.write(text);
+        return;
+      }
+      if (pending.has(id)) buffers.set(id, (buffers.get(id) || "") + text);
     },
     /** 读取某终端当前 cols/rows（供调用方建 pty 时使用真实尺寸）。 */
     getSizes(id) {
@@ -601,6 +645,9 @@ export function renderToolWindow(container, options) {
         document.removeEventListener("click", onDocClick, true);
         document.removeEventListener("keydown", onDocKey, true);
       }
+      for (const [, slot] of pending) slot.cancelled = true;
+      pending = new Map();
+      buffers = new Map();
       for (const [, entry] of views) entry.view.dispose();
       views = new Map();
     },

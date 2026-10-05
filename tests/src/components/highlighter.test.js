@@ -56,6 +56,11 @@ test('语法高亮: 真实多语言样本产出的所有 token 类别均有 CSS 
     t === 'content' || t === 'php' || t === 'code-block' || t.startsWith('language-');
 
   const css = fs.readFileSync(CSS_PATH, 'utf8');
+  assert.match(
+    css,
+    /:is\(\.sfe-file-viewer-code, \.sfe-file-viewer-code-scroll-virtual\) \.token/,
+    '虚拟列表里的 token 必须命中与整块代码相同的配色'
+  );
   const covered = new Set([...css.matchAll(/\.token\.([a-zA-Z0-9_-]+)/g)].map((m) => m[1]));
 
   // 覆盖高 token 种类语言的代表性样本
@@ -110,6 +115,12 @@ test('语法高亮: shouldHighlight 熔断判定同时按字符数与行数', ()
   assert.equal(shouldHighlight('a\n'.repeat(4000)), false, '4001 行应熔断');
   // 行数边界：恰好 4000 行仍可高亮
   assert.equal(shouldHighlight('a\n'.repeat(3999)), true, '4000 行应在阈值内');
+});
+
+test('语法高亮: 约 400 行以上需要虚拟列表，短文本不需要', async () => {
+  const { shouldVirtualize } = await import('../../../src/components/highlighter.js');
+  assert.equal(shouldVirtualize('const a = 1;'), false);
+  assert.equal(shouldVirtualize('a\n'.repeat(500)), true);
 });
 
 test('语法高亮: isLargeText 判定大文件，空文本不算大', () => {

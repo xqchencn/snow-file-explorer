@@ -16,7 +16,14 @@ test('分发包完整性: dist 目录存在且包含所有直接安装运行所�
   const jsPath = path.join(distDir, 'index.js');
   assert.ok(fs.existsSync(jsPath), 'dist/index.js 必须存在');
   const jsStat = fs.statSync(jsPath);
-  assert.ok(jsStat.size > 50 * 1024, `dist/index.js 体积需合理 (>50KB)，当前: ${(jsStat.size / 1024).toFixed(1)}KB`);
+  assert.ok(jsStat.size > 40 * 1024, `dist/index.js 体积需合理 (>40KB)，当前: ${(jsStat.size / 1024).toFixed(1)}KB`);
+  assert.ok(jsStat.size < 400 * 1024, `dist/index.js 不应再包含高亮、图标和终端（<400KB），当前: ${(jsStat.size / 1024).toFixed(1)}KB`);
+
+  for (const chunk of ['icons.js', 'highlighter.js', 'terminal.js', 'markdown.js']) {
+    const chunkPath = path.join(distDir, 'chunks', chunk);
+    assert.ok(fs.existsSync(chunkPath), `dist/chunks/${chunk} 必须存在`);
+    assert.ok(fs.statSync(chunkPath).size > 1024, `dist/chunks/${chunk} 不得为空`);
+  }
 
   const cssPath = path.join(distDir, 'index.css');
   assert.ok(fs.existsSync(cssPath), 'dist/index.css 必须存在');
@@ -73,6 +80,14 @@ test('自包含约束: dist/index.js 无相对 import 且 dist/index.css 无 @im
   const jsContent = fs.readFileSync(path.join(distDir, 'index.js'), 'utf8');
   const relativeImports = jsContent.match(/import\s*.*?from\s*['"]\.\.?\/[^'"]+['"]/g) || [];
   assert.equal(relativeImports.length, 0, `dist/index.js 发现非法的相对 import: ${relativeImports.join(', ')}`);
+  assert.equal(jsContent.includes('prismjs'), false, '入口不应包含 Prism');
+  assert.equal(jsContent.includes('@xterm'), false, '入口不应包含 xterm');
+  assert.equal(jsContent.includes('DOMPurify'), false, '入口不应包含 DOMPurify');
+  for (const chunk of ['icons.js', 'highlighter.js', 'terminal.js', 'markdown.js']) {
+    const chunkSource = fs.readFileSync(path.join(distDir, 'chunks', chunk), 'utf8');
+    const chunkImports = chunkSource.match(/import\s*.*?from\s*['"]\.\.?\/[^'"]+['"]/g) || [];
+    assert.equal(chunkImports.length, 0, `chunks/${chunk} 发现非法的相对 import: ${chunkImports.join(', ')}`);
+  }
 
   const cssContent = fs.readFileSync(path.join(distDir, 'index.css'), 'utf8');
   const cssImports = cssContent.match(/@import\s+[^;]+;/g) || [];

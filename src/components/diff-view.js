@@ -11,7 +11,8 @@
 import { el } from "../utils/dom.js";
 import { createActionIcon } from "../icons/action-icons.js";
 import { buildSplitRows, buildFullFileDiff, buildFullSplitRows } from "../services/diff.js";
-import { highlightCodeHtml, MAX_HIGHLIGHT_LINES } from "./highlighter.js";
+import { MAX_HIGHLIGHT_LINE_LEN } from "./highlight-policy.js";
+import { ensureHighlighter, highlighterReady, highlightCodeHtml } from "./highlight-client.js";
 import { createVirtualList } from "./virtual-list.js";
 
 /**
@@ -75,6 +76,7 @@ export function renderDiffView(parentEl, {
   const items = [];
   const hunkStartRow = []; // hunkIndex -> 行项在 items 中的下标
 
+  // 有全文就补齐未改动行；没有全文（如已删除文件）则按补丁行展开。虚拟列表只挂载可视行。
   const fullMode = typeof fullContent === "string" || result.hasHunks;
   if (fullMode) {
     const fullLines = buildFullFileDiff(result, fullContent);
@@ -107,9 +109,7 @@ export function renderDiffView(parentEl, {
     }
   }
 
-  // 2. 高亮开关：逐行调用 Prism 成本 = 行数 × 分词，且单行文本永远够不到熔断阈值。
-  //    按差异总行数整体判定：小 diff 保留语法着色，大 diff 全部降级为纯文本。
-  const highlight = items.length <= MAX_HIGHLIGHT_LINES;
+  // 2. 只对当前可视行做语法高亮。超长单行仍跳过，避免压缩成一行的文件卡住分词。
 
   // 3. 虚拟列表（此时 scroll 尚未挂载，setItems 延后到挂载后调用，clientHeight 才可用）
   const vlist = createVirtualList({
@@ -118,8 +118,8 @@ export function renderDiffView(parentEl, {
       item.kind === "head"
         ? el("div", "sfe-diff-hunk-head", item.header)
         : viewMode === "split"
-          ? renderSplitRow(item.row, extension, highlight)
-          : renderDiffLine(item.row, extension, highlight),
+          ? renderSplitRow(item.row, extension)
+          : renderDiffLine(item.row, extension),
   });
 
   // 4. 顶部条：增删统计 + hunk 导航 + 展示模式切换
@@ -140,6 +140,13 @@ export function renderDiffView(parentEl, {
 
   parentEl.__sfeVList = vlist;
   vlist.setItems(items);
+  // 高亮块未就绪时先出纯文本，加载完成只重绘当前可视行。
+  if (!highlighterReady()) {
+    void ensureHighlighter().then(() => {
+      if (!scroll.isConnected || !highlighterReady()) return;
+      vlist.refresh();
+    });
+  }
 }
 
 // 范围模式固定为完整文件，不渲染范围切换控件。
@@ -229,14 +236,14 @@ function renderModeSwitch(current, t, onSetMode) {
  * @param {string} [extension] 文件扩展名（不含点）
  * @returns {HTMLElement}
  */
-function renderDiffLine(line, extension, highlight = true) {
+function renderDiffLine(line, extension) {
   const row = el("div", "sfe-diff-line " + line.type);
   row.appendChild(el("span", "sfe-diff-no", line.oldNo == null ? "" : String(line.oldNo)));
   row.appendChild(el("span", "sfe-diff-no", line.newNo == null ? "" : String(line.newNo)));
   row.appendChild(el("span", "sfe-diff-sign", diffSign(line.type)));
   // 标记列与代码正文分离，Prism 只处理源码，避免把 +/- 当成语法内容。
   const text = el("span", "sfe-diff-text");
-  applyDiffText(text, line.text, extension, line.type, highlight);
+  applyDiffText(text, line.text, extension, line.type);
   row.appendChild(text);
   return row;
 }
@@ -246,10 +253,10 @@ function renderDiffLine(line, extension, highlight = true) {
  * @param {{left: Object|null, right: Object|null}} row buildSplitRows 产出的分栏行
  * @returns {HTMLElement}
  */
-function renderSplitRow(row, extension, highlight = true) {
+function renderSplitRow(row, extension) {
   const line = el("div", "sfe-diff-split-row");
-  line.appendChild(renderSplitCell(row.left, "left", extension, highlight));
-  line.appendChild(renderSplitCell(row.right, "right", extension, highlight));
+  line.appendChild(renderSplitCell(row.left, "left", extension));
+  line.appendChild(renderSplitCell(row.right, "right", extension));
   return line;
 }
 
@@ -260,7 +267,7 @@ function renderSplitRow(row, extension, highlight = true) {
  * @param {string} [extension] 文件扩展名（不含点）
  * @returns {HTMLElement}
  */
-function renderSplitCell(cell, side, extension, highlight = true) {
+function renderSplitCell(cell, side, extension) {
   if (!cell) return el("div", "sfe-diff-split-cell empty " + side);
   const type = cell.type === "meta" ? "meta" : cell.type;
   const box = el("div", "sfe-diff-split-cell " + type + " " + side);
@@ -269,27 +276,30 @@ function renderSplitCell(cell, side, extension, highlight = true) {
   box.appendChild(el("span", "sfe-diff-sign", diffSign(cell.type)));
   // 与 unified 视图共用同一写入入口，保证两种布局的颜色和安全策略一致。
   const text = el("span", "sfe-diff-text");
-  applyDiffText(text, cell.text, extension, cell.type, highlight);
+  applyDiffText(text, cell.text, extension, cell.type);
   box.appendChild(text);
   return box;
 }
 
 /**
- * 把差异行正文写入文本节点：高亮开启时走 Prism（元信息行不属于源码，强制纯文本安全转义）；
- * 高亮关闭时（大 diff 熔断）直接写 textContent，不做任何分词与转义，成本最低。
+ * 把差异行正文写入文本节点。可视行走 Prism；超长单行和元信息行保持纯文本。
  * @param {HTMLElement} textEl 差异正文节点（.sfe-diff-text）
  * @param {string} text 差异行正文
  * @param {string} [extension] 文件扩展名（不含点）
  * @param {string} type 差异行类型
- * @param {boolean} highlight 是否执行语法高亮
  */
-function applyDiffText(textEl, text, extension, type, highlight) {
+function applyDiffText(textEl, text, extension, type) {
   const source = String(text ?? "");
-  if (!highlight) {
+  if (type === "meta" || source.length > MAX_HIGHLIGHT_LINE_LEN || !highlighterReady()) {
     textEl.textContent = source;
     return;
   }
-  textEl.innerHTML = highlightCodeHtml(source, type === "meta" ? "" : extension);
+  const html = highlightCodeHtml(source, type === "meta" ? "" : extension);
+  if (!html) {
+    textEl.textContent = source;
+    return;
+  }
+  textEl.innerHTML = html;
 }
 
 /**

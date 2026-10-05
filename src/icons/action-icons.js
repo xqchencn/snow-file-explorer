@@ -39,7 +39,7 @@ import {
   X,
   Eraser,
 } from 'lucide';
-import { ICON_SVGS } from "./icon-data.js";
+import { fileIconMarkup } from "./file-icons.js";
 
 const ICON_MAP = {
   chevronRight: ChevronRight,
@@ -85,7 +85,7 @@ const ICON_MAP = {
 
 /**
  * 创建动作图标 SVG 节点。
- * @description 运行配置图标（go / wails / nodejs 等）复用 icon-data.js 的彩色 SVG（与文件树同一来源），
+ * @description 运行配置图标（go / wails / nodejs 等）复用已安装的文件图标 SVG（与文件树同一来源），
  *   其余走 lucide 动作图标。这样 Go / Wails / Node 图标不重复定义、来源统一。
  * @param {string} name 图标名称（lucide 动作图标名，或 icon-data 中的图标 id 如 go / wails / nodejs）
  * @param {number} [size=14] 图标大小
@@ -103,8 +103,8 @@ export function createActionIcon(name, size = 14) {
       "stroke-width": 1.8,
     });
   }
-  // 否则取 icon-data 的彩色品牌图标（go / wails / nodejs…），与文件树共用同一份 SVG。
-  const svgMarkup = ICON_SVGS[name];
+  // 否则取已安装的彩色品牌图标（go / wails / nodejs…），与文件树共用同一份 SVG。
+  const svgMarkup = fileIconMarkup(name);
   if (svgMarkup) {
     const wrap = document.createElement("span");
     wrap.style.cssText = `display:inline-flex;align-items:center;justify-content:center;width:${size}px;height:${size}px;flex-shrink:0;`;

@@ -15,6 +15,7 @@
  */
 
 import { readDirectoryEntries } from "./file-service.js";
+import { mapPool } from "../utils/async.js";
 import {
   readNodeScripts,
   nodeEntryFallback,
@@ -472,36 +473,41 @@ export async function scanProjectCommands(rootPath) {
   };
 
   const inspectDirectory = async (dirPath, relNames, depth, inheritedManager, inheritedMvnw, inheritedGradlew) => {
-    if (depth > MAX_SCAN_DEPTH || packages.length >= MAX_PACKAGES) return;
+    if (depth > MAX_SCAN_DEPTH || packages.length >= MAX_PACKAGES) return [];
     let entries;
     try {
       entries = await readDirectoryEntries(dirPath);
     } catch {
-      return;
+      return [];
     }
-    if (!Array.isArray(entries)) return;
+    if (!Array.isArray(entries)) return [];
     const rel = joinRel(relNames);
     const last = relNames[relNames.length - 1];
-    if (relNames.length && GO_TEST_DIRS.has(last) && isGoModule(entries)) return;
+    if (relNames.length && GO_TEST_DIRS.has(last) && isGoModule(entries)) return [];
 
+    const found = [];
     const pkgEntry = findFile(entries, "package.json");
     const packageJson = pkgEntry ? await readJson(pkgEntry) : null;
     const packageManager = pkgEntry ? detectPackageManager(packageJson, entries, inheritedManager) : inheritedManager;
     const mvnw = findFile(entries, "mvnw.cmd") ? "mvnw.cmd" : inheritedMvnw;
     const gradlew = findFile(entries, "gradlew.bat") ? "gradlew.bat" : inheritedGradlew;
-    if (pkgEntry) packages.push({ dir: rel, packageJson, packageManager, entries });
-    if (isGoModule(entries)) packages.push(await buildGoPackage(rel, entries));
-    if (isPythonProject(entries)) packages.push(await buildPythonPackage(rel, entries));
-    if (isScriptProject(entries)) packages.push(buildScriptPackage(rel, entries));
-    if (hasFile(entries, "pom.xml")) packages.push(await buildJvmPackage(rel, entries, "maven", mvnw));
+    if (pkgEntry) found.push({ dir: rel, packageJson, packageManager, entries });
+    if (isGoModule(entries)) found.push(await buildGoPackage(rel, entries));
+    if (isPythonProject(entries)) found.push(await buildPythonPackage(rel, entries));
+    if (isScriptProject(entries)) found.push(buildScriptPackage(rel, entries));
+    if (hasFile(entries, "pom.xml")) found.push(await buildJvmPackage(rel, entries, "maven", mvnw));
     if (hasFile(entries, "build.gradle") || hasFile(entries, "build.gradle.kts") || hasFile(entries, "settings.gradle") || hasFile(entries, "settings.gradle.kts")) {
-      packages.push(await buildJvmPackage(rel, entries, "gradle", gradlew));
+      found.push(await buildJvmPackage(rel, entries, "gradle", gradlew));
     }
     const subDirs = entries.filter((entry) => entry && entry.isDirectory === true && !SCAN_SKIP_DIRS.has(String(entry.name || "").toLowerCase()));
-    for (const sub of subDirs) {
-      if (packages.length >= MAX_PACKAGES) break;
-      await inspectDirectory(sub.path, relNames.concat(sub.name), depth + 1, packageManager, mvnw, gradlew);
+    const nested = await mapPool(subDirs, 8, async (sub) => {
+      if (packages.length + found.length >= MAX_PACKAGES) return [];
+      return inspectDirectory(sub.path, relNames.concat(sub.name), depth + 1, packageManager, mvnw, gradlew);
+    });
+    for (const list of nested) {
+      if (Array.isArray(list)) found.push(...list);
     }
+    return found;
   };
 
   let rootEntries;
@@ -524,9 +530,17 @@ export async function scanProjectCommands(rootPath) {
   if (hasFile(rootEntries, "build.gradle") || hasFile(rootEntries, "build.gradle.kts") || hasFile(rootEntries, "settings.gradle") || hasFile(rootEntries, "settings.gradle.kts")) {
     packages.push(await buildJvmPackage("", rootEntries, "gradle", rootGradlew));
   }
-  for (const sub of rootEntries.filter((entry) => entry && entry.isDirectory === true && !SCAN_SKIP_DIRS.has(String(entry.name || "").toLowerCase()))) {
-    if (packages.length >= MAX_PACKAGES) break;
-    await inspectDirectory(sub.path, [sub.name], 1, rootManager, rootMvnw, rootGradlew);
+  const rootSubs = rootEntries.filter((entry) => entry && entry.isDirectory === true && !SCAN_SKIP_DIRS.has(String(entry.name || "").toLowerCase()));
+  const nested = await mapPool(rootSubs, 8, (sub) => {
+    if (packages.length >= MAX_PACKAGES) return [];
+    return inspectDirectory(sub.path, [sub.name], 1, rootManager, rootMvnw, rootGradlew);
+  });
+  for (const list of nested) {
+    if (!Array.isArray(list)) continue;
+    for (const pkg of list) {
+      if (packages.length >= MAX_PACKAGES) break;
+      packages.push(pkg);
+    }
   }
   return { rootPath, ...detectProjectCommands(packages) };
 }

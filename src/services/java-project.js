@@ -5,6 +5,7 @@
  */
 
 import { readDirectoryEntries, sortEntries } from "./file-service.js";
+import { mapPool } from "../utils/async.js";
 
 /**
  * 递归读取 Java/Kotlin 源码根目录，构造成普通嵌套文件树。
@@ -15,18 +16,14 @@ import { readDirectoryEntries, sortEntries } from "./file-service.js";
 async function readJvmSourceTree(dirPath, filterEntries) {
   const entries = await readDirectoryEntries(dirPath);
   const visible = typeof filterEntries === "function" ? filterEntries(entries, dirPath) : entries;
-  const result = [];
-
-  for (const entry of sortEntries(visible)) {
-    if (!entry || !entry.isDirectory) {
-      result.push(entry);
-      continue;
-    }
+  const sorted = sortEntries(visible);
+  const directories = sorted.filter((entry) => entry && entry.isDirectory);
+  const loaded = await mapPool(directories, 8, async (entry) => {
     const children = await readJvmSourceTree(entry.path, filterEntries);
-    result.push({ ...entry, children });
-  }
-
-  return result;
+    return { ...entry, children };
+  });
+  const byPath = new Map(loaded.filter(Boolean).map((entry) => [entry.path, entry]));
+  return sorted.map((entry) => (entry && entry.isDirectory ? byPath.get(entry.path) || entry : entry));
 }
 
 /**

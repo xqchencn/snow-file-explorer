@@ -322,13 +322,17 @@ html:has(.app-shell.right-panel-fullscreen) .sfe-preview-pane {
 
 /* ==========================================================================
    大文件窗口化虚拟列表（components/virtual-list.js）
-   仅在超过高亮熔断阈值的大文件下启用（code-viewer 添加 .sfe-file-viewer-code-scroll-virtual）。
-   容器滚动，内部只渲染「可视区 + 缓冲」的行，DOM 数量与总行数解耦，
-   因此无需截断内容即可打开超大文件。
+   约 400 行以上启用（code-viewer 添加 .sfe-file-viewer-code-scroll-virtual）。
+   容器滚动，内部只渲染「可视区 + 缓冲」的行。
+   字体与整块代码容器一致，token 配色见 syntax.css。
    ========================================================================== */
 .sfe-file-viewer-code-scroll-virtual {
   position: relative;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
   line-height: 1.6;
+  tab-size: 2;
 }
 
 /* 虚拟行：固定行高，与 .sfe-vlist-content 的 translateY 步长一致 */

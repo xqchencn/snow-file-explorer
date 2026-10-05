@@ -3,6 +3,8 @@
  * 统一封装与宿主 window.snow 的文件及目录读取 API，并提供排序与路径工具
  */
 
+import { mapPool } from "../utils/async.js";
+
 /**
  * 获取文件或路径的基准名称 (basename)
  * @param {string} p 文件路径
@@ -317,20 +319,22 @@ export async function detectJvmProject(rootPath) {
   }
 
   // 根模块与一级子模块均检查标准源码根目录，不递归探测任意深度目录。
-  const moduleBases = [{ path: rootPath, entries: rootItems }];
-  for (const entry of rootItems) {
-    if (
-      !entry.isDirectory ||
-      entry.name.startsWith(".") ||
-      ["node_modules", "target", "build", "out", "dist"].includes(entry.name)
-    ) continue;
-    let entries;
+  const moduleDirs = rootItems.filter(
+    (entry) =>
+      entry.isDirectory &&
+      !entry.name.startsWith(".") &&
+      !["node_modules", "target", "build", "out", "dist"].includes(entry.name)
+  );
+  const nestedModules = await mapPool(moduleDirs, 8, async (entry) => {
     try {
-      entries = normalizeProjectEntries(await readDirectoryEntries(entry.path));
+      return { path: entry.path, entries: normalizeProjectEntries(await readDirectoryEntries(entry.path)) };
     } catch {
-      continue;
+      return null;
     }
-    moduleBases.push({ path: entry.path, entries });
+  });
+  const moduleBases = [{ path: rootPath, entries: rootItems }];
+  for (const module of nestedModules) {
+    if (module) moduleBases.push(module);
   }
   for (const module of moduleBases) {
     await addSourceRoot(module.path, module.entries, ["src", "main", "java"]);

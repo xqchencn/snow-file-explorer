@@ -6,7 +6,8 @@
  */
 
 import { el, escapeHtml, copyToClipboard } from "../utils/dom.js";
-import { highlightCodeHtml, shouldHighlight, isLargeText } from "./highlighter.js";
+import { MAX_HIGHLIGHT_LINE_LEN, shouldHighlight, shouldVirtualize } from "./highlight-policy.js";
+import { ensureHighlighter, highlighterReady, highlightCodeHtml } from "./highlight-client.js";
 import { createVirtualList } from "./virtual-list.js";
 import { createActionIcon } from "../icons/action-icons.js";
 import { resolveMarkdownAssetPath, resolveProxiedImageSrc } from "../services/markdown-asset.js";
@@ -502,7 +503,7 @@ export function renderCodeViewer(
       renderDiffView(diffPane, {
         result: preview.diff.result,
         // 全文件差异：透传工作区新版本完整文本
-        fullContent: preview.diff.fullContent ?? preview.text ?? null,
+        fullContent: typeof preview.diff.fullContent === "string" ? preview.diff.fullContent : null,
         loading: preview.diff.loading,
         error: preview.diff.error,
         // 使用文件扩展名选择 Prism 语言，确保差异正文与普通代码预览使用同一套高亮规则
@@ -617,17 +618,36 @@ export function renderCodeViewer(
       const editScroll = el("div", "sfe-file-viewer-edit-scroll");
       const editHighlight = el("pre", "sfe-file-viewer-edit-highlight sfe-file-viewer-code");
       editHighlight.setAttribute("aria-hidden", "true");
-      const updateEditHighlight = (value) => {
-        const source = String(value ?? "");
-        // 编辑态每次输入都会重建高亮层：超大文件逐次全量 Prism 会随按键持续阻塞主线程。
-        // 超过熔断阈值时编辑层退化为纯文本转义，真实输入仍由 textarea 承载。
-        editHighlight.innerHTML = shouldHighlight(source)
-          ? highlightCodeHtml(source, extname(preview.name)) || escapeHtml(source)
-          : escapeHtml(source);
-        // 保留末尾空行的高度，避免输入换行后高亮层比 textarea 少一行。
+      let editHighlightTimer = 0;
+      const paintEditHighlight = (source) => {
+        // 超过整篇熔断的文件不再随按键重跑全文分词。只读态仍按可视行高亮。
+        if (!shouldHighlight(source) || !highlighterReady()) {
+          editHighlight.textContent = source;
+        } else {
+          const html = highlightCodeHtml(source, extname(preview.name));
+          editHighlight.innerHTML = html || escapeHtml(source);
+        }
         if (source.endsWith("\n")) editHighlight.appendChild(document.createTextNode(" "));
       };
-      updateEditHighlight(preview.text);
+      const updateEditHighlight = (value, immediate) => {
+        const source = String(value ?? "");
+        if (editHighlightTimer) clearTimeout(editHighlightTimer);
+        if (immediate || !shouldHighlight(source)) {
+          paintEditHighlight(source);
+          return;
+        }
+        editHighlightTimer = setTimeout(() => {
+          editHighlightTimer = 0;
+          paintEditHighlight(source);
+        }, 80);
+      };
+      updateEditHighlight(preview.text, true);
+      if (!highlighterReady() && shouldHighlight(preview.text)) {
+        void ensureHighlighter().then(() => {
+          if (!editHighlight.isConnected) return;
+          paintEditHighlight(String(preview.text || ""));
+        });
+      }
 
       const textarea = document.createElement("textarea");
       textarea.className = "sfe-file-viewer-textarea";
@@ -660,26 +680,38 @@ export function renderCodeViewer(
         ...buildJvmMainCommandMap(preview, runCommands),
       ]);
 
-      // 大文件已被高亮熔断降级为纯文本，逐行渲染不会切坏跨行 token；
-      // 虚拟列表只渲染「可视区 + 缓冲」的行，DOM 数量与总行数解耦，因此无需截断内容。
-      // 小文件仍整块高亮，避免把多行注释 / 字符串的跨行 token 按行切碎。
-      if (isLargeText(rawText)) {
+      // 约 400 行以上只渲染可视行。小文件仍整块高亮，避免把跨行 token 按行切碎。
+      // 大文件同样给可视行上色；只有超长单行跳过，避免压缩文件把分词拖死。
+      if (shouldVirtualize(rawText)) {
         scroll.classList.add("sfe-file-viewer-code-scroll-virtual");
         bodyEl.appendChild(scroll);
+        const ext = extname(preview.name);
         const list = createVirtualList({
           viewport: scroll,
           renderRow: (lineText, index) => {
             const row = el("div", "sfe-file-viewer-line");
             row.appendChild(el("span", "sfe-file-viewer-line-no", String(index + 1)));
-            // 命中运行入口的行内追加 ▶（与整块高亮模式一致的 gutter 运行入口）
             const command = runLineMap.get(index + 1);
             if (command) row.appendChild(createGutterRunButton(command, onRunCommand, t));
-            row.appendChild(el("span", "sfe-file-viewer-line-text", lineText));
+            const text = el("span", "sfe-file-viewer-line-text");
+            const source = String(lineText ?? "");
+            const html = source.length > 0 && source.length <= MAX_HIGHLIGHT_LINE_LEN && highlighterReady()
+              ? highlightCodeHtml(source, ext)
+              : "";
+            if (html) text.innerHTML = html;
+            else text.textContent = source;
+            row.appendChild(text);
             return row;
           },
         });
         bodyEl.__sfeVList = list;
         list.setItems(linesArray);
+        if (!highlighterReady()) {
+          void ensureHighlighter().then(() => {
+            if (!scroll.isConnected || !highlighterReady()) return;
+            list.refresh();
+          });
+        }
       } else {
         const pre = el("pre", "sfe-file-viewer-code");
         const total = linesArray.length;
@@ -697,9 +729,21 @@ export function renderCodeViewer(
         }
         pre.appendChild(gutter);
 
-        // 代码高亮内容
+        // 已有高亮 HTML（调用方预计算或单测注入）直接用。否则先出纯文本，高亮块到达后再替换。
         const content = el("div", "sfe-file-viewer-code-content");
-        content.innerHTML = preview.highlightedHtml || escapeHtml(rawText);
+        if (preview.highlightedHtml) {
+          content.innerHTML = preview.highlightedHtml;
+        } else {
+          content.innerHTML = escapeHtml(rawText);
+          if (shouldHighlight(rawText)) {
+            const ext = extname(preview.name);
+            void ensureHighlighter().then(() => {
+              if (!content.isConnected || !highlighterReady()) return;
+              const html = highlightCodeHtml(rawText, ext);
+              if (html) content.innerHTML = html;
+            });
+          }
+        }
         pre.appendChild(content);
 
         scroll.appendChild(pre);

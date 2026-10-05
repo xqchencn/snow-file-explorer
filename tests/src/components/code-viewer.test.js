@@ -37,6 +37,9 @@ const { renderMarkdownHtml } = await import('../../../src/components/markdown-re
 const { renderCodeViewer } = await import('../../../src/components/code-viewer.js');
 const { parseUnifiedDiff } = await import('../../../src/services/diff.js');
 const { resolveProxiedImageSrc } = await import('../../../src/services/markdown-asset.js');
+const { highlightCodeHtml, shouldHighlight } = await import('../../../src/components/highlighter.js');
+const { installHighlighter } = await import('../../../src/components/highlight-client.js');
+installHighlighter({ highlightCodeHtml, shouldHighlight });
 
 const t = (_key, fallback) => fallback || _key;
 test('预览组件: Markdown 默认预览模式，可切代码模式，仅本地图片转异步回填属性', () => {
@@ -243,9 +246,8 @@ test('Git 差异视图: 按文件语言高亮增删行正文并保持源码安�
   assert.equal(host.querySelector('.sfe-floating-edit-btn'), null, 'Git 差异视图不应出现编辑按钮');
 });
 
-test('Git 差异视图: 超大差异整体降级为纯文本，不再逐行调用 Prism', () => {
+test('Git 差异视图: 超大全文仍展开整份文件，可视行保留语法高亮', () => {
   const host = document.createElement('div');
-  // 构造超过行数熔断阈值（4000 行）的全文件差异，触发整体降级
   const fullContent = Array.from({ length: 4100 }, (_, i) => `const v${i} = ${i};`).join('\n');
   const result = parseUnifiedDiff('@@ -1,1 +1,1 @@\n-const changed = 1;\n+const changed = 2;');
 
@@ -265,10 +267,13 @@ test('Git 差异视图: 超大差异整体降级为纯文本，不再逐行调�
   });
 
   const added = host.querySelector('.sfe-diff-line.add .sfe-diff-text');
-  assert.ok(added, '大 diff 仍应渲染差异行');
-  assert.equal(added.textContent, 'const changed = 2;', '降级后正文必须完整保留');
-  // 核心契约：大 diff 不产生任何 Prism token，避免数千次同步分词阻塞主线程
-  assert.equal(host.querySelector('.sfe-diff-text .token'), null, '大 diff 不应产生语法 token');
+  assert.ok(added, '大文件差异仍应渲染变更行');
+  assert.equal(added.textContent, 'const changed = 2;', '变更行正文必须完整保留');
+  assert.ok(added.querySelector('.token.keyword'), '大文件可视行应保留语法高亮');
+  const rows = host.querySelectorAll('.sfe-diff-line');
+  assert.ok(rows.length > 0 && rows.length < 80, `可视 DOM 行数应受限，实际 ${rows.length}`);
+  const spacer = host.querySelector('.sfe-vlist-spacer');
+  assert.ok(spacer && parseFloat(spacer.style.height) > 4000 * 18, '占位高度应按整份文件撑开');
 });
 
 test('预览组件: 大文件只读态走虚拟滚动，小文件保持整块高亮', () => {
@@ -299,6 +304,26 @@ test('预览组件: 大文件只读态走虚拟滚动，小文件保持整块高
   assert.ok(rows.length < 4200, `DOM 行数应远小于总行数，实际 ${rows.length}`);
   assert.equal(rows[0].querySelector('.sfe-file-viewer-line-no').textContent, '1', '首行号从 1 开始');
   assert.equal(rows[0].querySelector('.sfe-file-viewer-line-text').textContent, 'line 0', '首行正文正确');
+
+  const codeHost = document.createElement('div');
+  const codeText = Array.from({ length: 4200 }, (_, i) => `const line${i} = ${i};`).join('\n');
+  renderCodeViewer(codeHost, {
+    preview: {
+      kind: 'text',
+      name: 'big.js',
+      path: 'D:/repo/big.js',
+      text: codeText,
+      highlightedHtml: '',
+      isMarkdown: false,
+      mode: 'preview',
+    },
+    copied: false,
+    onCopy: () => {},
+    t,
+  });
+  const codeLine = codeHost.querySelector('.sfe-file-viewer-line-text');
+  assert.ok(codeLine.querySelector('.token.keyword'), '大文件可视行应保留语法高亮');
+  assert.equal(codeLine.textContent, 'const line0 = 0;', '高亮后正文必须完整保留');
   // 滚动占位高度按总行数撑满，保证滚动条与总行数一致（内容未截断）
   const spacer = scroll.querySelector('.sfe-vlist-spacer');
   assert.ok(spacer, '应存在撑起总高度的占位元素');
