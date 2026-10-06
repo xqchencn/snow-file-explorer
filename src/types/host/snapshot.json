@@ -1,0 +1,76 @@
+{
+  "hostRoot": "D:/app/code/snow-app",
+  "sourceCommit": "237b2bb64cfc87d57a170610b8131b8f8d60f95d",
+  "syncedAt": "2026-10-05",
+  "rootModules": [
+    {
+      "dir": "src/preload/types",
+      "prefix": "host",
+      "roots": [
+        "workspace",
+        "git",
+        "api",
+        "settings",
+        "ssh",
+        "plugins"
+      ]
+    },
+    {
+      "dir": "src/renderer/plugins",
+      "prefix": "plugin",
+      "roots": [
+        "types",
+        "writes/types"
+      ]
+    },
+    {
+      "dir": "src/shared",
+      "prefix": "shared",
+      "roots": [
+        "locale"
+      ]
+    }
+  ],
+  "files": {
+    "host-api.ts": {
+      "source": "src/preload/types/api.ts",
+      "sha256": "d5f2ec82ed51bfcd96f41b3a2c0e4f0e256ea043985c37afdaa4137e71a778a0"
+    },
+    "host-git.ts": {
+      "source": "src/preload/types/git.ts",
+      "sha256": "19c437571e1ed2d53195d2cf3833365ce529d7a59035999ebd4e42d266c48c19"
+    },
+    "host-plugins.ts": {
+      "source": "src/preload/types/plugins.ts",
+      "sha256": "a7e186721823bcc79fe90795224aeb916f064adb983e4133bfa512b32623ecfb"
+    },
+    "host-settings.ts": {
+      "source": "src/preload/types/settings.ts",
+      "sha256": "455837848759503010ad78365c8ee31261f5dd299d32a3fd6a6bcbcf7000cf35"
+    },
+    "host-ssh.ts": {
+      "source": "src/preload/types/ssh.ts",
+      "sha256": "bcf2508e366bbfd8fd9921ff63a3b355cbbb2cc682768ecfa89399184393592a"
+    },
+    "host-workspace.ts": {
+      "source": "src/preload/types/workspace.ts",
+      "sha256": "a5c0f5a2c6cf998b357e54dd516af5963412bea5e232b0ba299eada20f2dd1a0"
+    },
+    "plugin-types.ts": {
+      "source": "src/renderer/plugins/types.ts",
+      "sha256": "e4536daadcca9f0f18d8a1cdb7ed4be8e4743363aca822daf1f1dd026d4868e1"
+    },
+    "plugin-writes-types.ts": {
+      "source": "src/renderer/plugins/writes/types.ts",
+      "sha256": "b944efc48db17c8353141742e546e9d14a09a9faf2017da79387ca8e0d38c7d9"
+    },
+    "shared-locale.ts": {
+      "source": "src/shared/locale.ts",
+      "sha256": "bbcc641c9fe0a43f32c1bc08bdbdf048a10a8d2ca4c0a21534eb2e27a0de08a7"
+    },
+    "index.ts": {
+      "source": "(生成：快照内模块的类型汇总出口)",
+      "sha256": "d1c44cafaf8bb8f2eec4f0a1896b45d17fece2194bae8e53212598547fb8d18e"
+    }
+  }
+}

@@ -185,13 +185,37 @@ tag 去掉开头的 `v` 后必须与 `package.json.version` 完全一致，否�
 ## 本地开发命令
 
 ```powershell
-npm install       # 安装依赖
-npm run lint      # 检查源码
-npm run build     # 生成 dist 独立安装包
-npm test          # 运行测试（需要先生成 dist）
+npm install          # 安装依赖
+npm run check:types  # TypeScript 类型检查（不产出文件）
+npm run lint         # 检查源码
+npm run build        # 生成 dist 独立安装包
+npm test             # 运行测试（需要先生成 dist）
+npm run check        # 上面几项一次跑完
 ```
 
 源码修改应放在 `src/` 和 `locales/`，不要直接编辑 `dist/`。`dist/` 是构建产物，下一次 `npm run build` 会完整重建它。
+
+## 宿主 API 契约（维护者）
+
+插件用 TypeScript 编写，对 Snow App 宿主原始 API（`window.snow`）的调用是强类型的。类型的真源在宿主仓库，不在本仓库：
+
+- `src/types/snow-api.ts` —— 插件实际用到的 33 个 `window.snow` 方法，逐个标注宿主出处
+- `src/types/plugin-runtime.ts` —— 宿主注入给插件的运行时 API（`api.t`、`api.storage`、`api.write` 等），手写镜像
+- `src/types/prismjs.d.ts` —— `prismjs` 的类型镜像（该包不发类型、本仓也不装 `@types/prismjs`），只覆盖插件用到的 `languages` 与 `highlight`
+- `src/types/host/` —— 宿主类型逐字快照，由 `tools/sync-host-api.mjs` 生成，**不要手工编辑**
+- `src/components/prism-langs.ts`、`src/icons/icon-data.ts` —— Prism 语言表与 Material 图标数据，由 `tools/generate.mjs` 从依赖里的权威清单生成，**不要手工编辑**（升级 `prismjs` / `material-icon-theme` 后重跑 `npm run generate`）
+- `docs/host-api.md` —— 方法清单、宿主文件行号与签名对照表
+
+本机装有 snow-app 源码时，升级宿主后同步一次（路径不同时用 `SNOW_APP_ROOT` 指定）：
+
+```powershell
+npm run sync:host    # 从宿主源码重新生成快照
+npm run check:host   # 校验快照是否落后于宿主
+```
+
+`check:host` 有两层：仓库内文件与 `snapshot.json` 记录哈希的自洽校验（CI 上无宿主仓库也能跑），以及本机存在宿主仓库时追加的漂移校验。
+
+文件改名、删除、写内容走 `api.write.run("filesystem.*")` 而不是原始 API：宿主在这条通道上按 `plugin.json` 的 `privacy.scopes` 做门控。Git 与终端 PTY 宿主没有提供治理动作，只能走 `window.snow`，这是有意为之的分工，细节见 `docs/host-api.md`。
 
 ## 许可证
 

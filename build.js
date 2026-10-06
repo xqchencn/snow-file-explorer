@@ -34,7 +34,7 @@ async function runBuild() {
   fs.mkdirSync(distDir, { recursive: true });
   fs.mkdirSync(localesDistDir, { recursive: true });
 
-  const jsEntry = path.join(srcDir, 'index.js');
+  const jsEntry = path.join(srcDir, 'index.ts');
   const distJsOut = path.join(distDir, 'index.js');
   const chunksDir = path.join(distDir, 'chunks');
 
@@ -48,9 +48,9 @@ async function runBuild() {
   const stubSourceChunk = {
     name: 'stub-source-chunk',
     setup(build) {
-      build.onResolve({ filter: /lazy-chunk-source\.js$/ }, (args) => {
+      build.onResolve({ filter: /lazy-chunk-source\.[jt]s$/ }, (args) => {
         const importer = String(args.importer || "").replace(/\\/g, "/");
-        if (importer.endsWith("/lazy-chunk.js")) {
+        if (importer.endsWith("/lazy-chunk.ts")) {
           return { path: "sfe-lazy-source-stub", namespace: "sfe-stub" };
         }
         return null;
@@ -79,10 +79,10 @@ async function runBuild() {
   // 2. 打包入口与按需块。块之间互不引用，宿主用 readPluginFile 单独加载。
   console.log('📦 [Build] 打包并压缩 JavaScript -> dist/index.js + dist/chunks/...');
   await bundleScript(jsEntry, distJsOut, [stubSourceChunk]);
-  await bundleScript(path.join(srcDir, 'lazy', 'icons.js'), path.join(chunksDir, 'icons.js'));
-  await bundleScript(path.join(srcDir, 'lazy', 'highlighter.js'), path.join(chunksDir, 'highlighter.js'));
-  await bundleScript(path.join(srcDir, 'lazy', 'terminal.js'), path.join(chunksDir, 'terminal.js'));
-  await bundleScript(path.join(srcDir, 'lazy', 'markdown.js'), path.join(chunksDir, 'markdown.js'));
+  await bundleScript(path.join(srcDir, 'lazy', 'icons.ts'), path.join(chunksDir, 'icons.js'));
+  await bundleScript(path.join(srcDir, 'lazy', 'highlighter.ts'), path.join(chunksDir, 'highlighter.js'));
+  await bundleScript(path.join(srcDir, 'lazy', 'terminal.ts'), path.join(chunksDir, 'terminal.js'));
+  await bundleScript(path.join(srcDir, 'lazy', 'markdown.ts'), path.join(chunksDir, 'markdown.js'));
 
   const jsStat = fs.statSync(distJsOut);
   console.log(`✅ [Build] 入口打包完成: ${(jsStat.size / 1024).toFixed(1)} KB`);

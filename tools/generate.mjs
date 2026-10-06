@@ -4,11 +4,12 @@
  *   node tools/generate.mjs
  *
  * 产出：
- *   1. src/components/prism-langs.js —— Prism 全量语言注册 + 扩展名映射
+ *   1. src/components/prism-langs.ts —— Prism 全量语言注册 + 扩展名映射
  *      数据源：node_modules/prismjs/components.json（Prism 官方清单，权威）
- *   2. src/icons/icon-data.js —— Material Icon Theme 彩色文件图标数据
+ *   2. src/icons/icon-data.ts —— Material Icon Theme 彩色文件图标数据
  *      数据源：node_modules/material-icon-theme/dist/material-icons.json（VSCode 官方图标主题，权威）
  *
+ * 两个产物都是 .ts：导出常量带字典类型标注（只标注、不改数据），编译期擦除后与 HEAD 的 .js 产物逐字节一致。
  * 升级 prismjs / material-icon-theme 依赖后重新运行本脚本即可同步。
  */
 import fs from "node:fs";
@@ -74,7 +75,7 @@ Object.assign(extMap, {
 });
 
 let prismCode = `/**
- * Prism 全量语言注册模块 (src/components/prism-langs.js)
+ * Prism 全量语言注册模块 (src/components/prism-langs.ts)
  * 【生成文件 · 禁止手改】由 tools/generate.mjs 基于 node_modules/prismjs/components.json 产出。
  * 覆盖 prism 全部 ${ids.length} 种语言：核心已内置 ${CORE.join(" / ")}，
  * 其余 ${toImport.length} 种按依赖拓扑序 import（components.json 键序非拓扑序，顺序加载会有 26 处依赖倒序报错）。
@@ -85,12 +86,16 @@ import Prism from "prismjs";
 `;
 for (const id of toImport) prismCode += `import "prismjs/components/prism-${id}.js";\n`;
 prismCode += `
-/** 文件扩展名 / 语言别名 → prism 语言名 */
-export const EXT_TO_PRISM_LANG = ${JSON.stringify(extMap, null, 2)};
+/**
+ * 文件扩展名 / 语言别名 → prism 语言名。
+ * @description 标注成字典而不是 438 个字面量键：消费方拿到的扩展名来自任意文件名，
+ *   按键查表「查不到」是正常路径，所以值显式含 undefined，调用点必须自己兜底。
+ */
+export const EXT_TO_PRISM_LANG: Record<string, string | undefined> = ${JSON.stringify(extMap, null, 2)};
 
 export default Prism;
 `;
-write("src/components/prism-langs.js", prismCode);
+write("src/components/prism-langs.ts", prismCode);
 
 // ---------------------------------------------------------------- 文件图标
 // 数据源：material-icon-theme 官方数据（VSCode 官方文件图标主题）
@@ -146,8 +151,10 @@ const EXTRA_ICONS = {
 };
 for (const [id, svg] of Object.entries(EXTRA_ICONS)) iconSvgs[id] = svg;
 
+// 三张映射表逐条缩进换行（JSON.stringify 第三参数）：压成单行会把 1.3MB SVG 堆在一行上，
+// IDE 巡检每告警带一次整行、git diff 也整文件抖动。缩进属空白，esbuild 的 minifyWhitespace 会重新压掉。
 let iconCode = `/**
- * Material Icon Theme 彩色文件图标数据 (src/icons/icon-data.js)
+ * Material Icon Theme 彩色文件图标数据 (src/icons/icon-data.ts)
  * 【生成文件 · 禁止手改】由 tools/generate.mjs 基于 material-icon-theme 官方数据产出。
  * ${Object.keys(iconSvgs).length} 个彩色 SVG 图标（VSCode 官方文件图标主题），
  * 含 ${Object.keys(iconExt).length} 条扩展名映射与 ${Object.keys(iconName).length} 条特殊文件名映射。
@@ -158,16 +165,16 @@ export const FOLDER = ${JSON.stringify(ICON_FOLDER)};
 export const FOLDER_OPEN = ${JSON.stringify(ICON_FOLDER_OPEN)};
 
 /** 扩展名（小写，不含点）→ 图标 id */
-export const EXT_ICONS = ${JSON.stringify(iconExt)};
+export const EXT_ICONS: Record<string, string> = ${JSON.stringify(iconExt, null, 2)};
 
 /** 完整文件名（小写）→ 图标 id */
-export const NAME_ICONS = ${JSON.stringify(iconName)};
+export const NAME_ICONS: Record<string, string> = ${JSON.stringify(iconName, null, 2)};
 
 /** 图标 id → 压缩后的 SVG 字符串 */
-export const ICON_SVGS = ${JSON.stringify(iconSvgs)};
+export const ICON_SVGS: Record<string, string> = ${JSON.stringify(iconSvgs, null, 2)};
 `;
-write("src/icons/icon-data.js", iconCode);
+write("src/icons/icon-data.ts", iconCode);
 
 console.log("✅ 已生成:");
-console.log(`   src/components/prism-langs.js  (${ids.length} 语言, import ${toImport.length}, 映射 ${Object.keys(extMap).length} 条)`);
-console.log(`   src/icons/icon-data.js         (彩色图标 ${Object.keys(iconSvgs).length}, 扩展名 ${Object.keys(iconExt).length}, 文件名 ${Object.keys(iconName).length}, 缺失 ${iconMissing})`);
+console.log(`   src/components/prism-langs.ts  (${ids.length} 语言, import ${toImport.length}, 映射 ${Object.keys(extMap).length} 条)`);
+console.log(`   src/icons/icon-data.ts         (彩色图标 ${Object.keys(iconSvgs).length}, 扩展名 ${Object.keys(iconExt).length}, 文件名 ${Object.keys(iconName).length}, 缺失 ${iconMissing})`);

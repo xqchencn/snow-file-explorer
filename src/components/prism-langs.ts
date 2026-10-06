@@ -1,0 +1,755 @@
+/**
+ * Prism 全量语言注册模块 (src/components/prism-langs.ts)
+ * 【生成文件 · 禁止手改】由 tools/generate.mjs 基于 node_modules/prismjs/components.json 产出。
+ * 覆盖 prism 全部 297 种语言：核心已内置 markup / css / clike / javascript，
+ * 其余 293 种按依赖拓扑序 import（components.json 键序非拓扑序，顺序加载会有 26 处依赖倒序报错）。
+ */
+
+import Prism from "prismjs";
+
+import "prismjs/components/prism-abap.js";
+import "prismjs/components/prism-abnf.js";
+import "prismjs/components/prism-actionscript.js";
+import "prismjs/components/prism-ada.js";
+import "prismjs/components/prism-agda.js";
+import "prismjs/components/prism-al.js";
+import "prismjs/components/prism-antlr4.js";
+import "prismjs/components/prism-apacheconf.js";
+import "prismjs/components/prism-sql.js";
+import "prismjs/components/prism-apex.js";
+import "prismjs/components/prism-apl.js";
+import "prismjs/components/prism-applescript.js";
+import "prismjs/components/prism-aql.js";
+import "prismjs/components/prism-c.js";
+import "prismjs/components/prism-cpp.js";
+import "prismjs/components/prism-arduino.js";
+import "prismjs/components/prism-arff.js";
+import "prismjs/components/prism-armasm.js";
+import "prismjs/components/prism-arturo.js";
+import "prismjs/components/prism-asciidoc.js";
+import "prismjs/components/prism-csharp.js";
+import "prismjs/components/prism-aspnet.js";
+import "prismjs/components/prism-asm6502.js";
+import "prismjs/components/prism-asmatmel.js";
+import "prismjs/components/prism-autohotkey.js";
+import "prismjs/components/prism-autoit.js";
+import "prismjs/components/prism-avisynth.js";
+import "prismjs/components/prism-avro-idl.js";
+import "prismjs/components/prism-awk.js";
+import "prismjs/components/prism-bash.js";
+import "prismjs/components/prism-basic.js";
+import "prismjs/components/prism-batch.js";
+import "prismjs/components/prism-bbcode.js";
+import "prismjs/components/prism-bbj.js";
+import "prismjs/components/prism-bicep.js";
+import "prismjs/components/prism-birb.js";
+import "prismjs/components/prism-bison.js";
+import "prismjs/components/prism-bnf.js";
+import "prismjs/components/prism-bqn.js";
+import "prismjs/components/prism-brainfuck.js";
+import "prismjs/components/prism-brightscript.js";
+import "prismjs/components/prism-bro.js";
+import "prismjs/components/prism-bsl.js";
+import "prismjs/components/prism-cfscript.js";
+import "prismjs/components/prism-chaiscript.js";
+import "prismjs/components/prism-cil.js";
+import "prismjs/components/prism-cilkc.js";
+import "prismjs/components/prism-cilkcpp.js";
+import "prismjs/components/prism-clojure.js";
+import "prismjs/components/prism-cmake.js";
+import "prismjs/components/prism-cobol.js";
+import "prismjs/components/prism-coffeescript.js";
+import "prismjs/components/prism-concurnas.js";
+import "prismjs/components/prism-csp.js";
+import "prismjs/components/prism-cooklang.js";
+import "prismjs/components/prism-coq.js";
+import "prismjs/components/prism-ruby.js";
+import "prismjs/components/prism-crystal.js";
+import "prismjs/components/prism-css-extras.js";
+import "prismjs/components/prism-csv.js";
+import "prismjs/components/prism-cue.js";
+import "prismjs/components/prism-cypher.js";
+import "prismjs/components/prism-d.js";
+import "prismjs/components/prism-dart.js";
+import "prismjs/components/prism-dataweave.js";
+import "prismjs/components/prism-dax.js";
+import "prismjs/components/prism-dhall.js";
+import "prismjs/components/prism-diff.js";
+import "prismjs/components/prism-markup-templating.js";
+import "prismjs/components/prism-django.js";
+import "prismjs/components/prism-dns-zone-file.js";
+import "prismjs/components/prism-docker.js";
+import "prismjs/components/prism-dot.js";
+import "prismjs/components/prism-ebnf.js";
+import "prismjs/components/prism-editorconfig.js";
+import "prismjs/components/prism-eiffel.js";
+import "prismjs/components/prism-ejs.js";
+import "prismjs/components/prism-elixir.js";
+import "prismjs/components/prism-elm.js";
+import "prismjs/components/prism-lua.js";
+import "prismjs/components/prism-etlua.js";
+import "prismjs/components/prism-erb.js";
+import "prismjs/components/prism-erlang.js";
+import "prismjs/components/prism-excel-formula.js";
+import "prismjs/components/prism-fsharp.js";
+import "prismjs/components/prism-factor.js";
+import "prismjs/components/prism-false.js";
+import "prismjs/components/prism-firestore-security-rules.js";
+import "prismjs/components/prism-flow.js";
+import "prismjs/components/prism-fortran.js";
+import "prismjs/components/prism-ftl.js";
+import "prismjs/components/prism-gml.js";
+import "prismjs/components/prism-gap.js";
+import "prismjs/components/prism-gcode.js";
+import "prismjs/components/prism-gdscript.js";
+import "prismjs/components/prism-gedcom.js";
+import "prismjs/components/prism-gettext.js";
+import "prismjs/components/prism-gherkin.js";
+import "prismjs/components/prism-git.js";
+import "prismjs/components/prism-glsl.js";
+import "prismjs/components/prism-gn.js";
+import "prismjs/components/prism-linker-script.js";
+import "prismjs/components/prism-go.js";
+import "prismjs/components/prism-go-module.js";
+import "prismjs/components/prism-gradle.js";
+import "prismjs/components/prism-graphql.js";
+import "prismjs/components/prism-groovy.js";
+import "prismjs/components/prism-haml.js";
+import "prismjs/components/prism-handlebars.js";
+import "prismjs/components/prism-haskell.js";
+import "prismjs/components/prism-haxe.js";
+import "prismjs/components/prism-hcl.js";
+import "prismjs/components/prism-hlsl.js";
+import "prismjs/components/prism-hoon.js";
+import "prismjs/components/prism-http.js";
+import "prismjs/components/prism-hpkp.js";
+import "prismjs/components/prism-hsts.js";
+import "prismjs/components/prism-ichigojam.js";
+import "prismjs/components/prism-icon.js";
+import "prismjs/components/prism-icu-message-format.js";
+import "prismjs/components/prism-idris.js";
+import "prismjs/components/prism-ignore.js";
+import "prismjs/components/prism-inform7.js";
+import "prismjs/components/prism-ini.js";
+import "prismjs/components/prism-io.js";
+import "prismjs/components/prism-j.js";
+import "prismjs/components/prism-java.js";
+import "prismjs/components/prism-javadoclike.js";
+import "prismjs/components/prism-javadoc.js";
+import "prismjs/components/prism-javastacktrace.js";
+import "prismjs/components/prism-jexl.js";
+import "prismjs/components/prism-jolie.js";
+import "prismjs/components/prism-jq.js";
+import "prismjs/components/prism-typescript.js";
+import "prismjs/components/prism-jsdoc.js";
+import "prismjs/components/prism-js-extras.js";
+import "prismjs/components/prism-json.js";
+import "prismjs/components/prism-json5.js";
+import "prismjs/components/prism-jsonp.js";
+import "prismjs/components/prism-jsstacktrace.js";
+import "prismjs/components/prism-js-templates.js";
+import "prismjs/components/prism-julia.js";
+import "prismjs/components/prism-keepalived.js";
+import "prismjs/components/prism-keyman.js";
+import "prismjs/components/prism-kotlin.js";
+import "prismjs/components/prism-kumir.js";
+import "prismjs/components/prism-kusto.js";
+import "prismjs/components/prism-latex.js";
+import "prismjs/components/prism-php.js";
+import "prismjs/components/prism-latte.js";
+import "prismjs/components/prism-less.js";
+import "prismjs/components/prism-scheme.js";
+import "prismjs/components/prism-lilypond.js";
+import "prismjs/components/prism-liquid.js";
+import "prismjs/components/prism-lisp.js";
+import "prismjs/components/prism-livescript.js";
+import "prismjs/components/prism-llvm.js";
+import "prismjs/components/prism-log.js";
+import "prismjs/components/prism-lolcode.js";
+import "prismjs/components/prism-magma.js";
+import "prismjs/components/prism-makefile.js";
+import "prismjs/components/prism-markdown.js";
+import "prismjs/components/prism-mata.js";
+import "prismjs/components/prism-matlab.js";
+import "prismjs/components/prism-maxscript.js";
+import "prismjs/components/prism-mel.js";
+import "prismjs/components/prism-mermaid.js";
+import "prismjs/components/prism-metafont.js";
+import "prismjs/components/prism-mizar.js";
+import "prismjs/components/prism-mongodb.js";
+import "prismjs/components/prism-monkey.js";
+import "prismjs/components/prism-moonscript.js";
+import "prismjs/components/prism-n1ql.js";
+import "prismjs/components/prism-n4js.js";
+import "prismjs/components/prism-nand2tetris-hdl.js";
+import "prismjs/components/prism-naniscript.js";
+import "prismjs/components/prism-nasm.js";
+import "prismjs/components/prism-neon.js";
+import "prismjs/components/prism-nevod.js";
+import "prismjs/components/prism-nginx.js";
+import "prismjs/components/prism-nim.js";
+import "prismjs/components/prism-nix.js";
+import "prismjs/components/prism-nsis.js";
+import "prismjs/components/prism-objectivec.js";
+import "prismjs/components/prism-ocaml.js";
+import "prismjs/components/prism-odin.js";
+import "prismjs/components/prism-opencl.js";
+import "prismjs/components/prism-openqasm.js";
+import "prismjs/components/prism-oz.js";
+import "prismjs/components/prism-parigp.js";
+import "prismjs/components/prism-parser.js";
+import "prismjs/components/prism-pascal.js";
+import "prismjs/components/prism-pascaligo.js";
+import "prismjs/components/prism-psl.js";
+import "prismjs/components/prism-pcaxis.js";
+import "prismjs/components/prism-peoplecode.js";
+import "prismjs/components/prism-perl.js";
+import "prismjs/components/prism-phpdoc.js";
+import "prismjs/components/prism-php-extras.js";
+import "prismjs/components/prism-plant-uml.js";
+import "prismjs/components/prism-plsql.js";
+import "prismjs/components/prism-powerquery.js";
+import "prismjs/components/prism-powershell.js";
+import "prismjs/components/prism-processing.js";
+import "prismjs/components/prism-prolog.js";
+import "prismjs/components/prism-promql.js";
+import "prismjs/components/prism-properties.js";
+import "prismjs/components/prism-protobuf.js";
+import "prismjs/components/prism-pug.js";
+import "prismjs/components/prism-puppet.js";
+import "prismjs/components/prism-pure.js";
+import "prismjs/components/prism-purebasic.js";
+import "prismjs/components/prism-purescript.js";
+import "prismjs/components/prism-python.js";
+import "prismjs/components/prism-qsharp.js";
+import "prismjs/components/prism-q.js";
+import "prismjs/components/prism-qml.js";
+import "prismjs/components/prism-qore.js";
+import "prismjs/components/prism-r.js";
+import "prismjs/components/prism-racket.js";
+import "prismjs/components/prism-cshtml.js";
+import "prismjs/components/prism-jsx.js";
+import "prismjs/components/prism-tsx.js";
+import "prismjs/components/prism-reason.js";
+import "prismjs/components/prism-regex.js";
+import "prismjs/components/prism-rego.js";
+import "prismjs/components/prism-renpy.js";
+import "prismjs/components/prism-rescript.js";
+import "prismjs/components/prism-rest.js";
+import "prismjs/components/prism-rip.js";
+import "prismjs/components/prism-roboconf.js";
+import "prismjs/components/prism-robotframework.js";
+import "prismjs/components/prism-rust.js";
+import "prismjs/components/prism-sas.js";
+import "prismjs/components/prism-sass.js";
+import "prismjs/components/prism-scss.js";
+import "prismjs/components/prism-scala.js";
+import "prismjs/components/prism-shell-session.js";
+import "prismjs/components/prism-smali.js";
+import "prismjs/components/prism-smalltalk.js";
+import "prismjs/components/prism-smarty.js";
+import "prismjs/components/prism-sml.js";
+import "prismjs/components/prism-solidity.js";
+import "prismjs/components/prism-solution-file.js";
+import "prismjs/components/prism-soy.js";
+import "prismjs/components/prism-turtle.js";
+import "prismjs/components/prism-sparql.js";
+import "prismjs/components/prism-splunk-spl.js";
+import "prismjs/components/prism-sqf.js";
+import "prismjs/components/prism-squirrel.js";
+import "prismjs/components/prism-stan.js";
+import "prismjs/components/prism-stata.js";
+import "prismjs/components/prism-iecst.js";
+import "prismjs/components/prism-stylus.js";
+import "prismjs/components/prism-supercollider.js";
+import "prismjs/components/prism-swift.js";
+import "prismjs/components/prism-systemd.js";
+import "prismjs/components/prism-t4-templating.js";
+import "prismjs/components/prism-t4-cs.js";
+import "prismjs/components/prism-vbnet.js";
+import "prismjs/components/prism-t4-vb.js";
+import "prismjs/components/prism-yaml.js";
+import "prismjs/components/prism-tap.js";
+import "prismjs/components/prism-tcl.js";
+import "prismjs/components/prism-tt2.js";
+import "prismjs/components/prism-textile.js";
+import "prismjs/components/prism-toml.js";
+import "prismjs/components/prism-tremor.js";
+import "prismjs/components/prism-twig.js";
+import "prismjs/components/prism-typoscript.js";
+import "prismjs/components/prism-unrealscript.js";
+import "prismjs/components/prism-uorazor.js";
+import "prismjs/components/prism-uri.js";
+import "prismjs/components/prism-v.js";
+import "prismjs/components/prism-vala.js";
+import "prismjs/components/prism-velocity.js";
+import "prismjs/components/prism-verilog.js";
+import "prismjs/components/prism-vhdl.js";
+import "prismjs/components/prism-vim.js";
+import "prismjs/components/prism-visual-basic.js";
+import "prismjs/components/prism-warpscript.js";
+import "prismjs/components/prism-wasm.js";
+import "prismjs/components/prism-web-idl.js";
+import "prismjs/components/prism-wgsl.js";
+import "prismjs/components/prism-wiki.js";
+import "prismjs/components/prism-wolfram.js";
+import "prismjs/components/prism-wren.js";
+import "prismjs/components/prism-xeora.js";
+import "prismjs/components/prism-xml-doc.js";
+import "prismjs/components/prism-xojo.js";
+import "prismjs/components/prism-xquery.js";
+import "prismjs/components/prism-yang.js";
+import "prismjs/components/prism-zig.js";
+
+/**
+ * 文件扩展名 / 语言别名 → prism 语言名。
+ * @description 标注成字典而不是 438 个字面量键：消费方拿到的扩展名来自任意文件名，
+ *   按键查表「查不到」是正常路径，所以值显式含 undefined，调用点必须自己兜底。
+ */
+export const EXT_TO_PRISM_LANG: Record<string, string | undefined> = {
+  "markup": "markup",
+  "html": "markup",
+  "xml": "markup",
+  "svg": "markup",
+  "mathml": "markup",
+  "ssml": "markup",
+  "atom": "markup",
+  "rss": "markup",
+  "css": "css",
+  "clike": "clike",
+  "javascript": "javascript",
+  "js": "javascript",
+  "abap": "abap",
+  "abnf": "abnf",
+  "actionscript": "actionscript",
+  "ada": "ada",
+  "agda": "agda",
+  "al": "al",
+  "antlr4": "antlr4",
+  "g4": "antlr4",
+  "apacheconf": "apacheconf",
+  "apex": "apex",
+  "apl": "apl",
+  "applescript": "applescript",
+  "aql": "aql",
+  "arduino": "arduino",
+  "ino": "arduino",
+  "arff": "arff",
+  "armasm": "armasm",
+  "arm-asm": "armasm",
+  "arturo": "arturo",
+  "art": "arturo",
+  "asciidoc": "asciidoc",
+  "adoc": "asciidoc",
+  "aspnet": "aspnet",
+  "asm6502": "asm6502",
+  "asmatmel": "asmatmel",
+  "autohotkey": "autohotkey",
+  "autoit": "autoit",
+  "avisynth": "avisynth",
+  "avs": "avisynth",
+  "avro-idl": "avro-idl",
+  "avdl": "avro-idl",
+  "awk": "awk",
+  "gawk": "awk",
+  "bash": "bash",
+  "sh": "bash",
+  "shell": "bash",
+  "basic": "basic",
+  "batch": "batch",
+  "bbcode": "bbcode",
+  "shortcode": "bbcode",
+  "bbj": "bbj",
+  "bicep": "bicep",
+  "birb": "birb",
+  "bison": "bison",
+  "bnf": "bnf",
+  "rbnf": "bnf",
+  "bqn": "bqn",
+  "brainfuck": "brainfuck",
+  "brightscript": "brightscript",
+  "bro": "bro",
+  "bsl": "bsl",
+  "oscript": "bsl",
+  "c": "c",
+  "csharp": "csharp",
+  "cs": "csharp",
+  "dotnet": "csharp",
+  "cpp": "cpp",
+  "cfscript": "cfscript",
+  "cfc": "cfscript",
+  "chaiscript": "chaiscript",
+  "cil": "cil",
+  "cilkc": "cilkc",
+  "cilk-c": "cilkc",
+  "cilkcpp": "cilkcpp",
+  "cilk-cpp": "cilkcpp",
+  "cilk": "cilkcpp",
+  "clojure": "clojure",
+  "cmake": "cmake",
+  "cobol": "cobol",
+  "coffeescript": "coffeescript",
+  "coffee": "coffeescript",
+  "concurnas": "concurnas",
+  "conc": "concurnas",
+  "csp": "csp",
+  "cooklang": "cooklang",
+  "coq": "coq",
+  "crystal": "crystal",
+  "css-extras": "css-extras",
+  "csv": "csv",
+  "cue": "cue",
+  "cypher": "cypher",
+  "d": "d",
+  "dart": "dart",
+  "dataweave": "dataweave",
+  "dax": "dax",
+  "dhall": "dhall",
+  "diff": "diff",
+  "django": "django",
+  "jinja2": "django",
+  "dns-zone-file": "dns-zone-file",
+  "dns-zone": "dns-zone-file",
+  "docker": "docker",
+  "dockerfile": "docker",
+  "dot": "dot",
+  "gv": "dot",
+  "ebnf": "ebnf",
+  "editorconfig": "editorconfig",
+  "eiffel": "eiffel",
+  "ejs": "ejs",
+  "eta": "ejs",
+  "elixir": "elixir",
+  "elm": "elm",
+  "etlua": "etlua",
+  "erb": "erb",
+  "erlang": "erlang",
+  "excel-formula": "excel-formula",
+  "xlsx": "csv",
+  "xls": "csv",
+  "fsharp": "fsharp",
+  "factor": "factor",
+  "false": "false",
+  "firestore-security-rules": "firestore-security-rules",
+  "flow": "flow",
+  "fortran": "fortran",
+  "ftl": "ftl",
+  "gml": "gml",
+  "gamemakerlanguage": "gml",
+  "gap": "gap",
+  "gcode": "gcode",
+  "gdscript": "gdscript",
+  "gedcom": "gedcom",
+  "gettext": "gettext",
+  "po": "gettext",
+  "gherkin": "gherkin",
+  "git": "git",
+  "glsl": "glsl",
+  "gn": "gn",
+  "gni": "gn",
+  "linker-script": "linker-script",
+  "ld": "linker-script",
+  "go": "go",
+  "go-module": "go-module",
+  "go-mod": "go-module",
+  "gradle": "gradle",
+  "graphql": "graphql",
+  "groovy": "groovy",
+  "haml": "haml",
+  "handlebars": "handlebars",
+  "hbs": "handlebars",
+  "mustache": "handlebars",
+  "haskell": "haskell",
+  "hs": "haskell",
+  "haxe": "haxe",
+  "hcl": "hcl",
+  "hlsl": "hlsl",
+  "hoon": "hoon",
+  "http": "http",
+  "hpkp": "hpkp",
+  "hsts": "hsts",
+  "ichigojam": "ichigojam",
+  "icon": "icon",
+  "icu-message-format": "icu-message-format",
+  "idris": "idris",
+  "idr": "idris",
+  "ignore": "ignore",
+  "gitignore": "git",
+  "hgignore": "ignore",
+  "npmignore": "ignore",
+  "inform7": "inform7",
+  "ini": "ini",
+  "io": "io",
+  "j": "j",
+  "java": "java",
+  "javadoc": "javadoc",
+  "javadoclike": "javadoclike",
+  "javastacktrace": "javastacktrace",
+  "jexl": "jexl",
+  "jolie": "jolie",
+  "jq": "jq",
+  "jsdoc": "jsdoc",
+  "js-extras": "js-extras",
+  "json": "json",
+  "webmanifest": "json",
+  "json5": "json",
+  "jsonp": "jsonp",
+  "jsstacktrace": "jsstacktrace",
+  "js-templates": "js-templates",
+  "julia": "julia",
+  "keepalived": "keepalived",
+  "keyman": "keyman",
+  "kotlin": "kotlin",
+  "kt": "kotlin",
+  "kts": "kotlin",
+  "kumir": "kumir",
+  "kum": "kumir",
+  "kusto": "kusto",
+  "latex": "latex",
+  "tex": "latex",
+  "context": "latex",
+  "latte": "latte",
+  "less": "less",
+  "lilypond": "lilypond",
+  "ly": "lilypond",
+  "liquid": "liquid",
+  "lisp": "lisp",
+  "emacs": "lisp",
+  "elisp": "lisp",
+  "emacs-lisp": "lisp",
+  "livescript": "livescript",
+  "llvm": "llvm",
+  "log": "log",
+  "lolcode": "lolcode",
+  "lua": "lua",
+  "magma": "magma",
+  "makefile": "makefile",
+  "markdown": "markdown",
+  "md": "markdown",
+  "markup-templating": "markup-templating",
+  "mata": "mata",
+  "matlab": "matlab",
+  "maxscript": "maxscript",
+  "mel": "mel",
+  "mermaid": "mermaid",
+  "metafont": "metafont",
+  "mizar": "mizar",
+  "mongodb": "mongodb",
+  "monkey": "monkey",
+  "moonscript": "moonscript",
+  "moon": "moonscript",
+  "n1ql": "n1ql",
+  "n4js": "n4js",
+  "n4jsd": "n4js",
+  "nand2tetris-hdl": "nand2tetris-hdl",
+  "naniscript": "naniscript",
+  "nani": "naniscript",
+  "nasm": "nasm",
+  "neon": "neon",
+  "nevod": "nevod",
+  "nginx": "nginx",
+  "nim": "nim",
+  "nix": "nix",
+  "nsis": "nsis",
+  "objectivec": "objectivec",
+  "objc": "objectivec",
+  "ocaml": "ocaml",
+  "odin": "odin",
+  "opencl": "opencl",
+  "openqasm": "openqasm",
+  "qasm": "openqasm",
+  "oz": "oz",
+  "parigp": "parigp",
+  "parser": "parser",
+  "pascal": "pascal",
+  "objectpascal": "pascal",
+  "pascaligo": "pascaligo",
+  "psl": "psl",
+  "pcaxis": "pcaxis",
+  "px": "pcaxis",
+  "peoplecode": "peoplecode",
+  "pcode": "peoplecode",
+  "perl": "perl",
+  "php": "php",
+  "phpdoc": "phpdoc",
+  "php-extras": "php-extras",
+  "plant-uml": "plant-uml",
+  "plantuml": "plant-uml",
+  "plsql": "plsql",
+  "powerquery": "powerquery",
+  "pq": "powerquery",
+  "mscript": "powerquery",
+  "powershell": "powershell",
+  "processing": "processing",
+  "prolog": "prolog",
+  "promql": "promql",
+  "properties": "properties",
+  "protobuf": "protobuf",
+  "pug": "pug",
+  "puppet": "puppet",
+  "pure": "pure",
+  "purebasic": "purebasic",
+  "pbfasm": "purebasic",
+  "purescript": "purescript",
+  "purs": "purescript",
+  "python": "python",
+  "py": "python",
+  "qsharp": "qsharp",
+  "qs": "qsharp",
+  "q": "q",
+  "qml": "qml",
+  "qore": "qore",
+  "r": "r",
+  "racket": "racket",
+  "rkt": "racket",
+  "cshtml": "cshtml",
+  "razor": "cshtml",
+  "jsx": "jsx",
+  "tsx": "tsx",
+  "reason": "reason",
+  "regex": "regex",
+  "rego": "rego",
+  "renpy": "renpy",
+  "rpy": "renpy",
+  "rescript": "rescript",
+  "res": "rescript",
+  "rest": "rest",
+  "rip": "rip",
+  "roboconf": "roboconf",
+  "robotframework": "robotframework",
+  "robot": "robotframework",
+  "ruby": "ruby",
+  "rb": "ruby",
+  "rust": "rust",
+  "sas": "sas",
+  "sass": "css",
+  "scss": "css",
+  "scala": "scala",
+  "scheme": "scheme",
+  "shell-session": "shell-session",
+  "sh-session": "shell-session",
+  "shellsession": "shell-session",
+  "smali": "smali",
+  "smalltalk": "smalltalk",
+  "smarty": "smarty",
+  "sml": "sml",
+  "smlnj": "sml",
+  "solidity": "solidity",
+  "sol": "solidity",
+  "solution-file": "solution-file",
+  "sln": "solution-file",
+  "soy": "soy",
+  "sparql": "sparql",
+  "rq": "sparql",
+  "splunk-spl": "splunk-spl",
+  "sqf": "sqf",
+  "sql": "sql",
+  "squirrel": "squirrel",
+  "stan": "stan",
+  "stata": "stata",
+  "iecst": "iecst",
+  "stylus": "stylus",
+  "supercollider": "supercollider",
+  "sclang": "supercollider",
+  "swift": "swift",
+  "systemd": "systemd",
+  "t4-templating": "t4-templating",
+  "t4-cs": "t4-cs",
+  "t4": "t4-cs",
+  "t4-vb": "t4-vb",
+  "tap": "tap",
+  "tcl": "tcl",
+  "tt2": "tt2",
+  "textile": "textile",
+  "toml": "toml",
+  "tremor": "tremor",
+  "trickle": "tremor",
+  "troy": "tremor",
+  "turtle": "turtle",
+  "trig": "turtle",
+  "twig": "twig",
+  "typescript": "typescript",
+  "ts": "typescript",
+  "typoscript": "typoscript",
+  "tsconfig": "typoscript",
+  "unrealscript": "unrealscript",
+  "uscript": "unrealscript",
+  "uc": "unrealscript",
+  "uorazor": "uorazor",
+  "uri": "uri",
+  "url": "uri",
+  "v": "v",
+  "vala": "vala",
+  "vbnet": "vbnet",
+  "velocity": "velocity",
+  "verilog": "verilog",
+  "vhdl": "vhdl",
+  "vim": "vim",
+  "visual-basic": "visual-basic",
+  "vb": "visual-basic",
+  "vba": "visual-basic",
+  "warpscript": "warpscript",
+  "wasm": "wasm",
+  "web-idl": "web-idl",
+  "webidl": "web-idl",
+  "wgsl": "wgsl",
+  "wiki": "wiki",
+  "wolfram": "wolfram",
+  "mathematica": "wolfram",
+  "nb": "wolfram",
+  "wl": "wolfram",
+  "wren": "wren",
+  "xeora": "xeora",
+  "xeoracube": "xeora",
+  "xml-doc": "xml-doc",
+  "xojo": "xojo",
+  "xquery": "xquery",
+  "yaml": "yaml",
+  "yml": "yaml",
+  "yang": "yang",
+  "zig": "zig",
+  "h": "c",
+  "hpp": "cpp",
+  "cc": "cpp",
+  "cxx": "cpp",
+  "c++": "cpp",
+  "hxx": "cpp",
+  "h++": "cpp",
+  "mjs": "javascript",
+  "cjs": "javascript",
+  "mts": "typescript",
+  "cts": "typescript",
+  "jsonc": "json",
+  "jsonl": "json",
+  "styl": "css",
+  "pcss": "css",
+  "postcss": "css",
+  "htm": "markup",
+  "xhtml": "markup",
+  "vue": "markup",
+  "astro": "markup",
+  "svelte": "markup",
+  "pyw": "python",
+  "pyi": "python",
+  "ipynb": "json",
+  "rs": "rust",
+  "mdx": "markdown",
+  "mkd": "markdown",
+  "zsh": "bash",
+  "fish": "bash",
+  "ksh": "bash",
+  "ps1": "powershell",
+  "psm1": "powershell",
+  "bat": "batch",
+  "cmd": "batch",
+  "gql": "graphql",
+  "cfg": "ini",
+  "conf": "ini",
+  "proto": "protobuf",
+  "rmd": "r",
+  "tsv": "csv",
+  "env": "bash",
+  "gitattributes": "git"
+};
+
+export default Prism;

@@ -33,6 +33,12 @@ jobs:
       - name: Install dependencies
         run: npm install --ignore-scripts --no-audit --no-fund --package-lock=false
 
+      - name: Verify host API snapshot
+        run: npm run check:host
+
+      - name: Typecheck source
+        run: npm run check:types
+
       - name: Lint source
         run: npm run lint
 

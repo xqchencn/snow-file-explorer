@@ -1,0 +1,36 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "erasableSyntaxOnly": true,
+
+    "strict": true,
+    // 不开 noUncheckedIndexedAccess：它会让数组遍历处处需要断言，而本项目的真实风险在
+    // 字典查找（图标表、扩展名表、i18n 表），其可缺性由字典类型自身用 `| undefined` 显式标注
+    // （如 src/components/prism-langs.ts 的 EXT_TO_PRISM_LANG）。
+    "noImplicitOverride": true,
+    // 迁移把大量 JSDoc 换成真类型，随之而来的是「导入却没用到」「形参没用到」。
+    // 这两项打开后由 tsc 常驻把关（已实测全仓 0 命中），不必再靠人工扫。
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "exactOptionalPropertyTypes": false,
+    "useUnknownInCatchVariables": true,
+
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": false,
+    "types": ["node"],
+
+    "allowJs": true,
+    "checkJs": false
+  },
+  "include": ["src", "tests", "tools", "build.js"],
+  "exclude": ["node_modules", "dist", "tmp"]
+}
