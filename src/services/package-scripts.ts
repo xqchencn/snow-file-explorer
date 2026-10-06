@@ -72,20 +72,14 @@ export function findScriptLines(text: string | null): ScriptLine[] {
   const block = scanScriptsBlock(raw);
   if (!block) return [];
 
-  // 定位 block.start 所在行与行内偏移
+  // 定位 block.start 所在行与行内偏移：直接数 raw 前缀里的换行符。
+  // 原先按「各行长度 + 1」累加，CRLF 文件每行少算一个 \r，落点会漂到后面一行，
+  // 于是 scripts 的第一条被当成 `{` 所在行吃掉（Windows 检出必现）。
   const lines = raw.split(/\r\n|\r|\n/);
-  let pos = 0;
-  let firstLine = 0;
-  let firstOffset = 0;
-  for (let i = 0; i < lines.length; i += 1) {
-    const len = lines[i].length;
-    if (pos + len >= block.start) {
-      firstLine = i;
-      firstOffset = block.start - pos;
-      break;
-    }
-    pos += len + 1; // +1 = 换行符
-  }
+  const head = raw.slice(0, block.start);
+  const firstLine = (head.match(/\r\n|\r|\n/g) || []).length;
+  const lastBreak = Math.max(head.lastIndexOf("\n"), head.lastIndexOf("\r"));
+  const firstOffset = lastBreak < 0 ? block.start : block.start - lastBreak - 1;
 
   const out = [];
   let depth = 0;

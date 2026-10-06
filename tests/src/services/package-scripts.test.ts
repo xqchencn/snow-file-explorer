@@ -63,3 +63,40 @@ test("findScriptLines：scripts 值内的花括号不干扰区间扫描", () => 
     { name: "next", line: 4 },
   ]);
 });
+
+// CRLF 检出（Windows 默认）下曾按「行长 + 1」累加偏移，每行少算一个 \r，
+// 落点漂到后一行，scripts 的第一条被整条吃掉。三种换行符必须给出同一结果。
+test("findScriptLines：CRLF / CR 文件同样定位到第一条脚本", () => {
+  const rows = [
+    "{", // 1
+    '  "scripts": {', // 2
+    '    "build": "node build.js",', // 3
+    '    "test": "node --test"', // 4
+    "  }", // 5
+    "}", // 6
+  ];
+  const expected = [
+    { name: "build", line: 3 },
+    { name: "test", line: 4 },
+  ];
+  assert.deepEqual(findScriptLines(rows.join("\n")), expected, "LF");
+  assert.deepEqual(findScriptLines(rows.join("\r\n")), expected, "CRLF");
+  assert.deepEqual(findScriptLines(rows.join("\r")), expected, "CR");
+});
+
+test("findScriptLines：花括号单独成行时不漏第一条脚本", () => {
+  const text = [
+    "{", // 1
+    '  "scripts":', // 2
+    "  {", // 3
+    '    "one": "1",', // 4
+    '    "two": "2"', // 5
+    "  }", // 6
+    "}", // 7
+  ].join("\r\n");
+
+  assert.deepEqual(findScriptLines(text), [
+    { name: "one", line: 4 },
+    { name: "two", line: 5 },
+  ]);
+});
