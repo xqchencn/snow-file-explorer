@@ -361,14 +361,15 @@ export function createHttpController(deps: HttpControllerDeps) {
   /**
    * 文本态行号槽上的发送标记。
    * @returns 每条请求一项：`{ 行号（1 基）, 悬停文字, 请求下标 }`
-   * @description 有 `### 标题` 就钉在标题那一行，没有则钉在请求行——▶ 出现在标题前面，
-   *   与 package.json 把 ▶ 放在 scripts 行上同一套路。
+   * @description ▶ 钉在请求行（`GET` / `POST` 那一行），不钉在 `### 标题` 行：
+   *   标题只是给人看的名字，真正被发出去的是请求行，▶ 与它同行才指得准。
+   *   `startLine` 已刨掉前导注释、空行与文件变量定义行，正是请求行本身。
    */
   function runMarkers(): Array<{ line: number; title: string; index: number }> {
     const file = state.httpFile;
     if (!file) return [];
     return file.requests.map((request, index) => ({
-      line: (request.title ? request.sectionStart : request.startLine) + 1,
+      line: request.startLine + 1,
       title: httpRequestTitle(request) || `${request.method} ${request.url}`,
       index,
     }));
