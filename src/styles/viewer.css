@@ -118,10 +118,16 @@ html:has(.app-shell.right-panel-fullscreen) .sfe-preview-pane {
 }
 
 /* 编辑态行号槽：顶部 12px 抵消 textarea 的 padding-top；字号 12.5px 使行高 1.6em=20px，
-   与 textarea / 高亮层行高严格一致（否则行号与代码行错位）。 */
+   与 textarea / 高亮层行高严格一致（否则行号与代码行错位）。
+   整列必须按自身内容定高：.sfe-file-viewer-edit-scroll 的交叉轴尺寸被钉在一屏高，
+   默认的 align-items: stretch 会把行号槽压成一屏，200 行 × 20px 便逐行 flex-shrink 成 19px，
+   与 20px 的代码行每行差 1px（文件越长错得越多），且整列底色与分隔线只画到第一屏。
+   align-self: flex-start 让盒子随行数长满，min-height: 100% 兜住短文件不满一屏的情况。 */
 .sfe-file-viewer-edit-gutter {
   padding-top: 12px;
   font-size: 12.5px;
+  align-self: flex-start;
+  min-height: 100%;
 }
 
 .sfe-file-viewer-edit-highlight {
@@ -226,12 +232,15 @@ html:has(.app-shell.right-panel-fullscreen) .sfe-preview-pane {
 }
 
 /* 行号槽逐行容器：package.json 的 scripts 行会在行号后追加 ▶。
-   行高固定 1.6em，与代码正文行高严格对齐（两列行号→行号一一对位）。 */
+   行高固定 1.6em，与代码正文行高严格对齐（两列行号→行号一一对位）。
+   flex-shrink: 0 是这条对位关系的保证：行号槽所在列一旦比行数矮，
+   默认的可收缩会让每行按比例被压掉零点几像素，逐行累积成整列错位。 */
 .sfe-file-viewer-gutter-row {
   display: flex;
   align-items: center;
   justify-content: flex-end;
   gap: 4px;
+  flex-shrink: 0;
   height: 1.6em;
   padding: 0 8px 0 14px;
 }

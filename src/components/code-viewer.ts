@@ -1279,13 +1279,15 @@ export function renderCodeViewer(
           return;
         }
         if (hlLinesDirty || !hlLines) hlLines = textarea.value.split("\n");
-        hlLinesDirty = false;
         const lines = hlLines;
         const total = lines.length;
         const viewportH = editScroll.clientHeight || 0;
         const first = Math.max(0, Math.floor(editScroll.scrollTop / lh) - EDIT_HL_OVERSCAN);
         const last = Math.min(total, first + Math.ceil((viewportH || 400) / lh) + EDIT_HL_OVERSCAN * 2);
-        if (first === hlStart && last === hlEnd && hlStart !== -2) return;
+        // 窗口没动但文本已改时仍必须重绘：编辑态用户看到的代码全部出自这一层（textarea 文字透明），
+        // 跳过重绘会让显示内容落后于刚补过的行号槽，表现即为「行号与内容对不上」。
+        if (first === hlStart && last === hlEnd && hlStart !== -2 && !hlLinesDirty) return;
+        hlLinesDirty = false;
         hlStart = first;
         hlEnd = last;
         const ext = extname(preview.name);
@@ -1359,8 +1361,12 @@ export function renderCodeViewer(
       editArea.appendChild(textarea);
       editScroll.appendChild(gutter);
       editScroll.appendChild(editArea);
-      syncEditHeight();
+      // 必须先入文档再量高度：syncEditHeight 读的是 textarea.scrollHeight，元素还挂在游离子树上时
+      // 布局不存在、恒读回 0，textarea 被写成 height:0（只剩 min-height:100% 撑出一屏）。
+      // 那样 textarea 只覆盖首屏，光标与选区改按它自己的内层滚动定位，
+      // 与外层 editScroll 的滚动、行号槽、高亮层三者全都对不上。
       bodyEl.appendChild(editScroll);
+      syncEditHeight();
       if (useWindowedHl) {
         // 挂载后再做首切片：行高与可视高度都要真实布局（见 editLineHeightPx）。
         if (!highlighterReady()) {

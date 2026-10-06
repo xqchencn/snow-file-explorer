@@ -1431,6 +1431,113 @@ test('预览组件: 编辑态行号槽按差额增删，已有行号节点原地
   assert.equal(gutter.textContent, '1', '删尾后无残留行号');
 });
 
+test('预览组件: 编辑态切片高亮在文本变化后重绘，行号与显示内容保持对应', async () => {
+  const host = document.createElement('div');
+  const text = Array.from({ length: 600 }, (_, i) => `const v${i} = ${i};`).join('\n');
+  const preview: CodeTextPreview = {
+    kind: 'text',
+    name: 'slice.js',
+    path: 'D:/repo/slice.js',
+    text,
+    highlightedHtml: '',
+    isMarkdown: false,
+  };
+
+  // 切片偏移按真实行高换算；jsdom 量到的是 line-height:normal，退回整篇高亮就走不进切片分支，
+  // 故把行高固定为 20px（textarea 的 12.5px × 1.6 即此值）。
+  const originalComputedStyle = dom.window.getComputedStyle;
+  dom.window.getComputedStyle = (() => ({ lineHeight: '20px' })) as unknown as typeof originalComputedStyle;
+
+  try {
+    renderCodeViewer(host, {
+      preview,
+      copied: false,
+      onCopy: () => {},
+      onEditInput: () => {},
+      onSave: () => {},
+      editable: true,
+      t,
+    });
+
+    const textarea = q<HTMLTextAreaElement>(host, 'textarea');
+    const editHighlight = q<HTMLElement>(host, '.sfe-file-viewer-edit-highlight');
+    const gutter = q<HTMLElement>(host, '.sfe-file-viewer-edit-gutter');
+
+    // 前置：切片只铺可视窗口，末行不在高亮层内；否则本用例测不到切片行为。
+    assert.ok(!editHighlight.textContent!.includes('const v599'), '用例须落在切片窗口之外');
+
+    textarea.value = `const inserted = 1;\n${text}`;
+    textarea.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+    assert.equal(gutter.childElementCount, 601, '行号槽应随新增行立刻多出一行');
+
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    assert.ok(
+      editHighlight.textContent!.startsWith('const inserted'),
+      '文本变化后切片必须重绘：显示内容落后一行即行号与内容错位'
+    );
+  } finally {
+    dom.window.getComputedStyle = originalComputedStyle;
+  }
+});
+
+test('预览组件: 编辑态 textarea 的贴合高度必须在元素入文档后测量', () => {
+  const host = document.createElement('div');
+  const preview: CodeTextPreview = {
+    kind: 'text',
+    name: 'height.js',
+    path: 'D:/repo/height.js',
+    text: Array.from({ length: 200 }, (_, i) => `const v${i} = ${i};`).join('\n'),
+    highlightedHtml: '',
+    isMarkdown: false,
+  };
+
+  // jsdom 没有布局引擎，scrollHeight 恒为 0，量不出「挂载前后」的差别。
+  // 这里按「已连接才有布局」造一个假内容高度：元素真挂进文档才读得到，
+  // 用来钉住 syncEditHeight 必须晚于 bodyEl.appendChild 这条顺序。
+  // jsdom 把 scrollHeight 实现成 Element.prototype 上的访问器，故在 Element 一层打桩，
+  // 且只改写 textarea 的读数，其余元素原样转调，避免波及同一次渲染里的其他测量。
+  const proto = dom.window.Element.prototype;
+  const originalDescriptor = Object.getOwnPropertyDescriptor(proto, 'scrollHeight');
+  if (!originalDescriptor || typeof originalDescriptor.get !== 'function') {
+    throw new Error('jsdom 未提供 Element#scrollHeight 访问器，无法构造布局桩');
+  }
+  const readRealScrollHeight = originalDescriptor.get;
+  Object.defineProperty(proto, 'scrollHeight', {
+    configurable: true,
+    get(this: Element) {
+      if (!(this instanceof dom.window.HTMLTextAreaElement)) {
+        return readRealScrollHeight.call(this);
+      }
+      return this.isConnected ? 4321 : 0;
+    },
+  });
+
+  try {
+    // 宿主必须真的在文档里：桩按 isConnected 决定读得到内容高度还是 0，
+    // 这正是「入文档后才能量高」这条被测不变量在真机上的语义。
+    document.body.appendChild(host);
+    renderCodeViewer(host, {
+      preview,
+      copied: false,
+      onCopy: () => {},
+      onEditInput: () => {},
+      onSave: () => {},
+      editable: true,
+      t,
+    });
+    const textarea = q<HTMLTextAreaElement>(host, 'textarea');
+    assert.equal(
+      textarea.style.height,
+      '4321px',
+      'textarea 高度必须在进入文档后测量：挂载前读 scrollHeight 恒为 0，' +
+        '会把编辑区压成一屏高，光标与选区改按 textarea 自己的内层滚动定位，行号与内容全部错位'
+    );
+  } finally {
+    Object.defineProperty(proto, 'scrollHeight', originalDescriptor);
+    host.remove();
+  }
+});
+
 test('预览组件: 虚拟列表视口尺寸变化后按新高度重算窗口，重绘不叠加观察者', async () => {
   type Entry = { contentRect: { height: number } };
   type Stub = {
