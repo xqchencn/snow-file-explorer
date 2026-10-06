@@ -252,6 +252,34 @@ function pickTerminalByFamilies(terminals: RuntimeTerminal[], families: ShellFam
 }
 
 /**
+ * 会话级缓存的 detectTerminals 结果。
+ * @description detectTerminals 是宿主 native 扫描（PATH / 注册表 / 常见安装位置），
+ *   毫秒到几十毫秒级；shell 集合在会话内基本不变，缓存后脚本运行不再每次重复探测。
+ *   缓存按 window.snow 对象引用绑定：宿主对象不变时缓存命中（正常运行恒命中），
+ *   宿主对象被整体替换（测试注入 / 宿主重载 API）时自动失效重新探测。
+ *   用户配置的 shell（getSystemSettingValue）不在此缓存：读取廉价且需实时生效。
+ */
+let detectedTerminalsSnow: unknown = null;
+let detectedTerminalsPromise: Promise<RuntimeTerminal[]> | null = null;
+function detectTerminalsOnce(): Promise<RuntimeTerminal[]> {
+  const snow = getSnow();
+  if (detectedTerminalsPromise && detectedTerminalsSnow === snow) {
+    return detectedTerminalsPromise;
+  }
+  detectedTerminalsSnow = snow;
+  detectedTerminalsPromise = (async () => {
+    if (!snow || typeof snow.detectTerminals !== "function") return [];
+    try {
+      const detected = await snow.detectTerminals();
+      return Array.isArray(detected) ? detected : [];
+    } catch {
+      return [];
+    }
+  })();
+  return detectedTerminalsPromise;
+}
+
+/**
  * 为一个脚本文件解析运行它所需的 shell。
  *
  * @description 脚本必须由**对应类型的解释器**执行（bat→cmd、ps1→powershell、sh→POSIX），
@@ -280,15 +308,8 @@ export async function resolveScriptShell(sourcePath?: string): Promise<ScriptShe
     return `"./${baseName}"`;
   };
 
-  let terminals: RuntimeTerminal[] = [];
-  try {
-    if (snow && typeof snow.detectTerminals === "function") {
-      const detected = await snow.detectTerminals();
-      terminals = Array.isArray(detected) ? detected : [];
-    }
-  } catch {
-    terminals = [];
-  }
+  // 系统终端探测与会话设置读取相互独立：先并行发起，下面按原优先级依次消费。
+  const terminalsPromise = detectTerminalsOnce();
 
   // 1) 用户显式配置的终端 shell：类型匹配才用它跑脚本，否则继续找系统里的同类型终端。
   try {
@@ -306,7 +327,8 @@ export async function resolveScriptShell(sourcePath?: string): Promise<ScriptShe
     // 终端设置缺失 / 非法：继续用系统检测结果。
   }
 
-  // 2) 系统检测到的同类型终端。
+  // 2) 系统检测到的同类型终端（探测结果走会话级缓存）。
+  const terminals = await terminalsPromise;
   const hit = pickTerminalByFamilies(terminals, families);
   if (hit) {
     const family = hit.family;

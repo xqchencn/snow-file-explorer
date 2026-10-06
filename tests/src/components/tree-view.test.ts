@@ -77,8 +77,8 @@ function render(overrides: Partial<TreeViewOptions> = {}): { pane: HTMLDivElemen
     rootPath: ROOT,
     rootNodes: NODES,
     expanded: EXPANDED,
-    selected: new Set(),
-    gitStatusMap: {},
+    getSelected: () => new Set(),
+    getGitStatusMap: () => ({}),
     canList: true,
     canRead: true,
     onSelectionChange: (e) => calls.selection.push(e),
@@ -144,9 +144,30 @@ test('文件树多选: 普通点击目录只展开不打开文件', () => {
 });
 
 test('文件树多选: selected 集合命中的行带 selected 类', () => {
-  const { pane } = render({ selected: new Set(['D:/repo/src/a.js']) });
+  const { pane } = render({ getSelected: () => new Set(['D:/repo/src/a.js']) });
   assert.ok(row(pane, 'D:/repo/src/a.js').classList.contains('selected'));
   assert.ok(!row(pane, 'D:/repo/src').classList.contains('selected'));
+});
+
+// 行节点在滚动时才创建，所以选中集合与状态表必须是「建行时现取」的取值函数。
+// 一旦有人把它们改回快照，就地 patch（不重建树）之后滚进来的行就会显示过期状态。
+test('文件树虚拟行: 选中集合与 Git 状态表按行现取，不许捕获快照', () => {
+  let selectedReads = 0;
+  let statusReads = 0;
+  const { pane } = render({
+    getSelected: () => {
+      selectedReads += 1;
+      return new Set();
+    },
+    getGitStatusMap: () => {
+      statusReads += 1;
+      return {};
+    },
+  });
+  const builtRows = pane.querySelectorAll('.sfe-file-item').length;
+  assert.ok(builtRows > 0, '前置条件：应已建出可视行');
+  assert.equal(selectedReads, builtRows, '每建一行须读一次选中集合');
+  assert.equal(statusReads, builtRows, '每建一行须读一次 Git 状态表');
 });
 
 test('文件树多选: Ctrl+A 键盘事件带上当前可见路径', () => {
@@ -168,4 +189,57 @@ test('文件树双击: 双击文件触发快速编辑，双击目录不触发', 
   assert.equal(calls.openEdit[0].path, 'D:/repo/README.md');
   row(pane, 'D:/repo/src').dispatchEvent(new dom.window.MouseEvent('dblclick', { bubbles: true }));
   assert.equal(calls.openEdit.length, 1, '目录双击不应触发文件快速编辑');
+});
+
+/** 同级文件树：行数超过首屏窗口（估算行高 24 → 可视 25+16=41 行），滚动才会真的移动窗口。 */
+function flatFileTree(count: number): TreeEntry[] {
+  return Array.from({ length: count }, (_, i) => ({
+    name: `f${i}.js`,
+    path: `${ROOT}/f${i}.js`,
+    isDirectory: false,
+    size: i,
+  }));
+}
+
+/** Node 无 requestAnimationFrame，虚拟列表的帧调度退化为 setTimeout(16)，30ms 即落帧。 */
+const nextFrame = () => new Promise<void>((resolve) => setTimeout(resolve, 30));
+
+async function scrollTree(pane: HTMLElement, row: number): Promise<void> {
+  pane.scrollTop = row * 24;
+  pane.dispatchEvent(new dom.window.Event('scroll'));
+  await nextFrame();
+}
+
+// 差集渲染（滚动只补/删滑入滑出的行）与「选中态就地 patch」是一对隐含契约：
+// 复用行必须保住 patch 上去的类，滚出去再滚回来的行才按 getSelected() 重建。
+test('文件树虚拟行: 滚动复用重叠行、就地 patch 的选中态不丢；滚回的行按当前选中集合重建', async () => {
+  const pane = document.createElement('div');
+  const selected = new Set<string>();
+  renderTreeView(pane, {
+    rootPath: ROOT,
+    rootNodes: flatFileTree(60),
+    expanded: {},
+    getSelected: () => selected,
+    getGitStatusMap: () => ({}),
+    t,
+  });
+  const rowCount = () => pane.querySelectorAll('.sfe-file-item').length;
+
+  assert.equal(rowCount(), 41, '首屏须在 renderTreeView 返回时就有行（调用方紧接着恢复 scrollTop）');
+  assert.ok(pane.querySelector('.sfe-vlist-content.sfe-list'), '内容层须同时带虚拟列表类与调用方附加类');
+
+  // 选中态就地 patch（不重建树）：集合与已有行节点同时更新，这是 index.ts 的做法。
+  selected.add(`${ROOT}/f30.js`);
+  const patched = row(pane, `${ROOT}/f30.js`);
+  patched.classList.add('selected');
+
+  await scrollTree(pane, 30); // 窗口从 [0,41) 移到 [22,60)
+  assert.equal(rowCount(), 38, '尾段行数随窗口收敛');
+  assert.equal(row(pane, `${ROOT}/f30.js`), patched, '重叠区的行必须复用同一节点');
+  assert.ok(patched.classList.contains('selected'), '复用不得丢掉就地 patch 的选中态');
+  assert.equal(pane.querySelector('[data-path="D:/repo/f5.js"]'), null, '滑出窗口的头行应被摘掉');
+
+  selected.add(`${ROOT}/f5.js`);
+  await scrollTree(pane, 0);
+  assert.ok(row(pane, `${ROOT}/f5.js`).classList.contains('selected'), '重建的行须现取当前选中集合');
 });

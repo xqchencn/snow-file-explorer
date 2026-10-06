@@ -19,6 +19,19 @@ export {
 } from './highlight-policy.ts';
 
 /**
+ * 高亮结果 LRU 的条目上限。
+ * @description 虚拟列表往返滚动会对相同可视行反复分词（纯函数，结果只取决于 文本+语言）；
+ *   缓存命中即免掉 Prism 分词与内部 shouldHighlight 全文扫描。条目按单行文本计，
+ *   600 条 × 平均百字符量级的 HTML，内存上界约百 KB。
+ */
+const HIGHLIGHT_CACHE_LIMIT = 600;
+/** 超过该长度的文本不进缓存：整篇高亮（每次打开只算一次）缓存键会长期持有大字符串。 */
+const HIGHLIGHT_CACHE_KEY_MAX = 2000;
+
+/** 高亮结果缓存：插入序即访问序（命中时删除重插），超出上限淘汰最旧条目。 */
+const highlightCache = new Map<string, string>();
+
+/**
  * 将代码文本转换为语法高亮 HTML
  * @param code 源代码字符串
  * @param ext 文件扩展名（不含点）
@@ -28,22 +41,44 @@ export function highlightCodeHtml(code: string, ext: string): string {
   const raw = String(code || '');
   if (!raw) return '';
 
-  // 超大文本保护快速通道（字符数 / 行数任一超限即转义为纯文本）
-  if (!shouldHighlight(raw)) {
-    return escapeHtml(raw);
-  }
-
   const cleanExt = String(ext || '').toLowerCase().replace(/^\./, '');
-  const prismLang = EXT_TO_PRISM_LANG[cleanExt] || cleanExt;
-
-  if (prismLang && Prism.languages[prismLang]) {
-    try {
-      return Prism.highlight(raw, Prism.languages[prismLang], prismLang);
-    } catch {
-      // 解析异常时安全降级到纯文本转义
-      return escapeHtml(raw);
+  // 短文本（可视行 / diff 行）走 LRU：滚动热路径上同一行不重复分词。
+  const cacheable = raw.length <= HIGHLIGHT_CACHE_KEY_MAX;
+  const cacheKey = cacheable ? `${cleanExt}\u0000${raw}` : '';
+  if (cacheable) {
+    const cached = highlightCache.get(cacheKey);
+    if (cached !== undefined) {
+      // 刷新访问序（LRU）。
+      highlightCache.delete(cacheKey);
+      highlightCache.set(cacheKey, cached);
+      return cached;
     }
   }
 
-  return escapeHtml(raw);
+  let html: string;
+  // 超大文本保护快速通道（字符数 / 行数任一超限即转义为纯文本）
+  if (!shouldHighlight(raw)) {
+    html = escapeHtml(raw);
+  } else {
+    const prismLang = EXT_TO_PRISM_LANG[cleanExt] || cleanExt;
+    if (prismLang && Prism.languages[prismLang]) {
+      try {
+        html = Prism.highlight(raw, Prism.languages[prismLang], prismLang);
+      } catch {
+        // 解析异常时安全降级到纯文本转义
+        html = escapeHtml(raw);
+      }
+    } else {
+      html = escapeHtml(raw);
+    }
+  }
+
+  if (cacheable) {
+    highlightCache.set(cacheKey, html);
+    if (highlightCache.size > HIGHLIGHT_CACHE_LIMIT) {
+      const oldest = highlightCache.keys().next().value;
+      if (oldest !== undefined) highlightCache.delete(oldest);
+    }
+  }
+  return html;
 }

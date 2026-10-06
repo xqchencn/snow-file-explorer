@@ -91,6 +91,25 @@ async function runBuild() {
     console.log(`✅ [Build] chunks/${name}: ${(stat.size / 1024).toFixed(1)} KB`);
   }
 
+  // 2b. 按需块自带的样式：这些 DOM 只可能在块到达之后才存在，随块注入就不会有无样式帧，
+  //     而首屏不必为它们背下阻塞渲染的字节。
+  console.log('🎨 [Build] 打包按需块样式 -> dist/chunks/*.css...');
+  const chunkCssTargets = [
+    { entry: path.join(__dirname, 'node_modules', '@xterm', 'xterm', 'css', 'xterm.css'), out: path.join(chunksDir, 'terminal.css') },
+    { entry: path.join(srcDir, 'styles', 'syntax.css'), out: path.join(chunksDir, 'highlighter.css') },
+  ];
+  for (const target of chunkCssTargets) {
+    await esbuild.build({
+      entryPoints: [target.entry],
+      bundle: true,
+      minify: true,
+      outfile: target.out,
+      legalComments: 'none',
+    });
+    const stat = fs.statSync(target.out);
+    console.log(`✅ [Build] chunks/${path.basename(target.out)}: ${(stat.size / 1024).toFixed(1)} KB`);
+  }
+
   // 3. 打包并深度压缩 CSS
   console.log('🎨 [Build] 打包并压缩 CSS -> dist/index.css...');
   await esbuild.build({

@@ -346,12 +346,23 @@ html:has(.app-shell.right-panel-fullscreen) .sfe-preview-pane {
   tab-size: 2;
 }
 
-/* 虚拟行：固定行高，与 .sfe-vlist-content 的 translateY 步长一致 */
+/* 虚拟行：固定行高，与 .sfe-vlist-content 的 translateY 步长一致。
+   overflow 必须可见：行是 .sfe-file-viewer-line-no（sticky left）的滚动参照，
+   行自身一旦成为滚动容器，行号就不随外层横向滚动跟随；长行也不再被行宽裁掉。 */
 .sfe-file-viewer-line {
   display: flex;
   align-items: flex-start;
   height: 1.6em;
-  overflow: hidden;
+  overflow: visible;
+}
+
+/* 长行可见：内容层按最宽行撑开（改 right:auto 才不会被 right:0 钉回容器宽度），
+   横向滚动由 .sfe-file-viewer-code-scroll 的 overflow-x 提供；
+   min-width 保证短文件的行仍铺满整行宽度，行号分隔线与选中底色不变形。 */
+.sfe-file-viewer-code-scroll-virtual .sfe-vlist-content {
+  right: auto;
+  width: max-content;
+  min-width: 100%;
 }
 
 /* 行号：横向滚动时 sticky 在左侧，观感对齐整块高亮模式的行号槽 */

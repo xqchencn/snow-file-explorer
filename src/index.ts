@@ -44,7 +44,7 @@ import type { RunToolbarHandle } from "./components/run-toolbar.ts";
 import type { GitCommitMode, GitSection, GitViewOptions } from "./components/git-view.ts";
 import type { TreeSelectionChange } from "./components/tree-view.ts";
 
-import { el, copyToClipboard } from "./utils/dom.ts";
+import { el, copyToClipboard, humanSize } from "./utils/dom.ts";
 import { createActionIcon } from "./icons/action-icons.ts";
 import {
   basename,
@@ -64,16 +64,16 @@ import {
   getRelativeGitPath,
   getGitStatus,
   partitionGitFiles,
-  gitStatusSignature,
+  gitFilesSignature,
   collectGitFolderPaths,
 } from "./services/git-service.ts";
 import { shouldVirtualize } from "./components/highlight-policy.ts";
-import { loadChunk } from "./services/lazy-chunk.ts";
+import { loadChunk, releaseChunkStyles } from "./services/lazy-chunk.ts";
 import { installFileIcons, refreshInstalledIcons, createFileIconNode } from "./icons/file-icons.ts";
 import { mapPool } from "./utils/async.ts";
-import { renderTreeView, paintTreeGitStatus } from "./components/tree-view.ts";
+import { renderTreeView, paintTreeGitStatus, destroyTreeView } from "./components/tree-view.ts";
 import { loadJvmPackageTree } from "./services/java-project.ts";
-import { renderCodeViewer } from "./components/code-viewer.ts";
+import { renderCodeViewer, syncViewerChrome, disposeViewerViewport } from "./components/code-viewer.ts";
 import { renderGitCommitBar, renderGitList, closeGitContextMenu } from "./components/git-view.ts";
 import { renderGitSyncIndicator } from "./components/git-sync-indicator.ts";
 import {
@@ -167,6 +167,8 @@ type TerminalTab = {
   hiddenRun?: boolean;
   /** onResize 的 120ms 尾沿防抖定时器；未排程时为 null，创建前可缺。 */
   resizeTimer?: ReturnType<typeof setTimeout> | null;
+  /** 最近一次 fit 出来的尺寸，但当时还没有 pty session 可发；session 建好后补发一次，发完置 null。 */
+  pendingResize?: { cols: number; rows: number } | null;
   /** 「命令尚未敲入」的 800ms 兜底定时器；未排程时为 null，创建前可缺。 */
   commandTimer?: ReturnType<typeof setTimeout> | null;
 };
@@ -276,6 +278,13 @@ type GitActionQueueItem = {
  * loadGitPreviewDiff 的入参（拉取单个文件的差异与工作区全文）。
  * @description 从 state.gitPreview 里取出后传入，回写时凭 key 丢弃过期结果。
  */
+/**
+ * 单个文件的预览上限（字节）。
+ * @description 宿主 readFileContent 不接受长度参数，超过这个量的文本会整份进内存再分行，
+ *   面板表现为假死；宁可明说「太大」，也不让点击一个日志文件卡住整个应用。
+ */
+const MAX_PREVIEW_BYTES = 20 * 1024 * 1024;
+
 type LoadGitPreviewDiffArgs = {
   /** 选中键 `` `${section}:${relPath}` ``，用于判断异步结果是否已过期。 */
   key: string;
@@ -285,6 +294,8 @@ type LoadGitPreviewDiffArgs = {
   absPath: string;
   /** 是否取暂存区差异。 */
   isStaged: boolean;
+  /** 显式刷新：绕过差异缓存重取一份。 */
+  force?: boolean;
 };
 
 /**
@@ -567,8 +578,7 @@ export function mount(
   let startupToken = 0;
 
   /**
-   * 树出现之后再做图标回填、JVM 识别和 Git 状态。
-   * 右上角运行识别等这三件事都结束再开始，识别完再预载终端块。
+   * 树出现之后再做图标回填、终端块与运行 shell 预取、JVM 识别和 Git 状态。
    * @param {Array} rootEntries 刚刚列到的根目录条目
    */
   function scheduleStartupFollowups(rootEntries: FileTreeEntry[]) {
@@ -582,6 +592,12 @@ export function mount(
             if (disposed || token !== startupToken) return;
             refreshInstalledIcons(container);
           }),
+          // 终端块（480KB）与 shell 探测都排在全仓识别之后，首屏后马上点「终端 / 运行」的人
+          // 就得在点击链路上等它们。两件事都与识别互不依赖，提到同一批并发预取。
+          loadChunk("terminal").catch((err) => {
+            console.warn("[FileExplorer] 终端组件预载失败", err);
+          }),
+          cachedRunShell().catch(() => undefined),
           refreshJavaProject(root, rootEntries),
           refreshGitAll(),
         ]);
@@ -590,17 +606,10 @@ export function mount(
       }
       if (disposed || token !== startupToken || pathKey(state.rootPath) !== rootToken) return;
       try {
-        await ensureCommands();
+        await ensureCommands(rootEntries);
       } catch (err) {
         console.warn("[FileExplorer] 项目命令识别失败", err);
       }
-      if (disposed || token !== startupToken || pathKey(state.rootPath) !== rootToken) return;
-      // 识别已经结束：解析 xterm，并提前确定运行命令要用的 shell。
-      // 否则点击运行后要先等 detectTerminals，PowerShell 才会启动。
-      void cachedRunShell();
-      void loadChunk("terminal").catch((err) => {
-        console.warn("[FileExplorer] 终端组件预载失败", err);
-      });
     })();
   }
 
@@ -811,6 +820,8 @@ export function mount(
   let dirWatchPath = "";        // 当前已 startDirectoryWatch 的根路径
   let unsubDirChanged: Unsubscribe | null = null;   // onDirectoryChanged 取消订阅句柄
   let dirRefreshTimer: ReturnType<typeof setTimeout> | null = null;   // 变化事件防抖定时器（一次写盘可能连发多次）
+  // 防抖窗口内累积的变更路径键；null 表示出现过「范围未知」的事件，必须全量刷。
+  let dirChangeKeys: string[] | null = [];
 
   /** 停止目录监听并解绑事件。 */
   function stopDirectoryWatch() {
@@ -818,6 +829,8 @@ export function mount(
       clearTimeout(dirRefreshTimer);
       dirRefreshTimer = null;
     }
+    // 攒着没消费的变更路径随监听一起作废，下次启动不带旧范围。
+    dirChangeKeys = [];
     if (typeof unsubDirChanged === "function") {
       unsubDirChanged();
       unsubDirChanged = null;
@@ -855,9 +868,18 @@ export function mount(
         return;
       }
       if (dirRefreshTimer) clearTimeout(dirRefreshTimer);
+      // 防抖窗口内累积变更路径；收到「无路径」的事件就退回全量刷新（范围未知，不敢猜）。
+      if (changedPath) {
+        if (dirChangeKeys) dirChangeKeys.push(changedKey);
+        else dirChangeKeys = [changedKey];
+      } else {
+        dirChangeKeys = null;
+      }
       dirRefreshTimer = setTimeout(() => {
         dirRefreshTimer = null;
-        void refreshLoadedDirectories();
+        const keys = dirChangeKeys;
+        dirChangeKeys = [];
+        void refreshLoadedDirectories(keys);
       }, 250);
     });
   }
@@ -908,29 +930,56 @@ export function mount(
   /**
    * 静默刷新所有已加载目录：重新读取直接子项，就地替换 children。
    * @description 不重建整棵树，只重渲染列表（renderTree 自身保留 scrollTop）；保留展开态与选中态。
+   *   目录读取按 mapPool 并行（watcher 一次防抖可能涉及多层目录，串行 IPC 等待累加）；
+   *   读到后的应用阶段保持串行，保证 gitignore 追加与 children 替换按稳定顺序执行。
    */
-  async function refreshLoadedDirectories() {
+  async function refreshLoadedDirectories(changedKeys?: string[] | null) {
     if (disposed || !state.rootPath) return;
     const root = state.rootPath;
     const dirPaths = collectLoadedDirPaths();
-    for (const dirPath of dirPaths) {
+    // 只刷「包含该变更的最深已加载目录」。重读所有已展开目录会让一次构建写盘变成几十趟 IPC，
+    // 而且变更落在没展开的层级时树上根本看不见，读了也是白读。
+    let scoped = dirPaths;
+    if (changedKeys && changedKeys.length) {
+      const targets = new Set<string>();
+      for (const changedKey of changedKeys) {
+        let deepest = "";
+        for (const dirPath of dirPaths) {
+          const dirKey = pathKey(dirPath);
+          if ((changedKey === dirKey || changedKey.startsWith(dirKey + "/")) && dirKey.length > deepest.length) {
+            deepest = dirKey;
+          }
+        }
+        if (deepest) targets.add(deepest);
+      }
+      if (!targets.size) return;
+      scoped = dirPaths.filter((dirPath) => targets.has(pathKey(dirPath)));
+    }
+    const readResults = await mapPool(scoped, 6, async (dirPath) => {
       try {
         const entries = await readDirectoryEntries(dirPath);
-        if (disposed || pathKey(root) !== pathKey(state.rootPath)) return;
-        if (pathKey(dirPath) === pathKey(root)) {
-          await appendGitignoreFromEntries(dirPath, entries);
-          if (disposed || pathKey(root) !== pathKey(state.rootPath)) return;
-          const nextNodes = sortEntries(filterExcludedEntries(entries, root, viewFilterOpts()));
-          state.rootNodes = mergeLoadedChildren(nextNodes, state.rootNodes);
-        } else {
-          const node = findTreeEntry(state.rootNodes, dirPath);
-          if (!node || !node.isDirectory) continue;
-          await appendGitignoreFromEntries(dirPath, entries);
-          const nextChildren = sortEntries(filterExcludedEntries(entries, root, viewFilterOpts()));
-          node.children = mergeLoadedChildren(nextChildren, node.children);
-        }
+        if (disposed || pathKey(root) !== pathKey(state.rootPath)) return null;
+        return { dirPath, entries };
       } catch {
         // 目录可能已被删除或暂时不可读：跳过，不打断其它目录的刷新。
+        return null;
+      }
+    });
+    if (disposed || pathKey(root) !== pathKey(state.rootPath)) return;
+    for (const read of readResults) {
+      if (!read) continue;
+      const { dirPath, entries } = read;
+      if (pathKey(dirPath) === pathKey(root)) {
+        await appendGitignoreFromEntries(dirPath, entries);
+        if (disposed || pathKey(root) !== pathKey(state.rootPath)) return;
+        const nextNodes = sortEntries(filterExcludedEntries(entries, root, viewFilterOpts()));
+        state.rootNodes = mergeLoadedChildren(nextNodes, state.rootNodes);
+      } else {
+        const node = findTreeEntry(state.rootNodes, dirPath);
+        if (!node || !node.isDirectory) continue;
+        await appendGitignoreFromEntries(dirPath, entries);
+        const nextChildren = sortEntries(filterExcludedEntries(entries, root, viewFilterOpts()));
+        node.children = mergeLoadedChildren(nextChildren, node.children);
       }
     }
     if (disposed) return;
@@ -992,16 +1041,30 @@ export function mount(
 
   function applyGitStatus(status: GitStatusResult | null) {
     const map = gitStatusToMap(status);
-    const prevSig = gitStatusSignature(state.gitStatus);
-    const nextSig = gitStatusSignature(status);
+    const prev = state.gitStatus;
+    const prevFiles = gitFilesSignature(prev);
+    const nextFiles = gitFilesSignature(status);
     state.gitStatus = status;
     if (state.collapsedStaged === null && status && status.isRepo) {
       const { staged } = partitionGitFiles(status.files);
       state.collapsedStaged = collectGitFolderPaths(staged);
     }
     const mapChanged = !isSameGitMap(state.gitStatusMap, map);
-    if (mapChanged) state.gitStatusMap = map;
-    if (prevSig === nextSig && prevSig !== "" && !mapChanged) return;
+    if (mapChanged) {
+      state.gitStatusMap = map;
+      // 变更集合一变，之前缓存的差异与工作区全文都可能过期（同一 key 指向的内容已被改写）。
+      gitDiffCache.clear();
+    }
+    // 列表重建只看「文件集合 / 分支 / 仓库状态」；ahead/behind 只喂同步指示器（顶栏 ↑/↓），
+    // 一次 fetch 更新计数不该把整张变更列表重建一遍（滚动位置与选区跟着丢）。
+    const repoChanged =
+      (!!prev !== !!status) || (!!prev?.isRepo) !== (!!status?.isRepo);
+    const branchChanged = (prev?.currentBranch || "") !== (status?.currentBranch || "");
+    const listChanged = prevFiles !== nextFiles || repoChanged || branchChanged;
+    const countsChanged =
+      (prev?.ahead || 0) !== (status?.ahead || 0) ||
+      (prev?.behind || 0) !== (status?.behind || 0);
+    if (!listChanged && !countsChanged && !mapChanged) return;
     if (mapChanged && state.mainView === "files") {
       paintTreeGitStatus(layoutEls && layoutEls.treePane, {
         rootPath: state.rootPath,
@@ -1010,7 +1073,7 @@ export function mount(
       });
     }
     syncGitIndicator();
-    if (state.mainView === "git" && prevSig !== nextSig) renderGitPane();
+    if (state.mainView === "git" && listChanged) renderGitPane();
   }
 
   // 统一的 Git 刷新：同一次 snow.gitStatus 同时更新染色、变更列表和同步栏。
@@ -1030,6 +1093,17 @@ export function mount(
     applyGitStatus(status);
   }
 
+  // 窗口切回与宿主 watcher 常在几百毫秒内连打，每次都发一趟全仓 status。
+  // 统一走同一个尾沿防抖；不做「最小间隔抑制」，避免给用户看过期状态。
+  function scheduleGitRefresh(wait = 250): void {
+    if (disposed) return;
+    if (gitDebounceTimer) clearTimeout(gitDebounceTimer);
+    gitDebounceTimer = setTimeout(() => {
+      gitDebounceTimer = null;
+      void refreshGitAll();
+    }, wait);
+  }
+
   // ------------------------------------------------------------------
   // Git 变更视图操作
   // ------------------------------------------------------------------
@@ -1038,6 +1112,11 @@ export function mount(
   // 要等一会 / 得先点别处」）；排队后连点会依次执行，且不会并发写同一仓库。
   const gitActionQueue: GitActionQueueItem[] = [];
   let gitActionRunning = false;
+  // 写操作只登记刷新需求，由 drainGitActions 在排空后一次付清（见其中注释）。
+  let gitRefreshRequested = false;
+  function requestGitRefresh(): void {
+    gitRefreshRequested = true;
+  }
 
   /** 串行排空队列；每个操作执行前后同步提交栏 / 底栏的忙碌态。 */
   async function drainGitActions() {
@@ -1054,6 +1133,12 @@ export function mount(
         } catch (err) {
           console.warn("[FileExplorer] Git 操作失败:", err);
         }
+      }
+      // 队列排空后统一刷一次：原本每个写操作自带一次全仓 status + 整表重建，
+      // 连点 N 个文件暂存就要等 N 轮 status（大仓单轮可达秒级）。
+      if (!disposed && gitRefreshRequested) {
+        gitRefreshRequested = false;
+        await refreshGitAll();
       }
     } finally {
       gitActionRunning = false;
@@ -1085,7 +1170,7 @@ export function mount(
         ? await gitUnstage(state.rootPath, paths)
         : await gitStage(state.rootPath, paths);
       if (res && res.success) state.gitSelected = null;
-      await refreshGitAll();
+      requestGitRefresh();
     });
   }
 
@@ -1094,7 +1179,7 @@ export function mount(
     void runGitAction("stageAll", async () => {
       await gitStageAll(state.rootPath);
       state.gitSelected = null;
-      await refreshGitAll();
+      requestGitRefresh();
     });
   }
 
@@ -1103,7 +1188,7 @@ export function mount(
     void runGitAction("unstageAll", async () => {
       await gitUnstageAll(state.rootPath);
       state.gitSelected = null;
-      await refreshGitAll();
+      requestGitRefresh();
     });
   }
 
@@ -1114,7 +1199,7 @@ export function mount(
     void runGitAction("commit", async () => {
       const res = await gitCommit(state.rootPath, message);
       if (res && res.success) state.gitCommitMessage = "";
-      await refreshGitAll();
+      requestGitRefresh();
     });
   }
 
@@ -1134,7 +1219,7 @@ export function mount(
       renderGitPaneCommit();
       syncGitIndicator();
       await gitPush(state.rootPath, remote, branch || undefined, !upstream);
-      await refreshGitAll();
+      requestGitRefresh();
     });
   }
 
@@ -1145,7 +1230,10 @@ export function mount(
     state.gitSyncBusy = "sync";
     syncGitIndicator();
     try {
-      const status = state.gitStatus || (await getGitStatus(state.rootPath));
+      // 走 refreshGitAll（带在途去重）取基准状态；原先的 `state.gitStatus || await getGitStatus`
+      // 绕开了去重，会和并发刷新各发一趟全仓 status。
+      await refreshGitAll();
+      const status = state.gitStatus;
       const result = await gitSync(state.rootPath, status, async () => {
         await refreshGitAll();
         return state.gitStatus;
@@ -1154,9 +1242,9 @@ export function mount(
         console.warn("[FileExplorer] Git 同步失败:", result.message);
         return;
       }
-
       await refreshGitAll();
-      await loadRoot();
+      // 只有真的可能拉到新提交才重载文件树：树里没有别的同步会改到的内容。
+      if ((status?.behind || 0) > 0) await loadRoot();
     } catch (err) {
       console.warn("[FileExplorer] Git 同步异常:", err);
     } finally {
@@ -1208,7 +1296,7 @@ export function mount(
         await runGitAction("discard", async () => {
           await gitDiscardChanges(state.rootPath, paths);
           state.gitSelected = null;
-          await refreshGitAll();
+          requestGitRefresh();
         });
       },
     });
@@ -1252,9 +1340,32 @@ export function mount(
     await loadGitPreviewDiff({ key, relPath, absPath, isStaged });
   }
 
+  // 差异取数缓存：key → 已解析的 diff（含工作区全文）。一次点击 = 一个 git 进程 + 整份文件跨 IPC，
+  // 来回点同一文件、在「差异↔内容」之间切换都会重复这笔开销。失效只有两处：
+  // 变更集合变化（applyGitStatus）、文件被保存，以及显式刷新（force）绕过读取。
+  const gitDiffCache = new Map<string, CodePreviewDiff>();
+  const GIT_DIFF_CACHE_LIMIT = 24;
+
+  function rememberGitDiff(key: string, diff: CodePreviewDiff): void {
+    gitDiffCache.set(key, diff);
+    if (gitDiffCache.size > GIT_DIFF_CACHE_LIMIT) {
+      const oldest = gitDiffCache.keys().next().value;
+      if (oldest !== undefined) gitDiffCache.delete(oldest);
+    }
+  }
+
   // 拉取并解析指定文件的 Git 差异（含工作区完整内容），供打开与右键刷新复用。
   // 过期结果（切换了文件 / 已卸载）在内部丢弃，调用方无需重复校验。
-  async function loadGitPreviewDiff({ key, relPath, absPath, isStaged }: LoadGitPreviewDiffArgs) {
+  async function loadGitPreviewDiff({ key, relPath, absPath, isStaged, force }: LoadGitPreviewDiffArgs) {
+    if (!force) {
+      const cached = gitDiffCache.get(key);
+      if (cached) {
+        if (disposed || !state.gitPreview || state.gitPreview.key !== key) return;
+        state.gitPreview = { ...state.gitPreview, diff: cached };
+        renderGitPreview();
+        return;
+      }
+    }
     const [diffRes, fileRes] = await Promise.all([
       gitFileDiff(state.rootPath, relPath, isStaged),
       readFileContent(absPath),
@@ -1279,6 +1390,7 @@ export function mount(
       ...state.gitPreview,
       diff,
     };
+    rememberGitDiff(key, diff);
     renderGitPreview();
   }
 
@@ -1292,7 +1404,7 @@ export function mount(
     }
     state.gitPreview = { ...gp, diff: { loading: true, result: null, error: "" } };
     renderGitPreview();
-    await loadGitPreviewDiff(gp);
+    await loadGitPreviewDiff({ ...gp, force: true });
   }
 
   // 切换右侧文件查看器的「差异 / 内容」子视图
@@ -1339,6 +1451,11 @@ export function mount(
     if (shouldVirtualize(file.text)) {
       state.gitPreview = { ...gp, file: { ...file, mode: "code" } };
       renderGitPreview();
+      return;
+    }
+    // 已渲染过就复用：marked + DOMPurify 全文解析只为新文本付一次。
+    if (file.html) {
+      void inlineMarkdownImages(file.path);
       return;
     }
     // 块加载失败（宿主取不到插件文件 / blob import 抛错）与「宿主没挂出渲染器」是同一降级：
@@ -1460,16 +1577,18 @@ export function mount(
       Array.isArray(state.javaProject.sourceRoots) &&
       state.javaProject.sourceRoots.some((root) => pathKey(root) === pathKey(entry.path));
 
+    // 展开同样只等一趟 IPC：这一层的 .gitignore 与列目录并发读。
+    const ignorePromise = needsGitignoreLayer(entry.path) ? readGitignoreText(entry.path) : null;
     if (isJvmSourceRoot) {
       const sub = await readDirectoryEntries(entry.path);
-      await appendGitignoreFromEntries(entry.path, sub);
+      await appendGitignoreFromEntries(entry.path, sub, ignorePromise ? await ignorePromise : undefined);
       entry.children = await loadJvmPackageTree(entry.path, filtered);
       entry.isJavaSourceRoot = true;
       return;
     }
 
     const sub = await readDirectoryEntries(entry.path);
-    await appendGitignoreFromEntries(entry.path, sub);
+    await appendGitignoreFromEntries(entry.path, sub, ignorePromise ? await ignorePromise : undefined);
     entry.children = filtered(sub);
   }
 
@@ -1513,16 +1632,50 @@ export function mount(
     return rules;
   }
 
+  // 读某一层的 .gitignore 文本；该层没有这个文件 / 读失败一律返回 null（不抛给调用方）。
+  async function readGitignoreText(dir: string): Promise<string | null> {
+    try {
+      const res = await readFileContent(joinPath(dir, ".gitignore"));
+      if (!res || res.isBinary || typeof res.content !== "string") return null;
+      return res.content;
+    } catch {
+      return null;
+    }
+  }
+
+  /** 这一层的 .gitignore 还需不需要读（全仓已扫完 / 该层已读过就不再发 IPC）。 */
+  function needsGitignoreLayer(dir: string): boolean {
+    return !state.gitignoreFullyLoaded && !state.gitignoreLoadedDirs.has(pathKey(dir));
+  }
+
+  // 把某一层的 .gitignore 文本并入规则表。
+  function applyGitignoreText(dir: string, text: string | null): void {
+    if (!text) return;
+    const own = parseGitignore(text, getRelativeGitPath(dir, state.rootPath));
+    if (own.length) state.gitignoreRules = state.gitignoreRules.concat(own);
+  }
+
   // 打开目录时补上这一层的 .gitignore。父目录的规则已经在更早的展开里读过。
-  async function appendGitignoreFromEntries(dir: string, entries: DirectoryEntry[]) {
+  // prefetchedText 是「已与列目录并发读好」的文本（null 表示该层没有 .gitignore），
+  // 传了就不再排队第二次 IPC；不传（undefined）时按列目录结果决定要不要读。
+  async function appendGitignoreFromEntries(
+    dir: string,
+    entries: DirectoryEntry[],
+    prefetchedText?: string | null
+  ) {
     if (state.gitignoreFullyLoaded) return;
     const key = pathKey(dir);
     if (state.gitignoreLoadedDirs.has(key)) return;
     state.gitignoreLoadedDirs.add(key);
+    const root = state.rootPath;
+    if (prefetchedText !== undefined) {
+      if (disposed || state.gitignoreFullyLoaded || pathKey(root) !== pathKey(state.rootPath)) return;
+      applyGitignoreText(dir, prefetchedText);
+      return;
+    }
     if (!Array.isArray(entries)) return;
     const gitignoreEntry = entries.find((entry) => entry && entry.name === ".gitignore" && !entry.isDirectory);
     if (!gitignoreEntry) return;
-    const root = state.rootPath;
     let res;
     try {
       res = await readFileContent(gitignoreEntry.path);
@@ -1531,8 +1684,7 @@ export function mount(
     }
     if (disposed || state.gitignoreFullyLoaded || pathKey(root) !== pathKey(state.rootPath)) return;
     if (!res || res.isBinary || typeof res.content !== "string") return;
-    const own = parseGitignore(res.content, getRelativeGitPath(dir, state.rootPath));
-    if (own.length) state.gitignoreRules = state.gitignoreRules.concat(own);
+    applyGitignoreText(dir, res.content);
   }
 
   // 显式刷新时重走整仓 .gitignore。打开面板只读根上的那一个文件。
@@ -1575,9 +1727,21 @@ export function mount(
     state.status = t("status.loading", "加载中…");
     renderToolbar();
     try {
-      const entries = await readDirectoryEntries(root);
+      // 首屏只等一趟 IPC：根层 .gitignore 与列目录并发投机读（该层没这个文件时读失败即当作无规则）。
+      const gitignorePromise = needsGitignoreLayer(root) ? readGitignoreText(root) : null;
+      // 图标块在挂载时已并行发起：这里只给「列目录先完成而图标未到」的情况一个有限到账窗口，
+      // 让树的第一帧就带完整图标集（消除占位图标回填的闪现）。超时兜底：极端慢盘下首屏
+      // 不被图标拖死，图标到齐后由 scheduleStartupFollowups 里的 refreshInstalledIcons 就地回填。
+      // iconsPromise 会话内记忆化：首次之后的 loadRoot 该 race 立即返回。
+      const iconsReady = Promise.race([
+        ensureIcons(),
+        new Promise<void>((resolve) => setTimeout(resolve, 120)),
+      ]);
+      const [entries] = await Promise.all([readDirectoryEntries(root), iconsReady]);
       if (disposed || pathKey(root) !== pathKey(state.rootPath)) return;
-      await appendGitignoreFromEntries(root, entries);
+      const prefetched = gitignorePromise ? await gitignorePromise : undefined;
+      if (disposed || pathKey(root) !== pathKey(state.rootPath)) return;
+      await appendGitignoreFromEntries(root, entries, prefetched);
       if (disposed || pathKey(root) !== pathKey(state.rootPath)) return;
       state.rootNodes = sortEntries(filterExcludedEntries(entries, root, viewFilterOpts()));
       state.status = "";
@@ -1643,7 +1807,13 @@ export function mount(
     return null;
   }
 
-  async function refreshFileTreeAfterMutation() {
+  async function refreshFileTreeAfterMutation(affectedDirs?: string[] | null) {
+    // 改名 / 删除只影响父目录本身：定向重读那几个目录，绘树一次。
+    // 不给范围时退回原全量路径（重载根 + 重读每个已展开目录），供范围未知的调用使用。
+    if (affectedDirs && affectedDirs.length) {
+      await refreshLoadedDirectories(affectedDirs.map((dir) => pathKey(dir)));
+      return;
+    }
     const expandedPaths = Object.keys(state.expanded).filter((path) => state.expanded[path]);
     await loadRoot();
     for (const path of expandedPaths) {
@@ -1943,7 +2113,7 @@ export function mount(
       resetPreviewForDeletedPaths([entry.path]);
       pruneSelectionForDeletedPaths([entry.path]);
 
-      await refreshFileTreeAfterMutation();
+      await refreshFileTreeAfterMutation([parentDirectoryPath(entry.path)]);
       await refreshGitAll();
       setOperationStatus(true);
     } catch (err) {
@@ -2100,7 +2270,7 @@ export function mount(
     remapStatePaths(oldPath, newPath);
     state.operationBusy = false;
     closeContextMenu();
-    await refreshFileTreeAfterMutation();
+    await refreshFileTreeAfterMutation([parentDirectoryPath(oldPath)]);
     await refreshGitAll();
     setOperationStatus(true);
   }
@@ -2368,6 +2538,21 @@ export function mount(
     void refreshAll();
   }
 
+  /**
+   * Git 视图的「刷新」：只重拉变更状态与当前打开的差异。
+   * @description 不能复用 refreshAll —— 它会重走全仓 .gitignore 递归扫描（每个目录一次
+   *   宿主 IPC）并整树重载，那属于文件树的事；混进来后大仓点一次刷新要等几十秒，
+   *   而且刷新的从来不是 Git 面板。
+   */
+  function handleGitRefresh() {
+    void (async () => {
+      await refreshGitAll();
+      if (disposed) return;
+      const gp = state.gitPreview;
+      if (gp && gp.absPath) await handleGitPreviewRefresh();
+    })();
+  }
+
   // ------------------------------------------------------------------
   // 5.0 项目终端：识别（懒加载）→ 右键 / 工具栏运行 → IDEA 式多 tab 交互终端
   // ------------------------------------------------------------------
@@ -2470,6 +2655,16 @@ export function mount(
   function rebuildTerminalWindows() {
     syncRetainedRuns();
     if (terminalWindow && typeof terminalWindow.rebuild === "function") terminalWindow.rebuild();
+    if (runWindow && typeof runWindow.rebuild === "function") runWindow.rebuild();
+  }
+
+  /**
+   * 只重建运行窗口那一侧。
+   * @description 模式 A（运行）记录的增删不影响交互终端窗口的 tab 集合，
+   *   进程每退出一次就把两个窗口都重画一遍是白付一轮 DOM 与 fit。
+   */
+  function rebuildRunWindow() {
+    syncRetainedRuns();
     if (runWindow && typeof runWindow.rebuild === "function") runWindow.rebuild();
   }
 
@@ -2682,11 +2877,16 @@ export function mount(
    *   扫描完成后同步运行控件；识别结果不影响运行面板（面板只展示运行，不展示命令）。
    * @returns {Promise<Object|null>}
    */
-  async function ensureCommands() {
+  async function ensureCommands(rootEntries?: FileTreeEntry[]) {
     if (disposed || !state.rootPath) return null;
     const rootPath = state.rootPath;
     const before = state.projectCommands;
-    const result = await ensureProjectCommands(state, rootPath);
+    const result = await ensureProjectCommands(state, rootPath, {
+      // 首屏已经列过一次根目录，把那份条目交给扫描，别再发一趟重复的列目录 IPC。
+      rootEntries: rootEntries ?? null,
+      // 切项目 / 卸载后这次扫描就没有意义了：让它在层与层之间自己退出。
+      shouldAbort: () => disposed || pathKey(rootPath) !== pathKey(state.rootPath),
+    });
     if (disposed || pathKey(rootPath) !== pathKey(state.rootPath)) return result;
     // 命中缓存（引用未变）：不重渲染，避免打断右键菜单重命名等交互。
     if (result === before) return result;
@@ -3068,11 +3268,16 @@ export function mount(
     };
     term.onResize = (nextCols: number, nextRows: number) => {
       if (term.resizeTimer) clearTimeout(term.resizeTimer);
+      // 尺寸先记账：pty 还没建好时这次 fit 不能丢，否则会话会一直按 80×24 排版，
+      // 构建日志的换行全是错的（原实现在 !term.session 时直接 return，这一尺寸就永久消失了）。
+      term.pendingResize = { cols: nextCols, rows: nextRows };
       // 面板刚展开时 fit 会连着触发几次。尾沿防抖，避免 ConPTY 每次都整屏重绘。
       term.resizeTimer = setTimeout(() => {
         term.resizeTimer = null;
-        if (term.phase !== phase || !term.session) return;
-        term.session.resize!(nextCols, nextRows);
+        const pending = term.pendingResize;
+        if (!pending || term.phase !== phase || !term.session) return;
+        term.pendingResize = null;
+        term.session.resize!(pending.cols, pending.rows);
       }, 120);
     };
 
@@ -3150,13 +3355,13 @@ export function mount(
         // 其他项目的后台任务结束且当前没打开开关：直接拿走，不留一个看不见的已结束 tab。
         if (term.mode === "run" && term.projectPath && pathKey(term.projectPath) !== pathKey(state.rootPath) && !state.showOtherProjectRuns) {
           state.terminals = state.terminals.filter((item) => item !== term);
-          rebuildTerminalWindows();
+          rebuildRunWindow();
           syncRunToolbar();
           syncSidebar();
           return;
         }
         // 模式 A 退出后刷新运行窗口 tab（✓/✗ + 退出码 + 状态点/工具栏态）。
-        if (term.mode === "run") rebuildTerminalWindows();
+        if (term.mode === "run") rebuildRunWindow();
         syncRunToolbar();
         syncSidebar();
       },
@@ -3173,6 +3378,12 @@ export function mount(
     }
     term.session = result;
     session = result;
+    // 补发 session 建立前攒下的尺寸（见 onResize）；不补就停留在宿主默认的 80×24。
+    if (term.pendingResize && typeof result.resize === "function") {
+      const pending = term.pendingResize;
+      term.pendingResize = null;
+      result.resize(pending.cols, pending.rows);
+    }
     if (commandText) {
       if (shellSpoke) sendCommand();
       else {
@@ -3524,8 +3735,35 @@ export function mount(
     }
 
     try {
+      // 巨型文件先挡在读取之前：宿主 readFileContent 没有长度参数，一旦发起就是整份文件
+      // 跨 IPC 进内存，再叠上分行与文本扫描，表现为整个面板假死。
+      if (typeof entry.size === "number" && entry.size > MAX_PREVIEW_BYTES) {
+        state.preview = {
+          kind: "error",
+          name: entry.name,
+          path: entry.path,
+          message: t("preview.fileTooLarge", "文件（{{size}}）过大，无法预览，请改用外部编辑器打开", {
+            size: humanSize(entry.size),
+          }),
+        };
+        renderPreview();
+        return;
+      }
       const result = await readFileContent(entry.path);
       if (disposed || requestId !== previewRequestId || !state.selected.has(entry.path)) return;
+      // 列目录没给尺寸时（size 缺省）按宿主回传的 size 兜底，判定同一阈值。
+      if (typeof result?.size === "number" && result.size > MAX_PREVIEW_BYTES) {
+        state.preview = {
+          kind: "error",
+          name: entry.name,
+          path: entry.path,
+          message: t("preview.fileTooLarge", "文件（{{size}}）过大，无法预览，请改用外部编辑器打开", {
+            size: humanSize(result.size),
+          }),
+        };
+        renderPreview();
+        return;
+      }
       state.preview = buildFilePreview(entry, result);
       renderPreview();
       if (state.pendingRevealLine) {
@@ -3584,6 +3822,12 @@ export function mount(
       renderPreview();
       return;
     }
+    // 已有与当前文本同源的渲染结果就复用：marked 解析 + DOMPurify 全文净化只在首次
+    // 或文本变化后付一次（html 在文本改动与保存时都会清空）。
+    if (state.preview.html) {
+      void inlineMarkdownImages(state.preview.path);
+      return;
+    }
     // 块加载失败与「宿主没挂出渲染器」同一降级：归一成 null 走下面的 return，
     // 预览保持无 html 态；不让拒绝从 void 调用点逃成 unhandled rejection。
     const mod = await loadChunk("markdown").catch(() => null);
@@ -3630,6 +3874,9 @@ export function mount(
     state.preview.text = String(value ?? "");
     state.preview.saveState = "idle";
     state.preview.saveMessage = "";
+    // 整篇高亮 HTML 与 text 同源才可用；文本一改立即作废，避免编辑态复用到过期配色。
+    state.preview.highlightedHtml = "";
+    state.preview.html = "";
   }
 
   // 保存只接受当前文件的完整文本；写入完成后再更新高亮和 Git 状态。
@@ -3646,7 +3893,8 @@ export function mount(
     const content = state.preview.text;
     state.preview.saveState = "saving";
     state.preview.saveMessage = "";
-    renderPreview();
+    // 就地同步保存中态：不重建编辑区，textarea 的光标与滚动得以保留。
+    if (!syncPreviewChrome()) renderPreview();
 
     const result = await writeFileContent(api, filePath, content);
     if (
@@ -3659,9 +3907,11 @@ export function mount(
     if (result && result.ok === true) {
       state.preview.highlightedHtml = "";
       state.preview.html = "";
+      // 磁盘内容已变，Git 预览里缓存的 diff / 工作区全文随之过期。
+      gitDiffCache.clear();
       state.preview.saveState = "saved";
       state.preview.saveMessage = "";
-      renderPreview();
+      if (!syncPreviewChrome()) renderPreview();
       if (state.preview.isMarkdown && state.preview.mode === "preview") {
         void hydrateFileMarkdown(previewRequestId);
       }
@@ -3674,8 +3924,26 @@ export function mount(
           : result && result.error
             ? String(result.error)
             : t("action.saveFailed", "保存失败");
-      renderPreview();
+      if (!syncPreviewChrome()) renderPreview();
     }
+  }
+
+  // 复制 / 保存等微状态变化：优先走查看器注册的就地同步通道（只翻转按钮与提示条），
+  // 不为翻转一个按钮销毁重建整个预览（那会连带虚拟列表与可视行高亮全部重来）。
+  // 容器上没有同步句柄（非文本预览 / 尚未渲染）时退回整体重渲染。
+  function syncPreviewChrome(): boolean {
+    if (!layoutEls) return false;
+    const pane = state.mainView === "git" ? layoutEls.gitPreviewPane : layoutEls.previewPane;
+    if (!pane) return false;
+    // 保存状态只属于 files 面板的预览（state.preview）；Git 查看器内容来自 gitPreviewView
+    // 的新对象，不得消费 files 的保存态，否则会在 Git 面板画出无关的「已保存」提示条。
+    const ownsSaveState = state.mainView !== "git";
+    return syncViewerChrome(pane, {
+      copied: state.copied,
+      saving: ownsSaveState && state.preview.saveState === "saving",
+      saveState: ownsSaveState ? state.preview.saveState || "idle" : "idle",
+      saveMessage: ownsSaveState ? state.preview.saveMessage || "" : "",
+    });
   }
 
   // 6. 复制当前代码
@@ -3685,12 +3953,12 @@ export function mount(
     if (!ok) return;
 
     state.copied = true;
-    renderActiveViewer();
+    if (!syncPreviewChrome()) renderActiveViewer();
     if (copiedTimer) clearTimeout(copiedTimer);
     copiedTimer = setTimeout(() => {
       if (disposed) return;
       state.copied = false;
-      renderActiveViewer();
+      if (!syncPreviewChrome()) renderActiveViewer();
     }, 1600);
   }
 
@@ -3918,8 +4186,8 @@ export function mount(
   }
 
   // 全量渲染：重建主视图（用于初始化与文件树 / Git 变更视图切换）
-  function render() {
-    if (disposed) return;
+  // 局部：骨架与常驻控件（不重建主视图内容）。挂载期先铺这层，数据到位再 render。
+  function renderChrome() {
     ensureLayout();
     renderToolbar();
     renderConfirmDialog();
@@ -3930,6 +4198,11 @@ export function mount(
     syncSidebar();
     // 窗口可见时让终端适配尺寸（视图切换可能改变容器宽度）。
     fitTerminalPanel();
+  }
+
+  function render() {
+    if (disposed) return;
+    renderChrome();
     // 上面 ensureLayout() 已建好骨架并写回 layoutEls；ensureLayout 只在
     // 「已存在且仍挂在文档上」时提前返回，故此后 layoutEls 必非空（断言只补回这条不变量）。
     const { mainView } = layoutEls!;
@@ -4036,14 +4309,16 @@ export function mount(
     if (layoutEls.searchClear) layoutEls.searchClear.hidden = !state.searchQuery;
     const scroll = body.scrollTop;
     if (state.searchQuery.trim()) {
+      // 搜索结果接管树容器：先销毁树的虚拟列表（scroll 监听挂在 body 上，仅替换子节点清不掉）。
+      destroyTreeView(body);
       renderSearchResults(body);
     } else {
       renderTreeView(body, {
         rootPath: state.rootPath,
         rootNodes: state.rootNodes,
         expanded: state.expanded,
-        selected: state.selected,
-        gitStatusMap: state.gitStatusMap,
+        getSelected: () => state.selected,
+        getGitStatusMap: () => state.gitStatusMap,
         canList: true,
         canRead: true,
         onToggleDir: toggleDir,
@@ -4181,8 +4456,8 @@ export function mount(
        onRevealFile: handleGitRevealFile,
        onCopyRelativePath: handleGitCopyRelativePath,
        onCopyAbsolutePath: handleGitCopyAbsolutePath,
-       // 右键菜单「刷新」：与文件树刷新共用同一入口
-       onRefresh: handleRefresh,
+       // 右键菜单「刷新」：只刷 Git 自己的东西（变更状态 + 当前差异），不触发全仓忽略规则重扫
+       onRefresh: handleGitRefresh,
        t,
      };
    }
@@ -4250,8 +4525,29 @@ export function mount(
   }
 
 
-  // 8. 启动与初始化生命周期（立即同步执行初次渲染骨架，随后异步拉取数据）
-  render();
+  // 8. 启动与初始化生命周期（先只铺骨架，数据到位后再 render 主视图，避免空态闪一屏再全量重建）
+  renderChrome();
+
+  // 拖宿主分栏 / 改窗口大小此前没有任何监听会经过 fitTerminalPanel，cols/rows 于是陈旧，
+  // 输出按旧列数换行。只对当前可见的那个工具窗口重算（fitTerminalPanel 自己按 bottomView 选窗）。
+  let terminalSizeObserver: ResizeObserver | null = null;
+  let terminalSizeScheduled = false;
+  // renderChrome 里的 ensureLayout 已把骨架写回 layoutEls（与 render() 里同一条例）。
+  const dockEls = layoutEls!;
+  if (typeof ResizeObserver === "function") {
+    terminalSizeObserver = new ResizeObserver(() => {
+      if (disposed || terminalSizeScheduled) return;
+      terminalSizeScheduled = true;
+      const run = () => {
+        terminalSizeScheduled = false;
+        if (!disposed) fitTerminalPanel();
+      };
+      if (typeof requestAnimationFrame === "function") requestAnimationFrame(run);
+      else setTimeout(run, 16);
+    });
+    if (dockEls.terminalWindowEl) terminalSizeObserver.observe(dockEls.terminalWindowEl);
+    if (dockEls.runWindowEl) terminalSizeObserver.observe(dockEls.runWindowEl);
+  }
 
   // 点击插件外部区域关闭三点菜单（capture 阶段，避免被内部 stopPropagation 拦截）
   // MouseEvent.target 在 DOM 类型里是 EventTarget，而 Node.contains 只收 Node；
@@ -4300,11 +4596,24 @@ export function mount(
       }
       renderGitViewSwitchInToolbar();
     });
-    fullscreenObserver.observe(document.body, {
-      attributes: true,
-      attributeFilter: ["class"],
-      subtree: true,
-    });
+    // 全屏类只可能落在这两个宿主元素自己身上，观察它们即可；观察 document.body+subtree
+    // 会让宿主每一次 class 抖动（AI 流式渲染尤甚）都排一批回调给本插件。
+    const fullscreenTargets = [
+      document.querySelector(".right-panel"),
+      document.querySelector(".app-shell"),
+    ].filter((node): node is Element => !!node);
+    if (fullscreenTargets.length) {
+      for (const target of fullscreenTargets) {
+        fullscreenObserver.observe(target, { attributes: true, attributeFilter: ["class"] });
+      }
+    } else {
+      // 宿主标记结构变了（两个元素都不存在）：退回整文档观察，宁慢不误。
+      fullscreenObserver.observe(document.body, {
+        attributes: true,
+        attributeFilter: ["class"],
+        subtree: true,
+      });
+    }
   }
 
   // 宿主 Tab 切换感知：当从宿主其他面板（如 Git、终端、代码库）切回当前文件浏览器时，
@@ -4329,7 +4638,7 @@ export function mount(
   const handleWindowFocus = () => {
     if (disposed) return;
     if (!tabPaneEl || tabPaneEl.classList.contains("active")) {
-      void refreshGitAll();
+      scheduleGitRefresh();
     }
   };
   if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
@@ -4338,6 +4647,9 @@ export function mount(
 
   let unsubGit: Unsubscribe | null = null;
   let unsubProjects: Unsubscribe | null = null;
+  // 图标块挂载即并行发起：与首屏元数据 / 列目录并发，占位图标闪现窗口压缩到最小。
+  // 首帧绘树前另有 120ms 的限时到账窗口（见 loadRoot）；到不齐时由 followups 就地回填，
+  // 首屏不被 585KB 的块拖死。
   void ensureIcons();
   void (async () => {
     const [initialRoot, viewSettings, diffMode, commitMode, toolDock] = await Promise.all([
@@ -4408,16 +4720,14 @@ export function mount(
       ) {
         return;
       }
-      if (gitDebounceTimer) clearTimeout(gitDebounceTimer);
-      gitDebounceTimer = setTimeout(() => {
-        gitDebounceTimer = null;
-        void refreshGitAll();
-      }, 300);
+      scheduleGitRefresh(300);
     });
   })();
 
   return () => {
     disposed = true;
+    // AI 生成提交信息是宿主里的流式任务；不中止它，卸载后宿主仍在往回调里灌分片。
+    if (state.gitStreamId) abortCommitMessage(state.gitStreamId);
     if (copiedTimer) clearTimeout(copiedTimer);
     if (operationTimer) clearTimeout(operationTimer);
     if (gitDebounceTimer) clearTimeout(gitDebounceTimer);
@@ -4437,6 +4747,10 @@ export function mount(
     if (runWindow && typeof runWindow.dispose === "function") runWindow.dispose();
     runWindow = null;
     if (fullscreenObserver) fullscreenObserver.disconnect();
+    if (terminalSizeObserver) {
+      terminalSizeObserver.disconnect();
+      terminalSizeObserver = null;
+    }
     if (tabPaneObserver) tabPaneObserver.disconnect();
     if (typeof window !== "undefined" && typeof window.removeEventListener === "function") {
       window.removeEventListener("focus", handleWindowFocus);
@@ -4450,6 +4764,12 @@ export function mount(
     // 卸载：终止仍在运行的全部终端进程，避免留下孤儿进程。
     killAllTerminals();
     closeGitContextMenu(layoutEls && layoutEls.gitPane);
+    // 查看器的虚拟列表与视口观察器挂在面板上：面板即将随容器一起摘掉，
+    // 不断开就会拖住整块可视行与闭包里的全文（宿主多次重载插件时线性累积）。
+    disposeViewerViewport(layoutEls && layoutEls.previewPane);
+    disposeViewerViewport(layoutEls && layoutEls.gitPreviewPane);
+    // 随懒块注入的样式随插件一起摘除，不在宿主 head 里留残留（重挂载时 loadChunk 会重新注入）。
+    releaseChunkStyles();
     container.replaceChildren();
   };
 }

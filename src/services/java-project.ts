@@ -21,21 +21,40 @@ export type JvmTreeNode = FileTreeEntry;
 export type JvmEntryFilter = (entries: FileTreeEntry[], dirPath: string) => FileTreeEntry[];
 
 /**
+ * 单次包视图加载的预载目录上限。
+ * @description 正常项目 src/main/java 下的包目录远低于此值；巨型生成物仓库（数万包目录）
+ *   原实现会一次性物化整棵树 + 数万次 IPC。超过预算的子目录不预载（children 留空），
+ *   交回文件树的普通惰性展开路径（按真实目录逐层读），加载不再失控。
+ */
+const JVM_TREE_PRELOAD_BUDGET = 3000;
+
+/**
  * 递归读取 Java/Kotlin 源码根目录，构造成普通嵌套文件树。
  * @param dirPath 源码根目录
  * @param filterEntries 可选过滤器
+ * @param budget 跨递归共享的预载预算（就地扣减）；缺省时新建
  * @returns 带 children 的嵌套条目列表
  */
-async function readJvmSourceTree(dirPath: string, filterEntries?: JvmEntryFilter): Promise<JvmTreeNode[]> {
+async function readJvmSourceTree(
+  dirPath: string,
+  filterEntries?: JvmEntryFilter,
+  budget: { remaining: number } = { remaining: JVM_TREE_PRELOAD_BUDGET },
+): Promise<JvmTreeNode[]> {
   const entries: FileTreeEntry[] = await readDirectoryEntries(dirPath);
   const visible = typeof filterEntries === "function" ? filterEntries(entries, dirPath) : entries;
   const sorted = sortEntries(visible);
   const directories = sorted.filter((entry) => entry && entry.isDirectory);
-  const loaded = await mapPool(directories, 8, async (entry) => {
-    const children = await readJvmSourceTree(entry.path, filterEntries);
+  // 显式声明元素类型可空：预加载预算耗尽的子目录返回 null，回填时跳过。
+  const loaded = await mapPool<FileTreeEntry, JvmTreeNode | null>(directories, 8, async (entry) => {
+    // 预算耗尽：该子目录不预载，树上按「未展开目录」处理，展开时走普通惰性加载。
+    if (budget.remaining <= 0) return null;
+    budget.remaining -= 1;
+    const children = await readJvmSourceTree(entry.path, filterEntries, budget);
     return { ...entry, children };
   });
-  const byPath: Map<string, JvmTreeNode> = new Map(loaded.filter(Boolean).map((entry): [string, JvmTreeNode] => [entry.path, entry]));
+  const byPath: Map<string, JvmTreeNode> = new Map(
+    loaded.filter((entry): entry is JvmTreeNode => !!entry).map((entry): [string, JvmTreeNode] => [entry.path, entry])
+  );
   return sorted.map((entry) => (entry && entry.isDirectory ? byPath.get(entry.path) || entry : entry));
 }
 
@@ -47,11 +66,13 @@ async function readJvmSourceTree(dirPath: string, filterEntries?: JvmEntryFilter
  */
 function buildPackageNode(entry: JvmTreeNode, parentPackageName: string): JvmTreeNode {
   const packageName = parentPackageName ? `${parentPackageName}.${entry.name}` : entry.name;
-  const children: JvmTreeNode[] = Array.isArray(entry.children)
+  // 预算跳过的子目录 children 为 undefined：保持「未加载」形态，展开时走普通惰性加载。
+  // 不能兜底成空数组——那会把未加载误标成「空包」，并封死 toggleDir 的展开路径。
+  const children: JvmTreeNode[] | undefined = Array.isArray(entry.children)
     ? sortEntries(entry.children).map((child) =>
         child.isDirectory ? buildPackageNode(child, packageName) : { ...child }
       )
-    : [];
+    : undefined;
 
   return {
     ...entry,
@@ -69,11 +90,12 @@ function buildPackageNode(entry: JvmTreeNode, parentPackageName: string): JvmTre
  * @returns 合并后的包节点；有不只一个子包或存在文件时原样返回
  */
 function compactPackageNode(node: JvmTreeNode): JvmTreeNode {
-  const children: JvmTreeNode[] = Array.isArray(node.children)
+  // children 为 undefined（预算跳过）时原样透传：保持可展开的未加载形态，不做包压缩。
+  const children: JvmTreeNode[] | undefined = Array.isArray(node.children)
     ? node.children.map((child) => (child.isVirtualPackage ? compactPackageNode(child) : child))
-    : [];
-  const directories = children.filter((child) => child && child.isVirtualPackage);
-  const files = children.filter((child) => !child || !child.isVirtualPackage);
+    : undefined;
+  const directories = (children || []).filter((child) => child && child.isVirtualPackage);
+  const files = (children || []).filter((child) => !child || !child.isVirtualPackage);
 
   if (!files.length && directories.length === 1) {
     const child = directories[0];
@@ -92,7 +114,7 @@ function compactPackageNode(node: JvmTreeNode): JvmTreeNode {
   return {
     ...node,
     displayName: node.name,
-    children: sortEntries(children),
+    children: Array.isArray(children) ? sortEntries(children) : children,
   };
 }
 

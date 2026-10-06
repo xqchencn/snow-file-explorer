@@ -73,6 +73,13 @@ test('分发包完整性: dist 目录存在且包含所有直接安装运行所�
   const cssStat = fs.statSync(cssPath);
   assert.ok(cssStat.size > 5 * 1024, `dist/index.css 体积需合理 (>5KB)，当前: ${(cssStat.size / 1024).toFixed(1)}KB`);
 
+  // 终端与高亮的样式随各自块走（首屏不背），块加载时由 lazy-chunk 注入。
+  for (const chunkCss of ['terminal.css', 'highlighter.css']) {
+    const cssChunkPath = path.join(distDir, 'chunks', chunkCss);
+    assert.ok(fs.existsSync(cssChunkPath), `dist/chunks/${chunkCss} 必须存在`);
+    assert.ok(fs.statSync(cssChunkPath).size > 512, `dist/chunks/${chunkCss} 不得为空`);
+  }
+
   const localesDir = path.join(distDir, 'locales');
   assert.ok(fs.existsSync(localesDir), 'dist/locales/ 必须存在');
   assert.ok(fs.existsSync(path.join(localesDir, 'zh-CN.json')), 'dist/locales/zh-CN.json 必须存在');

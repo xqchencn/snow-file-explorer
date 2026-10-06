@@ -62,6 +62,51 @@ type HunkNavElement = HTMLDivElement & {
   update: () => void;
 };
 
+/** 容器 → 视口尺寸观察器：重渲染时先断开旧的，避免同一容器叠加多个。 */
+const diffViewportObservers = new WeakMap<HTMLElement, ResizeObserver>();
+
+/**
+ * 视口高度变化后让虚拟列表按新尺寸重算可视行数。
+ * @description 此前只有高亮块到达时才 refresh()，面板由窄变宽/由隐藏转可见后仍按旧的
+ *   clientHeight 出行数，底部留白要等下一次滚动才修好。回调只读 contentRect（不回读元素），
+ *   同高度与零高度通知去重，重算合到一帧里跑。
+ */
+function observeDiffViewport(
+  parentEl: HTMLElement,
+  scroll: HTMLElement,
+  vlist: { refresh: () => void },
+): void {
+  const previous = diffViewportObservers.get(parentEl);
+  if (previous) {
+    previous.disconnect();
+    diffViewportObservers.delete(parentEl);
+  }
+  if (typeof ResizeObserver !== "function") return;
+  let lastHeight = 0;
+  let scheduled = false;
+  let observer: ResizeObserver | null = null;
+  try {
+    observer = new ResizeObserver((entries) => {
+      const height = entries.length ? Math.round(entries[entries.length - 1].contentRect.height) : 0;
+      if (!height || height === lastHeight || scheduled || !scroll.isConnected) return;
+      scheduled = true;
+      const run = () => {
+        scheduled = false;
+        lastHeight = height;
+        if (scroll.isConnected) vlist.refresh();
+      };
+      if (typeof requestAnimationFrame === "function") requestAnimationFrame(run);
+      else setTimeout(run, 16);
+    });
+    observer.observe(scroll);
+  } catch {
+    // 无布局/无观察能力的测试环境：静默降级，滚动时仍会自然重算。
+    if (observer) observer.disconnect();
+    return;
+  }
+  diffViewportObservers.set(parentEl, observer);
+}
+
 /**
  * 渲染差异视图
  * @param parentEl 承载视图的容器
@@ -77,10 +122,15 @@ export function renderDiffView(parentEl: HTMLElement, {
   onSetMode,
   t,
 }: DiffViewOptions) {
-  // 释放上一次差异视图可能残留的虚拟列表（滚动监听 / 内部节点）
+  // 释放上一次差异视图可能残留的虚拟列表（滚动监听 / 内部节点）与视口观察器
   if (parentEl.__sfeVList && typeof parentEl.__sfeVList.destroy === "function") {
     parentEl.__sfeVList.destroy();
     parentEl.__sfeVList = null;
+  }
+  const staleObserver = diffViewportObservers.get(parentEl);
+  if (staleObserver) {
+    staleObserver.disconnect();
+    diffViewportObservers.delete(parentEl);
   }
   parentEl.replaceChildren();
 
@@ -149,6 +199,7 @@ export function renderDiffView(parentEl: HTMLElement, {
 
   parentEl.__sfeVList = vlist;
   vlist.setItems(items);
+  observeDiffViewport(parentEl, scroll, vlist);
   // 高亮块未就绪时先出纯文本，加载完成只重绘当前可视行。
   if (!highlighterReady()) {
     void ensureHighlighter().then(() => {
@@ -281,8 +332,11 @@ function renderSplitCell(cell: DiffLine | null | undefined, side: "left" | "righ
   if (!cell) return el("div", "sfe-diff-split-cell empty " + side);
   const type = cell.type === "meta" ? "meta" : cell.type;
   const box = el("div", "sfe-diff-split-cell " + type + " " + side);
-  box.appendChild(el("span", "sfe-diff-no", cell.oldNo == null ? "" : String(cell.oldNo)));
-  box.appendChild(el("span", "sfe-diff-no", cell.newNo == null ? "" : String(cell.newNo)));
+  // 每侧只显示自己这侧的行号（对标 VS Code 分栏）：左栏=旧行号，右栏=新行号。
+  // buildSplitRows 的配对保证左栏只会是 del/context（有 oldNo）、右栏只会是 add/context（有 newNo）；
+  // 旧实现两侧都渲染 oldNo+newNo，上下文行两侧都是「1 1」，整屏出现四列行号。
+  const no = side === "left" ? cell.oldNo : cell.newNo;
+  box.appendChild(el("span", "sfe-diff-no", no == null ? "" : String(no)));
   box.appendChild(el("span", "sfe-diff-sign", diffSign(cell.type)));
   // 与 unified 视图共用同一写入入口，保证两种布局的颜色和安全策略一致。
   const text = el("span", "sfe-diff-text");

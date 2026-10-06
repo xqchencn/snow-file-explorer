@@ -59,6 +59,7 @@
   "preview.loading": "Loading…",
   "preview.binary": "Binary file ({{mime}}) — no preview.",
   "preview.error": "Unable to read: ",
+  "preview.fileTooLarge": "This file ({{size}}) is too large to preview. Open it in an external editor.",
   "preview.editUnavailable": "The host does not provide file writing",
   "error.readRoot": "Unable to read the root folder",
   "error.noApi": "Local file APIs are unavailable in this version.",

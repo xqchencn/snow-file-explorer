@@ -151,10 +151,24 @@ export type ProjectCommandsState = {
   projectCommands: ProjectCommandsResult | null;
 };
 
+/**
+ * 扫描的可中断入参（两者都可缺省，缺省即不可中断，行为与旧版一致）。
+ * @description 一次全仓扫描是数百次 IPC，面板销毁或切换根目录后继续跑只是浪费；
+ *   调用方给一个谓词或 AbortSignal，扫描在每层目录边界检查并尽快返回。
+ */
+export type ScanProjectCommandsOptions = {
+  /** 返回 true 表示本次扫描已被调用方废弃，结果不应再被使用。 */
+  shouldAbort?: () => boolean;
+  /** AbortSignal：aborted 时等同 shouldAbort 命中。 */
+  signal?: AbortSignal;
+};
+
 /** ensureProjectCommands 的选项。 */
-export type EnsureProjectCommandsOptions = {
+export type EnsureProjectCommandsOptions = ScanProjectCommandsOptions & {
   /** true 时忽略缓存重新扫描（目录变化后的刷新）。 */
   force?: boolean;
+  /** 调用方已经列过的根目录条目；传入可省掉扫描内部的一次重复列目录。 */
+  rootEntries?: ProjectEntry[] | null;
 };
 
 /** flattenCommands 的选项。 */
@@ -173,9 +187,9 @@ export type FlatRunCommand = RunCommand & {
   group: string | null;
 };
 
-/** 递归扫描 JVM 源码的共享预算计数器（跨目录累计已读源码文件数）。 */
+/** 递归扫描 JVM 源码的预算计数器（就地累加，跨目录共享同一实例）。 */
 type ScanBudgetState = {
-  /** 已消耗的源码文件读取次数，达到 budget 后停止继续扫描。 */
+  /** 已消耗的源码文件读取次数，达到对应上限后停止继续扫描。 */
   count: number;
 };
 
@@ -187,7 +201,9 @@ type JvmSourceRoot = {
   rel: string;
 };
 
-/** 递归扫描时跳过的目录名（海量 / 无关 / 生成物）。 */
+/** 递归扫描时跳过的目录名（海量 / 无关 / 生成物）。
+ *  虚拟环境与依赖缓存（.venv / venv / __pycache__ / .gradle / .yarn / Pods 等）
+ *  单目录可达数万条目，是扫描路径上最大的失控风险点，必须与 node_modules 同等对待。 */
 const SCAN_SKIP_DIRS = new Set([
   "node_modules",
   ".git",
@@ -203,12 +219,29 @@ const SCAN_SKIP_DIRS = new Set([
   ".cache",
   "vendor",
   "target",
+  ".venv",
+  "venv",
+  "__pycache__",
+  ".gradle",
+  ".idea",
+  ".yarn",
+  ".pytest_cache",
+  ".mypy_cache",
+  "pods",
+  "bower_components",
 ]);
 
-/** 单次扫描允许发现的最大包数量（防御性上限，避免超大仓库卡顿）。 */
+/** 单次扫描允许发现的最大包数量（防御性上限，避免超大仓库卡顿）。
+ *  发现即计数：递归内部一命中上限就停止下探，不再等整棵子树跑完才并入结果。 */
 const MAX_PACKAGES = 50;
 /** 递归扫描最大深度。 */
 const MAX_SCAN_DEPTH = 6;
+/** 单次扫描读取 JVM 源码文件的总量上限（跨所有模块共享一个计数器）。 */
+const MAX_SOURCE_FILES = 240;
+/** 单个 JVM 模块的源码读取上限：取总预算的一半，防止第一个大模块独占额度、后续模块识别不到 main。 */
+const MAX_SOURCE_FILES_PER_MODULE = Math.min(MAX_SOURCE_FILES, 120);
+/** 长循环主动让出主线程的最小时间片：扫描是 CPU+IO 混合，占死线程会卡住宿主渲染与其它 IPC。 */
+const SCAN_YIELD_INTERVAL_MS = 24;
 
 /**
  * 扫描时跳过的 go 测试模块目录名（仅非根目录生效）。
@@ -238,13 +271,25 @@ function joinRel(dirNames: string[]): string {
   return dirNames.filter(Boolean).join("/");
 }
 
+/** 调用方是否已废弃本次扫描（谓词与 AbortSignal 任一命中即算）。 */
+function isScanAborted(options: ScanProjectCommandsOptions): boolean {
+  return options.signal?.aborted === true || options.shouldAbort?.() === true;
+}
+
+/** 进行中的全仓扫描（按 state 对象记忆化）：扫描进行中的重复调用复用同一 Promise，不并发重扫。 */
+const pendingCommandScans = new WeakMap<
+  ProjectCommandsState,
+  { key: string; promise: Promise<ProjectCommandsResult | null> }
+>();
+
 /**
  * 懒加载入口：按根目录缓存识别结果。
- * @description 同一根目录内命中缓存即返回，切换项目根目录才重新扫描。
+ * @description 同一根目录内命中缓存即返回，切换项目根目录才重新扫描；
+ *   扫描进行中的再次触发（连续刷新 / 快速交互）复用进行中的 Promise，避免并发跑两次全仓扫描。
  * @param state 面板状态（就地读写）
  * @param rootPath 工作区根目录
- * @param opts 是否强制重扫
- * @returns 识别结果；无根目录时返回 null
+ * @param opts 强制重扫 / 复用已列好的根目录条目 / 中断谓词
+ * @returns 识别结果；无根目录或扫描被中断时为 null
  */
 export async function ensureProjectCommands(
   state: ProjectCommandsState,
@@ -253,17 +298,36 @@ export async function ensureProjectCommands(
 ): Promise<ProjectCommandsResult | null> {
   if (!rootPath) {
     state.projectCommands = null;
+    pendingCommandScans.delete(state);
     return null;
   }
+  const key = rootKey(rootPath);
   const cached = state.projectCommands;
-  if (!opts.force && cached && rootKey(cached.rootPath) === rootKey(rootPath)) {
+  if (!opts.force && cached && rootKey(cached.rootPath) === key) {
     return cached;
   }
-  const result = await scanProjectCommands(rootPath);
-  // 异步扫描期间可能已切换项目：过期结果不得写回。
-  if (rootKey(result.rootPath) !== rootKey(rootPath)) return result;
-  state.projectCommands = result;
-  return result;
+  // 进行中的同根扫描直接复用；force 表示显式重扫，不并入在途请求。
+  const pending = pendingCommandScans.get(state);
+  if (!opts.force && pending && pending.key === key) {
+    return pending.promise;
+  }
+  const promise = (async () => {
+    const result = await scanProjectCommands(rootPath, opts.rootEntries, opts);
+    // 已废弃的扫描只剩半截结果，不得写回缓存（调用方此时已不消费返回值）。
+    if (isScanAborted(opts)) return null;
+    // 异步扫描期间可能已切换项目：过期结果不得写回。
+    if (rootKey(result.rootPath) !== key) return result;
+    state.projectCommands = result;
+    return result;
+  })();
+  pendingCommandScans.set(state, { key, promise });
+  try {
+    return await promise;
+  } finally {
+    if (pendingCommandScans.get(state)?.promise === promise) {
+      pendingCommandScans.delete(state);
+    }
+  }
 }
 
 /**
@@ -432,16 +496,36 @@ export function detectProjectCommands(packages?: (ProjectPackage | null | undefi
 /**
  * 递归扫描工作区，发现所有包标记并解析为包列表（Node package.json / Go 项目）。
  * @param rootPath 工作区根目录绝对路径
+ * @param rootEntries 调用方已列好的根目录条目；缺省时本函数自己列一次
+ * @param options 可中断选项（缺省即不可中断）
  * @returns 带根目录键的识别结果；根目录不可读时为空的识别结果
  */
-export async function scanProjectCommands(rootPath: string | null | undefined): Promise<ProjectCommandsResult> {
+export async function scanProjectCommands(
+  rootPath: string | null | undefined,
+  rootEntries?: ProjectEntry[] | null,
+  options: ScanProjectCommandsOptions = {},
+): Promise<ProjectCommandsResult> {
   const empty: ProjectCommandsResult = { rootPath: rootPath || "", ecosystems: [], packages: [], scannedAt: Date.now() };
   if (!rootPath) return empty;
 
   const snow = typeof window !== "undefined" ? window.snow : null;
   const canRead = snow && typeof snow.readFileContent === "function";
+  // 唯一的包登记表：递归内部发现一个就登记一个，MAX_PACKAGES 因此在扫描途中即时生效。
   const packages: ProjectPackage[] = [];
-  const MAX_SOURCE_FILES = 240;
+  // JVM 源码读取预算：全局一个计数器跨所有模块共享，单模块另设上限避免独占。
+  const sourceBudget: ScanBudgetState = { count: 0 };
+  const aborted = () => isScanAborted(options);
+  // 包上限 / 中断的合并判定，供各层循环入口复用。
+  const scanStopped = () => aborted() || packages.length >= MAX_PACKAGES;
+  // 进来就已废弃：一次 IPC 都不必花。
+  if (aborted()) return empty;
+  // 每处理完一层目录检查一次：超过一个时间片就交给宏任务，避免长时间占死宿主主线程。
+  let lastYieldAt = Date.now();
+  const yieldToHost = async (): Promise<void> => {
+    if (Date.now() - lastYieldAt < SCAN_YIELD_INTERVAL_MS) return;
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    lastYieldAt = Date.now();
+  };
 
   const readText = async (entry: ProjectEntry | null | undefined): Promise<string | null> => {
     if (!canRead || !entry || !entry.path) return null;
@@ -490,15 +574,22 @@ export async function scanProjectCommands(rootPath: string | null | undefined): 
       (entry) => entry && entry.isDirectory !== true && typeof entry.name === "string" && /\.(?:bat|ps1|sh)$/i.test(entry.name)
     );
 
-  // JVM 源码只从标准源码根读取，且有文件数上限，避免扫描生成物或巨型仓库卡死。
+  // JVM 源码只从标准源码根读取，受「全局总额度 + 单模块额度」双层预算约束，避免扫描生成物或巨型仓库卡死。
+  // 目录内文件用 mapPool 批量读：每个文件都是一次 IPC，串行等待会累加到秒级；
+  // 额度在发起读取前预扣，所以计数与实际读取次数一致。
+  /** 本模块还能不能再读一个源码文件：全局总额度与单模块额度都未满才允许。 */
+  const canReadSource = (moduleBudget: ScanBudgetState): boolean =>
+    !aborted() && sourceBudget.count < MAX_SOURCE_FILES && moduleBudget.count < MAX_SOURCE_FILES_PER_MODULE;
+
   const collectJvmSources = async (
     sourceRoot: string | null | undefined,
     rootRel: string,
     result: JvmMainCandidateInput[],
-    budget: number,
-    state: ScanBudgetState,
+    moduleBudget: ScanBudgetState,
   ): Promise<void> => {
-    if (!sourceRoot || state.count >= budget) return;
+    if (!sourceRoot || !canReadSource(moduleBudget)) return;
+    await yieldToHost();
+    if (!canReadSource(moduleBudget)) return;
     let entries: ProjectEntry[] | undefined;
     try {
       entries = await readDirectoryEntries(sourceRoot);
@@ -506,41 +597,62 @@ export async function scanProjectCommands(rootPath: string | null | undefined): 
       return;
     }
     if (!Array.isArray(entries)) return;
+    const pendingFiles: ProjectEntry[] = [];
+    const subDirs: ProjectEntry[] = [];
     for (const entry of entries) {
-      if (!entry || !entry.path || state.count >= budget) break;
+      if (!entry || !entry.path) continue;
       if (entry.isDirectory === true) {
         if (SCAN_SKIP_DIRS.has(String(entry.name || "").toLowerCase()) || /^(?:test|generated)$/i.test(entry.name || "")) continue;
-        await collectJvmSources(entry.path, `${rootRel}/${entry.name}`, result, budget, state);
+        subDirs.push(entry);
         continue;
       }
       if (!/\.(?:java|kt)$/i.test(entry.name || "")) continue;
-      state.count += 1;
-      const text = await readText(entry);
+      if (!canReadSource(moduleBudget)) break;
+      sourceBudget.count += 1;
+      moduleBudget.count += 1;
+      pendingFiles.push(entry);
+    }
+    const texts = await mapPool(pendingFiles, 8, (entry) => readText(entry));
+    for (let index = 0; index < pendingFiles.length; index += 1) {
+      const text = texts[index];
       if (text == null) continue;
+      const entry = pendingFiles[index];
       const candidates = findJavaMainCandidates(text, entry.name).map((candidate) => ({
         ...candidate,
         sourcePath: entry.path,
       }));
       result.push(...candidates);
     }
+    // 全局额度耗尽或本模块额度耗尽都要停：模块之间是并行推进的，靠共享计数器收敛。
+    for (const sub of subDirs) {
+      if (!canReadSource(moduleBudget)) return;
+      await collectJvmSources(sub.path, `${rootRel}/${sub.name}`, result, moduleBudget);
+    }
   };
 
   const findSourceRoots = async (baseEntries: ProjectEntry[]): Promise<JvmSourceRoot[]> => {
     const roots: JvmSourceRoot[] = [];
-    for (const language of ["java", "kotlin"]) {
-      const src = findDir(baseEntries, "src");
-      if (!src) continue;
-      try {
-        const srcEntries = await readDirectoryEntries(src.path);
-        const mainDir = findDir(srcEntries, "main");
-        if (mainDir) {
-          const mainEntries = await readDirectoryEntries(mainDir.path);
+    // 中断后不必再为已废弃的扫描花 2~3 次 IPC 定位源码根。
+    if (aborted()) return roots;
+    // src / main 目录只读一次，java / kotlin 两语言并行检查（原实现每语言各读一遍中间目录）。
+    const src = findDir(baseEntries, "src");
+    if (!src) return roots;
+    try {
+      const srcEntries = await readDirectoryEntries(src.path);
+      const mainDir = findDir(srcEntries, "main");
+      if (!mainDir) return roots;
+      const mainEntries = await readDirectoryEntries(mainDir.path);
+      const languageRoots = await Promise.all(
+        (["java", "kotlin"] as const).map(async (language) => {
           const root = findDir(mainEntries, language);
-          if (root) roots.push({ path: root.path, rel: `src/main/${language}` });
-        }
-      } catch {
-        // 某个标准源码根读取失败时继续检查其它根。
+          return root ? { path: root.path, rel: `src/main/${language}` } : null;
+        })
+      );
+      for (const root of languageRoots) {
+        if (root) roots.push(root);
       }
+    } catch {
+      // 某个标准源码根读取失败时继续检查其它根。
     }
     return roots;
   };
@@ -551,16 +663,21 @@ export async function scanProjectCommands(rootPath: string | null | undefined): 
     const packageManager = detectPythonPackageManager(entries, pyprojectText, "python");
     const modules: PythonPackageModule[] = [];
     const collectModules = async (baseEntries: ProjectEntry[] | null | undefined): Promise<void> => {
-      for (const entry of Array.isArray(baseEntries) ? baseEntries : []) {
-        if (!entry || entry.isDirectory !== true || SCAN_SKIP_DIRS.has(String(entry.name || "").toLowerCase())) continue;
-        let children: ProjectEntry[] | undefined;
+      const dirs = (Array.isArray(baseEntries) ? baseEntries : []).filter(
+        (entry) => entry && entry.isDirectory === true && !SCAN_SKIP_DIRS.has(String(entry.name || "").toLowerCase())
+      );
+      // 子目录并行列目录找 __main__.py（原实现逐个 await，几十个子目录的仓库串行等待明显）。
+      const found = await mapPool(dirs, 8, async (entry) => {
         try {
-          children = await readDirectoryEntries(entry.path);
+          const children = await readDirectoryEntries(entry.path);
+          const main = findFile(children, "__main__.py");
+          return main ? { name: entry.name, sourcePath: main.path } : null;
         } catch {
-          continue;
+          return null;
         }
-        const main = findFile(children, "__main__.py");
-        if (main) modules.push({ name: entry.name, sourcePath: main.path });
+      });
+      for (const module of found) {
+        if (module) modules.push(module);
       }
     };
     await collectModules(entries);
@@ -597,9 +714,13 @@ export async function scanProjectCommands(rootPath: string | null | undefined): 
     inheritedWrapper: string | null | undefined,
   ): Promise<ProjectPackage> => {
     const mainCandidates: JvmMainCandidateInput[] = [];
-    const scanState: ScanBudgetState = { count: 0 };
+    // 每个模块一个独立计数，与全局 sourceBudget 同时受约束（java / kotlin 两个源码根共用本模块额度）。
+    const moduleBudget: ScanBudgetState = { count: 0 };
     const roots = await findSourceRoots(entries);
-    for (const root of roots) await collectJvmSources(root.path, root.rel, mainCandidates, MAX_SOURCE_FILES, scanState);
+    for (const root of roots) {
+      if (!canReadSource(moduleBudget)) break;
+      await collectJvmSources(root.path, root.rel, mainCandidates, moduleBudget);
+    }
     const prefix = dirRel;
     const wrapperName = ecosystem === "maven" ? "mvnw.cmd" : "gradlew.bat";
     const wrapper = findFile(entries, wrapperName) ? wrapperName : inheritedWrapper;
@@ -644,6 +765,14 @@ export async function scanProjectCommands(rootPath: string | null | undefined): 
     };
   };
 
+  /** 登记本目录发现的包：发现即计数，MAX_PACKAGES 因此在递归途中即时生效。 */
+  const recordPackages = (found: ProjectPackage[]): void => {
+    for (const item of found) {
+      if (packages.length >= MAX_PACKAGES) return;
+      packages.push(item);
+    }
+  };
+
   const inspectDirectory = async (
     dirPath: string,
     relNames: string[],
@@ -651,18 +780,22 @@ export async function scanProjectCommands(rootPath: string | null | undefined): 
     inheritedManager: string | null | undefined,
     inheritedMvnw: string | null | undefined,
     inheritedGradlew: string | null | undefined,
-  ): Promise<ProjectPackage[]> => {
-    if (depth > MAX_SCAN_DEPTH || packages.length >= MAX_PACKAGES) return [];
+  ): Promise<void> => {
+    if (depth > MAX_SCAN_DEPTH) return;
+    await yieldToHost();
+    if (scanStopped()) return;
     let entries: ProjectEntry[] | undefined;
     try {
       entries = await readDirectoryEntries(dirPath);
     } catch {
-      return [];
+      return;
     }
-    if (!Array.isArray(entries)) return [];
+    if (!Array.isArray(entries)) return;
+    // 列目录期间调用方可能已废弃本次扫描：半截结果随后会被丢弃，不再为它读清单文件。
+    if (aborted()) return;
     const rel = joinRel(relNames);
     const last = relNames[relNames.length - 1];
-    if (relNames.length && GO_TEST_DIRS.has(last) && isGoModule(entries)) return [];
+    if (relNames.length && GO_TEST_DIRS.has(last) && isGoModule(entries)) return;
 
     const found: ProjectPackage[] = [];
     const pkgEntry = findFile(entries, "package.json");
@@ -678,49 +811,44 @@ export async function scanProjectCommands(rootPath: string | null | undefined): 
     if (hasFile(entries, "build.gradle") || hasFile(entries, "build.gradle.kts") || hasFile(entries, "settings.gradle") || hasFile(entries, "settings.gradle.kts")) {
       found.push(await buildJvmPackage(rel, entries, "gradle", gradlew));
     }
+    recordPackages(found);
     const subDirs = entries.filter((entry) => entry && entry.isDirectory === true && !SCAN_SKIP_DIRS.has(String(entry.name || "").toLowerCase()));
-    const nested = await mapPool(subDirs, 8, async (sub) => {
-      if (packages.length + found.length >= MAX_PACKAGES) return [];
-      return inspectDirectory(sub.path, relNames.concat(sub.name), depth + 1, packageManager, mvnw, gradlew);
+    await mapPool(subDirs, 8, async (sub) => {
+      if (scanStopped()) return;
+      await inspectDirectory(sub.path, relNames.concat(sub.name), depth + 1, packageManager, mvnw, gradlew);
     });
-    for (const list of nested) {
-      if (Array.isArray(list)) found.push(...list);
-    }
-    return found;
   };
 
-  let rootEntries: ProjectEntry[] | undefined;
-  try {
-    rootEntries = await readDirectoryEntries(rootPath);
-  } catch {
-    return empty;
-  }
-  if (!Array.isArray(rootEntries)) return empty;
-  const rootPkg = findFile(rootEntries, "package.json");
-  const rootJson = rootPkg ? await readJson(rootPkg) : null;
-  const rootManager = rootPkg ? detectPackageManager(rootJson, rootEntries, "npm") : "npm";
-  if (rootPkg) packages.push({ dir: "", packageJson: rootJson, packageManager: rootManager, entries: rootEntries });
-  if (isGoModule(rootEntries)) packages.push(await buildGoPackage("", rootEntries));
-  if (isPythonProject(rootEntries)) packages.push(await buildPythonPackage("", rootEntries));
-  if (isScriptProject(rootEntries)) packages.push(buildScriptPackage("", rootEntries));
-  const rootMvnw = findFile(rootEntries, "mvnw.cmd") ? "mvnw.cmd" : null;
-  const rootGradlew = findFile(rootEntries, "gradlew.bat") ? "gradlew.bat" : null;
-  if (hasFile(rootEntries, "pom.xml")) packages.push(await buildJvmPackage("", rootEntries, "maven", rootMvnw));
-  if (hasFile(rootEntries, "build.gradle") || hasFile(rootEntries, "build.gradle.kts") || hasFile(rootEntries, "settings.gradle") || hasFile(rootEntries, "settings.gradle.kts")) {
-    packages.push(await buildJvmPackage("", rootEntries, "gradle", rootGradlew));
-  }
-  const rootSubs = rootEntries.filter((entry) => entry && entry.isDirectory === true && !SCAN_SKIP_DIRS.has(String(entry.name || "").toLowerCase()));
-  const nested = await mapPool(rootSubs, 8, (sub) => {
-    if (packages.length >= MAX_PACKAGES) return [];
-    return inspectDirectory(sub.path, [sub.name], 1, rootManager, rootMvnw, rootGradlew);
-  });
-  for (const list of nested) {
-    if (!Array.isArray(list)) continue;
-    for (const pkg of list) {
-      if (packages.length >= MAX_PACKAGES) break;
-      packages.push(pkg);
+  // 调用方已列过根目录（首屏 loadRoot）时直接复用，省掉一次跨进程列目录。
+  let rootList: ProjectEntry[] | null = Array.isArray(rootEntries) ? rootEntries : null;
+  if (!rootList) {
+    try {
+      rootList = await readDirectoryEntries(rootPath);
+    } catch {
+      return empty;
     }
   }
+  if (!Array.isArray(rootList)) return empty;
+  const rootPkg = findFile(rootList, "package.json");
+  const rootJson = rootPkg ? await readJson(rootPkg) : null;
+  const rootManager = rootPkg ? detectPackageManager(rootJson, rootList, "npm") : "npm";
+  const rootPackages: ProjectPackage[] = [];
+  if (rootPkg) rootPackages.push({ dir: "", packageJson: rootJson, packageManager: rootManager, entries: rootList });
+  if (isGoModule(rootList)) rootPackages.push(await buildGoPackage("", rootList));
+  if (isPythonProject(rootList)) rootPackages.push(await buildPythonPackage("", rootList));
+  if (isScriptProject(rootList)) rootPackages.push(buildScriptPackage("", rootList));
+  const rootMvnw = findFile(rootList, "mvnw.cmd") ? "mvnw.cmd" : null;
+  const rootGradlew = findFile(rootList, "gradlew.bat") ? "gradlew.bat" : null;
+  if (hasFile(rootList, "pom.xml")) rootPackages.push(await buildJvmPackage("", rootList, "maven", rootMvnw));
+  if (hasFile(rootList, "build.gradle") || hasFile(rootList, "build.gradle.kts") || hasFile(rootList, "settings.gradle") || hasFile(rootList, "settings.gradle.kts")) {
+    rootPackages.push(await buildJvmPackage("", rootList, "gradle", rootGradlew));
+  }
+  recordPackages(rootPackages);
+  const rootSubs = rootList.filter((entry) => entry && entry.isDirectory === true && !SCAN_SKIP_DIRS.has(String(entry.name || "").toLowerCase()));
+  await mapPool(rootSubs, 8, async (sub) => {
+    if (scanStopped()) return;
+    await inspectDirectory(sub.path, [sub.name], 1, rootManager, rootMvnw, rootGradlew);
+  });
   return { rootPath, ...detectProjectCommands(packages) };
 }
 

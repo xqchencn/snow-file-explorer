@@ -26,6 +26,54 @@ export type ChunkModuleMap = {
 
 const cache: Map<string, Promise<LazyChunkModule | null>> = new Map();
 
+/** 随块注入的样式（其余样式仍在首屏 index.css）：块没加载就不该为这些规则付解析成本。 */
+const CHUNK_CSS: Partial<Record<LazyChunkName, string>> = {
+  terminal: "terminal.css",
+  highlighter: "highlighter.css",
+};
+
+/** 本会话已读到的块样式文本（键 = 样式文件名）：卸载摘除样式后，重挂载可凭它重新注入。 */
+const chunkStyleText = new Map<string, string>();
+
+/** 本会话注入到宿主 head 的样式元素：卸载时统一摘除，不在宿主文档里留残留。 */
+const injectedChunkStyles = new Set<HTMLStyleElement>();
+
+/**
+ * 把按需块样式挂进文档头（若尚未挂载）。
+ * @param key 样式文件名，同时作为「已注入」标记，重复挂载不会插入第二份
+ */
+function applyChunkStyle(key: string, css: string): void {
+  if (typeof document === "undefined" || !document.head) return;
+  chunkStyleText.set(key, css);
+  if (document.head.querySelector(`style[data-sfe-chunk="${key}"]`)) return;
+  const style = document.createElement("style");
+  style.setAttribute("data-sfe-chunk", key);
+  style.textContent = css;
+  document.head.appendChild(style);
+  injectedChunkStyles.add(style);
+}
+
+/**
+ * 确保某块的样式已挂进文档头（缓存命中路径也可能需要：卸载摘除后重挂载的场景）。
+ * @param name 块名；该块无随块样式时是空操作
+ */
+function ensureChunkStyle(name: LazyChunkName): void {
+  const cssFile = CHUNK_CSS[name];
+  if (!cssFile) return;
+  if (document.head?.querySelector(`style[data-sfe-chunk="${cssFile}"]`)) return;
+  const css = chunkStyleText.get(cssFile);
+  if (css) applyChunkStyle(cssFile, css);
+}
+
+/**
+ * 摘除本会话注入到宿主 head 的全部块样式（插件卸载时调用）。
+ * @description 样式文本仍留在 chunkStyleText：同 realm 重挂载时 loadChunk 会重新注入。
+ */
+export function releaseChunkStyles(): void {
+  for (const style of injectedChunkStyles) style.remove();
+  injectedChunkStyles.clear();
+}
+
 /**
  * 读取宿主注入的插件 id。
  * @returns 插件 id；宿主未注入全局作用域时为空串
@@ -45,7 +93,13 @@ async function loadHostChunk(name: LazyChunkName): Promise<LazyChunkModule | nul
   const snow = typeof window !== "undefined" ? window.snow : null;
   const id = pluginId();
   if (!snow || typeof snow.readPluginFile !== "function" || !id) return null;
-  const code = await snow.readPluginFile(id, `chunks/${name}.js`);
+  const cssFile = CHUNK_CSS[name];
+  const [code, css] = await Promise.all([
+    snow.readPluginFile(id, `chunks/${name}.js`),
+    cssFile ? snow.readPluginFile(id, `chunks/${cssFile}`).catch(() => "") : Promise.resolve(""),
+  ]);
+  // 样式先落地，再 import 模块：块里的第一帧就带着配色。
+  if (cssFile && css) applyChunkStyle(cssFile, css);
   if (!code) return null;
   const blob = new Blob([code], { type: "text/javascript" });
   const url = URL.createObjectURL(blob);
@@ -68,7 +122,11 @@ export function loadChunk<K extends LazyChunkName>(
   name: K,
 ): Promise<ChunkModuleMap[K] | null> {
   const cached = cache.get(name);
-  if (cached) return cached as Promise<ChunkModuleMap[K] | null>;
+  if (cached) {
+    // 缓存命中也要确认样式在位：卸载摘除后重挂载时，模块还在缓存里但样式已被摘掉。
+    ensureChunkStyle(name);
+    return cached as Promise<ChunkModuleMap[K] | null>;
+  }
   const pending = loadHostChunk(name)
     .then((mod) => mod || loadSourceChunk(name))
     .catch((err) => {

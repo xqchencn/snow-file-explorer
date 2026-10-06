@@ -174,7 +174,7 @@ test('预览组件: 普通文本默认只读，笔/眼睛按钮切换真实编�
     name: 'a.js',
     path: 'D:/repo/a.js',
     text: 'const value = 1;',
-    highlightedHtml: '<span>const value = 1;</span>',
+    highlightedHtml: highlightCodeHtml('const value = 1;', '.js'),
     isMarkdown: false,
     mode: 'preview',
   };
@@ -1324,6 +1324,228 @@ test('代码预览: Java/Kotlin main sourcePath + mainLine 显示 14x14 运行�
   assert.equal(svg.getAttribute('height'), '14');
   buttons[0].click();
   assert.deepEqual(calls, [command]);
+});
+
+// 编辑态高亮的上限等于只读熔断上限，这条是有意为之的不变量（见 highlight-policy 顶部注释）。
+// 曾经存在过更紧的编辑态专用阈值（60K 字符 / 2000 行），后果是「只读彩色、进编辑变纯文本底色」。
+test('预览组件: 越过编辑态旧专用阈值的文件，进编辑态仍保留语法高亮', () => {
+  const host = document.createElement('div');
+  const line = 'const value = 1; // padding padding';
+  const text = Array.from({ length: 2000 }, () => line).join('\n');
+  assert.ok(text.length > 60000, '用例须越过旧的编辑态专用字符上限');
+  assert.ok(shouldHighlight(text), '用例不得越过只读熔断上限');
+
+  const preview: CodeTextPreview = {
+    kind: 'text',
+    name: 'big.js',
+    path: 'D:/repo/big.js',
+    text,
+    highlightedHtml: '',
+    isMarkdown: false,
+    mode: 'preview',
+  };
+  renderCodeViewer(host, {
+    preview,
+    copied: false,
+    onCopy: () => {},
+    onEditInput: () => {},
+    onSave: () => {},
+    editable: true,
+    t,
+  });
+
+  const editHighlight = host.querySelector('.sfe-file-viewer-edit-highlight');
+  assert.ok(editHighlight, '编辑模式应渲染高亮层');
+  assert.ok(
+    editHighlight!.querySelector('.token.keyword'),
+    '只读态能上色的文件进编辑态必须仍有 token 配色，不得退化为纯文本底色'
+  );
+});
+
+test('预览组件: 编辑态复用只读态整篇 HTML，进入编辑不再重新分词', () => {
+  const host = document.createElement('div');
+  const source = 'const value = 1;';
+  const seeded = highlightCodeHtml(source, '.js');
+  assert.ok(seeded.includes('token'), '前置条件：只读态应已产出 token HTML');
+  const preview: CodeTextPreview = {
+    kind: 'text',
+    name: 'reuse.js',
+    path: 'D:/repo/reuse.js',
+    text: source,
+    highlightedHtml: seeded,
+    isMarkdown: false,
+    mode: 'preview',
+  };
+  renderCodeViewer(host, {
+    preview,
+    copied: false,
+    onCopy: () => {},
+    onEditInput: () => {},
+    onSave: () => {},
+    editable: true,
+    t,
+  });
+  const editHighlight = host.querySelector('.sfe-file-viewer-edit-highlight');
+  assert.ok(editHighlight, '编辑模式应渲染高亮层');
+  assert.equal(editHighlight!.innerHTML, seeded, '高亮层应直接复用只读态算好的 HTML');
+});
+
+test('预览组件: 编辑态行号槽按差额增删，已有行号节点原地复用', () => {
+  const host = document.createElement('div');
+  const preview: CodeTextPreview = {
+    kind: 'text',
+    name: 'gutter.js',
+    path: 'D:/repo/gutter.js',
+    text: 'const a = 1;\nconst b = 2;',
+    highlightedHtml: '<span>code</span>',
+    isMarkdown: false,
+  };
+  renderCodeViewer(host, {
+    preview,
+    copied: false,
+    onCopy: () => {},
+    onEditInput: () => {},
+    onSave: () => {},
+    editable: true,
+    t,
+  });
+
+  const textarea = q<HTMLTextAreaElement>(host, 'textarea');
+  const gutter = q<HTMLElement>(host, '.sfe-file-viewer-edit-gutter');
+  assert.equal(gutter.childElementCount, 2, '首建按行数全量生成');
+  const firstRow = gutter.firstElementChild;
+
+  const type = (value: string) => {
+    textarea.value = value;
+    textarea.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+  };
+
+  type('const a = 1;\nconst b = 2;\nconst c = 3;');
+  assert.equal(gutter.childElementCount, 3, '多一行应只在尾部补一行');
+  assert.equal(gutter.firstElementChild, firstRow, '增量补差不整槽重建，已有行号节点必须原地复用');
+  assert.equal(gutter.lastElementChild?.textContent, '3', '补出的尾部行号连续');
+
+  type('const a = 1;');
+  assert.equal(gutter.childElementCount, 1, '少两行应只删尾部节点');
+  assert.equal(gutter.firstElementChild, firstRow, '删尾部不触碰已有节点');
+  assert.equal(gutter.textContent, '1', '删尾后无残留行号');
+});
+
+test('预览组件: 虚拟列表视口尺寸变化后按新高度重算窗口，重绘不叠加观察者', async () => {
+  type Entry = { contentRect: { height: number } };
+  type Stub = {
+    fire: (entries: Entry[]) => void;
+    observed: Element[];
+    disconnected: boolean;
+  };
+  const created: Stub[] = [];
+  globalThis.ResizeObserver = class {
+    fire: (entries: Entry[]) => void = () => {};
+    observed: Element[] = [];
+    disconnected = false;
+    constructor(callback: (entries: Entry[]) => void) {
+      this.fire = callback;
+      created.push(this);
+    }
+    observe(target: Element) {
+      this.observed.push(target);
+    }
+    disconnect() {
+      this.disconnected = true;
+    }
+  } as unknown as typeof ResizeObserver;
+  const live = () => created.filter((observer) => !observer.disconnected);
+
+  try {
+    const host = document.createElement('div');
+    const text = Array.from({ length: 900 }, (_, i) => `line ${i}`).join('\n');
+    const options = {
+      preview: {
+        kind: 'text' as const,
+        name: 'big.txt',
+        path: 'D:/repo/big.txt',
+        text,
+        highlightedHtml: '',
+        isMarkdown: false,
+      },
+      copied: false,
+      onCopy: () => {},
+      t,
+    };
+    renderCodeViewer(host, options);
+
+    const scroll = q<HTMLElement>(host, '.sfe-file-viewer-code-scroll');
+    assert.equal(created.length, 1, '虚拟列表应挂且只挂一个视口观察者');
+    assert.deepEqual(created[0].observed, [scroll], '观察者监听的是滚动视口本身');
+    const rowsBefore = scroll.querySelectorAll('.sfe-file-viewer-line').length;
+
+    // jsdom 不布局：把视口高度改成 1200 后按新尺寸通知，窗口行数必须跟着变大
+    Object.defineProperty(scroll, 'clientHeight', { configurable: true, value: 1200 });
+    created[0].fire([{ contentRect: { height: 1200 } }]);
+    const rowsAfter = scroll.querySelectorAll('.sfe-file-viewer-line').length;
+    assert.ok(rowsAfter > rowsBefore, `高度变大后窗口应重算，实际 ${rowsBefore} → ${rowsAfter}`);
+
+    const firstRow = scroll.querySelector('.sfe-file-viewer-line');
+    created[0].fire([{ contentRect: { height: 1200 } }]);
+    assert.equal(scroll.querySelector('.sfe-file-viewer-line'), firstRow, '同一高度重复通知不得重建可视行');
+    created[0].fire([{ contentRect: { height: 0 } }]);
+    assert.equal(scroll.querySelector('.sfe-file-viewer-line'), firstRow, '零高度（面板隐藏）通知应忽略');
+
+    // 同一容器重绘：旧观察者断开，容器上始终只存活一个
+    renderCodeViewer(host, options);
+    assert.equal(created[0].disconnected, true, '重绘必须断开上一次视口观察者');
+    assert.equal(created.length, 2);
+    assert.equal(live().length, 1, '同一容器多次渲染不得叠加观察者');
+
+    renderCodeViewer(host, { ...options, preview: null });
+    assert.equal(created[1].disconnected, true, '切到非虚拟预览时同样要断开');
+    assert.equal(live().length, 0, '离开虚拟列表后不应留下任何观察者');
+  } finally {
+    Reflect.deleteProperty(globalThis, 'ResizeObserver');
+  }
+});
+
+test('预览组件: 组件内体量判定与 highlight-policy 逐条件等价（熔断 / 虚拟化边界）', async () => {
+  const { shouldVirtualize } = await import('../../../src/components/highlight-policy.ts');
+  const jsLine = (length: number) => `const v = "${'x'.repeat(Math.max(0, length - 12))}";`;
+  const cases = [
+    { name: '空文本', text: '' },
+    { name: '400 行', text: Array.from({ length: 400 }, (_, i) => `const v${i} = 1;`).join('\n') },
+    { name: '401 行', text: Array.from({ length: 401 }, (_, i) => `const v${i} = 1;`).join('\n') },
+    { name: '单行 20000 字符', text: jsLine(20000) },
+    { name: '单行 20001 字符', text: jsLine(20001) },
+    { name: '400 行共 28 万字符', text: Array.from({ length: 400 }, () => jsLine(700)).join('\n') },
+  ];
+
+  for (const { name, text } of cases) {
+    const host = document.createElement('div');
+    // 整篇高亮的回填要等 ensureHighlighter，且被 content.isConnected 把关：
+    // 挂进 document 才走得到真实链路（与线上面板一致）。
+    document.body.appendChild(host);
+    try {
+      renderCodeViewer(host, {
+        preview: {
+          kind: 'text',
+          name: 'a.js',
+          path: 'D:/repo/a.js',
+          text,
+          highlightedHtml: '',
+          isMarkdown: false,
+        },
+        copied: false,
+        onCopy: () => {},
+        t,
+      });
+      const virtualized = !!host.querySelector('.sfe-file-viewer-code-scroll-virtual');
+      assert.equal(virtualized, shouldVirtualize(text), `${name}：虚拟化判定应与 policy 一致`);
+      // 整篇熔断判定只在整块 <pre> 分支起作用（虚拟分支按单行上色）
+      if (virtualized) continue;
+      await flushClipboardRead();
+      assert.equal(!!host.querySelector('.token'), shouldHighlight(text), `${name}：整篇高亮熔断判定应与 policy 一致`);
+    } finally {
+      host.remove();
+    }
+  }
 });
 
 

@@ -519,6 +519,25 @@ function renderSection(opts: GitSectionOptions): HTMLDivElement {
 }
 
 /**
+ * 清除上一个选中行的高亮，并把新行记录为当前选中。
+ * @description 选中缓存的元素已脱离文档（列表被 watcher 刷新重建）时退回全量扫描：
+ *   重建后的列表会按 state 恢复选中行，快速路径清不到它，必须扫描一次，之后缓存重新生效。
+ * @param scope 选中行的查找范围（当前 Git 视图容器）
+ * @param next 新选中的行元素
+ */
+let lastSelectedGitRow: HTMLElement | null = null;
+function clearGitRowSelection(scope: Element | null, next: HTMLElement): void {
+  if (lastSelectedGitRow && lastSelectedGitRow.isConnected) {
+    lastSelectedGitRow.classList.remove("selected");
+  } else if (scope) {
+    for (const prev of scope.querySelectorAll(".sfe-git-row.selected")) {
+      prev.classList.remove("selected");
+    }
+  }
+  lastSelectedGitRow = next;
+}
+
+/**
  * 渲染目录行
  */
 function renderFolderRow(opts: GitFolderRowOptions): HTMLDivElement {
@@ -581,12 +600,7 @@ function renderFolderRow(opts: GitFolderRowOptions): HTMLDivElement {
   // 单击文件夹行：切换折叠 + 选中该文件夹（使行内加号常显，不再仅 hover 可见）。
   // 先写选中态再折叠，折叠触发的重建会按 selected 恢复高亮；两者互不干扰。
   item.addEventListener("click", () => {
-    const scope = item.closest(".sfe-git-view, .sfe-git-scroll");
-    if (scope) {
-      for (const prev of scope.querySelectorAll(".sfe-git-row.selected")) {
-        prev.classList.remove("selected");
-      }
-    }
+    clearGitRowSelection(item.closest(".sfe-git-view, .sfe-git-scroll"), item);
     item.classList.add("selected");
     if (typeof onSelectFolder === "function") onSelectFolder(node, section);
     if (typeof onToggleCollapse === "function") onToggleCollapse(section, node.path);
@@ -633,12 +647,7 @@ function renderFileRow(opts: GitFileRowOptions): HTMLDivElement {
   // 关键：onOpenFile → openGitDiff 只重绘右侧查看器，不会重建列表，因此选中态与
   // 滚动位置不受影响；行内按钮一律 stopPropagation，避免误触发行打开。
   row.addEventListener("click", () => {
-    const scope = row.closest(".sfe-git-view, .sfe-git-scroll");
-    if (scope) {
-      for (const prev of scope.querySelectorAll(".sfe-git-row.selected")) {
-        prev.classList.remove("selected");
-      }
-    }
+    clearGitRowSelection(row.closest(".sfe-git-view, .sfe-git-scroll"), row);
     row.classList.add("selected");
     if (typeof onSelectFile === "function") onSelectFile(file, section);
     if (typeof onOpenFile === "function") onOpenFile(file, section);

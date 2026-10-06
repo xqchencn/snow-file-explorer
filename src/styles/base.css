@@ -299,4 +299,7 @@
   left: 0;
   right: 0;
   will-change: transform;
+  /* 布局包含：内容层行集合变化不影响容器内其它子树（spacer）的布局计算。
+     不用 paint/strict：内容层的行允许横向溢出（树深层缩进、长文件名）。 */
+  contain: layout;
 }

@@ -210,11 +210,42 @@ export function annotateExcludedEntry<T extends FileTreeEntry>(
 }
 
 /**
+ * 目录级过滤判定缓存：键为目录路径（归一化小写），值为该目录的判定上下文。
+ * @description 同一目录每次刷新 / 重新展开都会从宿主拿到全新条目数组，按数组引用缓存永远打不中；
+ *   真正稳定的是「目录 + 规则集」下的逐条目命中判定（正则测试是大头）。规则数组以引用相等判定：
+ *   调用方（index.ts）在规则变化时总是整体替换数组，引用变了自然重算。
+ */
+type DirFilterCacheEntry = {
+  /** 构建缓存时的规则数组引用；引用不同即视为规则已变化。 */
+  rules: GitignoreRule[];
+  /** 缓存键（条目路径 + 目录标记）→ 命中标记。 */
+  marks: Map<string, ExcludedEntryMarks>;
+};
+
+const dirFilterCache = new Map<string, DirFilterCacheEntry>();
+/** 缓存的目录数上限；超出后按插入序淘汰最旧的目录（目录数量与会话内浏览过的目录数同阶）。 */
+const DIR_FILTER_CACHE_LIMIT = 512;
+
+/**
+ * 取条目所属目录的缓存键（父目录路径归一化小写）
+ * @param entryPath 条目绝对路径
+ * @returns 目录缓存键；无法解析时为空串（不参与缓存）
+ */
+function dirFilterCacheKey(entryPath: string): string {
+  const normalized = String(entryPath || "").replace(/\\/g, "/");
+  const slash = normalized.lastIndexOf("/");
+  if (slash <= 0) return "";
+  return normalized.slice(0, slash).toLowerCase();
+}
+
+/**
  * 按开关过滤目录条目；关闭开关时保留命中项并以 isSoftHidden 标记。
  * @param entries 目录条目列表
  * @param rootPath 仓库根目录路径
  * @param opts 过滤开关与规则
  * @returns 过滤后的条目列表，每项都带浅色命中标记
+ * @description 命中判定按目录缓存（见 DirFilterCacheEntry）：同目录刷新 / 重新展开时
+ *   复用逐条目的正则判定结果，只重做轻量的对象展开。
  */
 export function filterExcludedEntries<T extends FileTreeEntry>(
   entries: T[],
@@ -223,8 +254,43 @@ export function filterExcludedEntries<T extends FileTreeEntry>(
 ): Array<T & ExcludedEntryMarks> {
   if (!Array.isArray(entries)) return entries;
   const { excludeMeta = true, useGitignore = true, gitignoreRules = [] } = opts;
+  if (!entries.length) return [];
+  // 宿主透传的列表（搜索结果）可能含 null 元素：首条目缺失时放弃缓存（键为空串即不读写），
+  // 逐条目回退到无缓存判定，与原实现对 null 条目的容忍一致。
+  const firstEntry = entries[0] as FileTreeEntry | null | undefined;
+  const cacheKey = firstEntry ? dirFilterCacheKey(firstEntry.path) : "";
+  let cached = cacheKey ? dirFilterCache.get(cacheKey) : undefined;
+  if (!cached || cached.rules !== gitignoreRules) {
+    cached = { rules: gitignoreRules, marks: new Map() };
+    if (cacheKey) {
+      dirFilterCache.set(cacheKey, cached);
+      if (dirFilterCache.size > DIR_FILTER_CACHE_LIMIT) {
+        const oldest = dirFilterCache.keys().next().value;
+        if (oldest !== undefined) dirFilterCache.delete(oldest);
+      }
+    }
+  }
+  const marksByKey = cached.marks;
   return entries
-    .map((entry) => annotateExcludedEntry(entry, rootPath, { gitignoreRules }))
+    .map((entry) => {
+      if (!entry) return entry;
+      // 缓存键带 isDirectory：同名路径可能从文件变成目录，dirOnly 规则的判定会随之不同。
+      const marksKey = cacheKey ? entry.path + (entry.isDirectory ? "\u0000d" : "") : "";
+      let marks = marksKey ? marksByKey.get(marksKey) : undefined;
+      if (!marks) {
+        const metaExcluded = isExcludedMeta(entry.name);
+        const rel = getRelativeGitPath(entry.path, rootPath);
+        const gitignored =
+          !!rel && isIgnoredByRules(rel, !!entry.isDirectory, gitignoreRules);
+        marks = {
+          isMetaExcluded: metaExcluded,
+          isGitignored: gitignored,
+          isSoftHidden: metaExcluded || gitignored,
+        };
+        if (marksKey) marksByKey.set(marksKey, marks);
+      }
+      return { ...entry, ...marks };
+    })
     .filter((entry) => {
       if (!entry) return false;
       if (excludeMeta && entry.isMetaExcluded) return false;

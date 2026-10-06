@@ -159,10 +159,68 @@ export function resolveGitStatus(
 }
 
 /**
+ * 文件夹聚合状态的索引：键为「目录相对路径 + '/'」（仓库根为空串），
+ * 值记录该目录全部子孙变更的聚合信息：
+ *   - hasM：子孙中是否存在修改态（M 一旦出现即为最终聚合结果，语义与原线性扫描的 break 一致）；
+ *   - last：按插入序最后一个非删除态的状态字符（原扫描「最后一个非 D 覆盖前者」的语义）。
+ */
+type GitFolderAggregate = {
+  /** 子孙中是否存在 M 态变更。 */
+  hasM: boolean;
+  /** 按插入序最后一个非删除态的状态字符；无变更为空串。 */
+  last: string;
+};
+
+/**
+ * 按状态表对象缓存目录聚合索引（状态表整体替换时旧索引随旧对象被 GC 回收）。
+ * @description 树渲染会对每个可见目录行查询聚合状态；原实现每次全表扫描 O(变更数)，
+ *   大仓库下每帧数十万次迭代。索引按「状态表对象引用」缓存一次构建成本，行查询降为 O(1)。
+ */
+const folderIndexCache = new WeakMap<GitStatusMap, Map<string, GitFolderAggregate>>();
+
+/**
+ * 构建（或复用）状态表对应的目录聚合索引
+ * @param gitStatusMap Git 状态表（键为仓库相对路径，正斜杠）
+ * @returns 目录前缀 → 聚合信息 的索引表
+ */
+function getFolderIndex(gitStatusMap: GitStatusMap): Map<string, GitFolderAggregate> {
+  let index = folderIndexCache.get(gitStatusMap);
+  if (index) return index;
+  index = new Map();
+  const ensure = (prefix: string): GitFolderAggregate => {
+    let agg = index!.get(prefix);
+    if (!agg) {
+      agg = { hasM: false, last: "" };
+      index!.set(prefix, agg);
+    }
+    return agg;
+  };
+  // 插入序遍历（for...in 对字符串键保持插入序），保证 last 的「最后者胜出」与原实现一致。
+  for (const key in gitStatusMap) {
+    const s = String(gitStatusMap[key] || "").toUpperCase();
+    if (!s || s === "D") continue; // 删除态不向父级传播（对齐 VS Code propagate=false）
+    // 把该文件记入自身路径的每一级祖先前缀（含仓库根空串）。
+    ensure("").last = s;
+    if (s === "M") ensure("").hasM = true;
+    let slash = key.indexOf("/");
+    while (slash !== -1) {
+      const prefix = key.slice(0, slash + 1);
+      const agg = ensure(prefix);
+      agg.last = s;
+      if (s === "M") agg.hasM = true;
+      slash = key.indexOf("/", slash + 1);
+    }
+  }
+  folderIndexCache.set(gitStatusMap, index);
+  return index;
+}
+
+/**
  * 解析文件夹的聚合 Git 状态（对齐 VS Code「Contains emphasized items」规则）
  * @description 文件夹自身不参与 git 状态计算，其标识来自子孙文件：
- *   存在任意一个「非删除」状态的子孙变更，即视为该文件夹有变更。
+ *   存在修改态（M）子孙即为 M；否则取插入序最后一个非删除态。
  *   删除态文件不向父级传播（文件已不存在），故删除态不计入聚合。
+ *   查询走 {@link getFolderIndex} 的预构建索引，单次 O(1)。
  * @param folderPath 文件夹绝对路径
  * @param rootPath 仓库根目录路径
  * @param gitStatusMap Git 状态表（键为仓库相对路径，正斜杠）
@@ -177,15 +235,9 @@ export function resolveGitFolderStatus(
   const rel = getRelativeGitPath(folderPath, rootPath);
   // 仓库根（rel 为空）时前缀为空串，匹配全部键；子目录匹配 "rel/" 前缀的键
   const prefix = rel ? rel + "/" : "";
-  let aggregate: string | null = null;
-  for (const key in gitStatusMap) {
-    if (prefix && key.indexOf(prefix) !== 0) continue;
-    const s = String(gitStatusMap[key] || "").toUpperCase();
-    if (!s || s === "D") continue; // 删除态不向父级传播（对齐 VS Code propagate=false）
-    aggregate = s;
-    if (s === "M") break; // 修改态优先级最高，无需继续扫描
-  }
-  return aggregate;
+  const agg = getFolderIndex(gitStatusMap).get(prefix);
+  if (!agg) return null;
+  return agg.hasM ? "M" : agg.last || null;
 }
 
 /**
@@ -230,13 +282,25 @@ export async function getGitStatus(rootPath: string): Promise<GitStatusResult | 
  */
 export function gitStatusSignature(status: GitStatusResult | null | undefined): string {
   if (!status) return "";
-  const files = Array.isArray(status.files) ? status.files : [];
   const parts = [
     status.isRepo ? "1" : "0",
     status.currentBranch || "",
     status.ahead || 0,
     status.behind || 0,
   ];
+  return parts.join("\u0001") + "\u0001" + gitFilesSignature(status);
+}
+
+/**
+ * 只含「变更文件集合」的签名（不含分支 / ahead / behind）。
+ * @description 变更列表与文件树染色只依赖文件集合；把分支和远端计数也算进签名，
+ *   会让一次 fetch 就重建整张列表（滚动位置与文本选区一起丢）。这两件事必须分开判。
+ * @param status Git 状态结果
+ * @returns 排序后的文件条目签名；无文件时为空串
+ */
+export function gitFilesSignature(status: GitStatusResult | null | undefined): string {
+  if (!status) return "";
+  const files = Array.isArray(status.files) ? status.files : [];
   const entries: string[] = [];
   for (const f of files) {
     if (!f) continue;
@@ -245,7 +309,7 @@ export function gitStatusSignature(status: GitStatusResult | null | undefined): 
   // 顺序无关：git status 的文件输出顺序可能抖动，而最终渲染顺序由目录树重排决定，
   // 因此先排序再比较，避免「内容未变、仅顺序变化」触发无谓重建（列表跳动）。
   entries.sort();
-  return parts.concat(entries).join("\u0001");
+  return entries.join("\u0001");
 }
 
 /**
@@ -334,6 +398,17 @@ export function buildGitFileTree(
   files: GitFileStatus[] | null | undefined
 ): GitTreeNode[] {
   const root: GitTreeNode = { name: "", path: "", children: [] };
+  // 兄弟查找索引用 Map<string, node>：数千变更落在同一目录时避免 children.find 的 O(n²)。
+  const childIndex = new Map<GitTreeNode, Map<string, GitTreeNode>>();
+  const childOf = (node: GitTreeNode, segment: string): GitTreeNode | undefined => {
+    let map = childIndex.get(node);
+    if (!map) {
+      map = new Map();
+      for (const child of node.children) map.set(child.name, child);
+      childIndex.set(node, map);
+    }
+    return map.get(segment);
+  };
   for (const file of Array.isArray(files) ? files : []) {
     if (!file || !file.path) continue;
     const segments = String(file.path).split(/[/\\]+/).filter(Boolean);
@@ -341,10 +416,11 @@ export function buildGitFileTree(
     let acc = "";
     segments.forEach((segment, index) => {
       acc = acc ? `${acc}/${segment}` : segment;
-      let child = current.children.find((node) => node.name === segment);
+      let child = childOf(current, segment);
       if (!child) {
         child = { name: segment, path: acc, children: [] };
         current.children.push(child);
+        childIndex.get(current)?.set(segment, child);
       }
       if (index === segments.length - 1) child.file = file;
       current = child;
@@ -386,22 +462,40 @@ export function collectGitFolderPaths(files: GitFileStatus[] | null | undefined)
  * 统计树节点下的文件总数
  * @param node 树节点
  * @returns 该节点子树内的文件数；节点为空时为 0
+ * @description 结果按节点对象记忆化：渲染每个目录行都要取计数，树节点构建后不可变，
+ *   一次自底向上计算后其余行查询 O(1)（原实现每行重新递归整棵子树）。
  */
+const gitTreeFileCounts = new WeakMap<GitTreeNode, number>();
+
 export function countGitTreeFiles(node: GitTreeNode | null | undefined): number {
   if (!node) return 0;
   if (node.file) return 1;
-  return node.children.reduce((sum, child) => sum + countGitTreeFiles(child), 0);
+  const cached = gitTreeFileCounts.get(node);
+  if (cached !== undefined) return cached;
+  let sum = 0;
+  for (const child of node.children) sum += countGitTreeFiles(child);
+  gitTreeFileCounts.set(node, sum);
+  return sum;
 }
 
 /**
  * 收集树节点下的所有文件（供「暂存/取消暂存整个目录」使用）
  * @param node 树节点
  * @returns 文件对象数组；节点为空时为空数组
+ * @description 用 push 展开收集；原 reduce+concat 每层复制累积数组，深层大子树为 O(n²)。
  */
 export function collectGitTreeFiles(node: GitTreeNode | null | undefined): GitFileStatus[] {
-  if (!node) return [];
-  if (node.file) return [node.file];
-  return node.children.reduce((acc: GitFileStatus[], child) => acc.concat(collectGitTreeFiles(child)), []);
+  const out: GitFileStatus[] = [];
+  const walk = (current: GitTreeNode | null | undefined): void => {
+    if (!current) return;
+    if (current.file) {
+      out.push(current.file);
+      return;
+    }
+    for (const child of current.children) walk(child);
+  };
+  walk(node);
+  return out;
 }
 
 /**

@@ -59,6 +59,7 @@
   "preview.loading": "正在讀取…",
   "preview.binary": "二進位檔案（{{mime}}），不提供預覽。",
   "preview.error": "無法讀取：",
+  "preview.fileTooLarge": "檔案（{{size}}）過大，無法預覽，請改用外部編輯器開啟",
   "preview.editUnavailable": "目前宿主未提供檔案寫入能力",
   "error.readRoot": "無法讀取根目錄",
   "error.noApi": "目前版本未開放本機檔案介面。",

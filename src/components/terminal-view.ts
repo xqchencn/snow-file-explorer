@@ -53,6 +53,10 @@ export type XtermView = {
   fit: () => void;
   /** 聚焦终端（元素未挂载时静默忽略）。 */
   focus: () => void;
+  /** 视图隐藏 / 显示：隐藏期只攒输出不解析，重新显示时一次性冲刷。 */
+  setHidden: (hidden: boolean) => void;
+  /** 再排一次输出冲刷（容器刚拿到尺寸、或激活态变了时用）；队列空时是空操作。 */
+  kick: () => void;
   /** 清空当前视口与回滚缓冲（只清显示，不杀进程）。 */
   clear: () => void;
   /** 滚动到底部（把视口拉回最新输出）。 */
@@ -183,7 +187,7 @@ function bindNativeScroll(host: HTMLElement, spacer: HTMLElement, term: Terminal
   let applying = false;
   let queued: RafHandle = 0;
 
-  const cellHeight = (): number => {
+  const measureCellHeight = (): number => {
     const rows = term.rows || 0;
     if (rows < 1) return 0;
     const screen = host.querySelector<HTMLElement>(".xterm-screen");
@@ -200,10 +204,17 @@ function bindNativeScroll(host: HTMLElement, spacer: HTMLElement, term: Terminal
     return height / rows;
   };
 
+  // cellHeight 的测量含 3 次 querySelector + clientHeight 强制布局读取；
+  // 结果只随 fit / resize / 渲染器变化，而那些时点都会经过 syncFromTerm（fit 后调用方必调 sync）。
+  // 因此测量只在 syncFromTerm 里做并刷新缓存，高频的原生 scroll 事件直接读缓存。
+  let cachedCell = 0;
+  const cellHeight = (): number => (cachedCell > 0 ? cachedCell : measureCellHeight());
+
   const syncFromTerm = (): void => {
     if (applying) return;
-    const cell = cellHeight();
+    const cell = measureCellHeight();
     if (cell <= 0) return;
+    cachedCell = cell;
     let maxLine;
     let viewportY;
     try {
@@ -293,6 +304,252 @@ function bindNativeScroll(host: HTMLElement, spacer: HTMLElement, term: Terminal
 }
 
 /**
+ * 一次 `term.write` 投喂的最大字符数（合帧切片上限）。
+ * @description xterm 的 WriteBuffer 在 `_pendingData > 5e7`（五千万字符）时直接 throw
+ *   `"write data discarded, use flow control to avoid losing data"`，且它每轮 `_innerWrite`
+ *   只解析 12ms 就把主线程交还出去。512 KiB 一片既能把一帧攒下的成百条 chunk 合成一次解析
+ *   （省掉逐条 write 的调度开销），又比抛错阈值低两个数量级：在途计数保证同一时刻最多一片
+ *   没解析完，于是 `_pendingData` 的上界就是这个常量本身，那条 throw 分支从结构上走不到。
+ */
+const WRITE_SLICE_CHARS = 512 * 1024;
+
+/** 在途 write 的解锁时限（毫秒）：回调因 xterm 内部异常不再触发时，队列不能永远堵死。 */
+const WRITE_INFLIGHT_TIMEOUT_MS = 2000;
+
+/** 连续写入失败达到该次数即放弃合帧，降级为逐块直写（成功一次后自动恢复合帧）。 */
+const WRITE_FAILURE_LIMIT = 3;
+
+/**
+ * 积压队列的字符上限：超过即丢弃最旧的头部块（保新弃旧）。
+ * @description 隐藏 / 未布局期间只攒不解析，若无上限，后台长跑进程会把整份日志积在
+ *   队列里（旧实现写进 xterm 受 scrollback 5000 行约束，内存有界）。8 MiB 约等于
+ *   scrollback 满载的数倍，正常冲刷路径（≤ 一片 512 KiB）永远不会触及。
+ */
+const WRITE_BACKLOG_LIMIT_CHARS = 8 * 1024 * 1024;
+
+/** createWritePump 的返回：输出队列的控制面。 */
+type WritePump = {
+  /** 入队一段输出（原样含 ANSI），同一帧内的多段合并成一次 write。 */
+  push: (text: string) => void;
+  /** 视图隐藏 / 显示：隐藏期只入队不解析，显示时一次性冲刷。 */
+  setHidden: (hidden: boolean) => void;
+  /** 再排一次冲刷（fit 后用：容器刚拿到尺寸、或窗口刚从收起转为可见）。 */
+  kick: () => void;
+  /** 丢弃尚未冲刷的积压（清空输出时连未渲染的旧内容一起清掉）。 */
+  drop: () => void;
+  /** 停止调度并清空队列。 */
+  dispose: () => void;
+};
+
+/**
+ * 建一个「合帧 + 背压 + 不许炸」的输出泵。
+ * 数据先进队列，一帧最多排一次 write；write 的回调作在途计数，上一片没解析完就下一帧再试；
+ * 队列超切片阈值只「延后渲染」——留队下一帧继续搬，绝不丢字；整条路径 try/catch。
+ * @param term 目标 xterm 实例
+ * @param host 终端宿主元素（用它判断容器是否真的有尺寸）
+ * @returns 队列控制面，见 WritePump
+ */
+function createWritePump(term: Terminal, host: HTMLElement): WritePump {
+  let queue: string[] = [];
+  let queuedChars = 0;
+  let inFlight = 0;
+  let inFlightAt = 0;
+  let failures = 0;
+  let scheduled: RafHandle = 0;
+  let hidden = false;
+  let direct = false;
+  let disposed = false;
+
+  // 容器量不出尺寸 = 宿主被收起了（display:none 的子树 clientWidth/Height 恒为 0）。
+  const laidOut = (): boolean => (host.clientWidth || 0) >= 2 && (host.clientHeight || 0) >= 2;
+
+  const cancelScheduled = (): void => {
+    if (!scheduled) return;
+    // as: rAF 缺失时句柄是 Timeout；那时 typeof cancelAnimationFrame 不是函数，整句短路，
+    //   Timeout 不会混进 cancelAnimationFrame。
+    if (typeof cancelAnimationFrame === "function") cancelAnimationFrame(scheduled as number);
+    else clearTimeout(scheduled as ReturnType<typeof setTimeout>);
+    scheduled = 0;
+  };
+
+  const schedule = (): void => {
+    if (scheduled || hidden || direct || disposed || !queue.length) return;
+    const raf =
+      typeof requestAnimationFrame === "function" ? requestAnimationFrame : (cb: FrameRequestCallback) => setTimeout(cb, 16);
+    scheduled = raf(() => {
+      scheduled = 0;
+      drain();
+    });
+  };
+
+  /** 从队列取出一片（≤ WRITE_SLICE_CHARS）；取不出一片也不清空队列。 */
+  const takeSlice = (): string => {
+    if (!queue.length) return "";
+    if (queuedChars <= WRITE_SLICE_CHARS) {
+      const text = queue.join("");
+      queue = [];
+      queuedChars = 0;
+      return text;
+    }
+    let taken = 0;
+    let index = 0;
+    while (index < queue.length && taken + queue[index].length <= WRITE_SLICE_CHARS) {
+      taken += queue[index].length;
+      index += 1;
+    }
+    if (index > 0) {
+      const text = queue.slice(0, index).join("");
+      queue.splice(0, index);
+      queuedChars -= text.length;
+      return text;
+    }
+    // 队首单块就超一片的上限（宿主一次灌入超长输出）：按字符切开，保证每帧都有进展。
+    const head = queue[0];
+    const text = head.slice(0, WRITE_SLICE_CHARS);
+    queue[0] = head.slice(WRITE_SLICE_CHARS);
+    queuedChars -= text.length;
+    return text;
+  };
+
+  /**
+   * 积压超限时丢弃最旧的头部块（保新弃旧，语义对齐 xterm scrollback 满载丢旧行）。
+   * @description 只在 push 入队后调用：冲刷路径一次至多取走一片，队列本身不会越限。
+   */
+  const trimBacklog = (): void => {
+    let overflow = queuedChars - WRITE_BACKLOG_LIMIT_CHARS;
+    while (overflow > 0 && queue.length) {
+      const head = queue[0];
+      if (head.length > overflow) {
+        queue[0] = head.slice(overflow);
+        queuedChars -= overflow;
+        overflow = 0;
+      } else {
+        overflow -= head.length;
+        queuedChars -= head.length;
+        queue.shift();
+      }
+    }
+  };
+
+  /** 直写一块：失败只丢这一块并继续写后面的，异常绝不逃逸回宿主的事件派发。 */
+  const writeDirect = (text: string): void => {
+    try {
+      term.write(text, () => {
+        if (!direct || disposed) return;
+        // 直写能成功说明 xterm 又吃得下：回到合帧路径，别让批处理永久退化。
+        direct = false;
+        failures = 0;
+        schedule();
+      });
+    } catch {
+      // 忽略：降级路径里也没有更低的写法可用
+    }
+  };
+
+  /** 把队列里的存量按上限切片逐块直写（进入降级模式、或降级模式下重新可见时用）。 */
+  const drainDirectly = (): void => {
+    direct = true;
+    cancelScheduled();
+    const backlog = queue;
+    queue = [];
+    queuedChars = 0;
+    for (const chunk of backlog) {
+      if (chunk.length <= WRITE_SLICE_CHARS) {
+        writeDirect(chunk);
+        continue;
+      }
+      for (let i = 0; i < chunk.length; i += WRITE_SLICE_CHARS) writeDirect(chunk.slice(i, i + WRITE_SLICE_CHARS));
+    }
+  };
+
+  function drain(): void {
+    if (disposed || hidden || direct) return;
+    // 容器量不出尺寸 = 宿主被收起了，解析了也看不见：只攒不解析。
+    // 冲刷的三个触发点都在别人手里——新输出入队（push）、视图转可见（setHidden）、
+    // 容器重新拿到尺寸（fit 里的 kick），不需要在这里自轮询。
+    if (!laidOut()) return;
+    const now = Date.now();
+    if (inFlight > 0) {
+      if (now - inFlightAt < WRITE_INFLIGHT_TIMEOUT_MS) {
+        schedule();
+        return;
+      }
+      // 回调超时没回（xterm 某些异常路径会吞掉回调）：强制解锁，宁可多喂一片也不能永远停住。
+      inFlight = 0;
+    }
+    const text = takeSlice();
+    if (!text) return;
+    let rejected: unknown = null;
+    let threw = false;
+    inFlight = 1;
+    inFlightAt = now;
+    try {
+      term.write(text, () => {
+        if (inFlight > 0) inFlight -= 1;
+        failures = 0;
+        schedule();
+      });
+    } catch (err) {
+      threw = true;
+      rejected = err;
+    }
+    if (!threw) return;
+    // write 抛错：这片没进 xterm，放回队首保住字节序，下一帧重试。
+    inFlight = 0;
+    queue.unshift(text);
+    queuedChars += text.length;
+    failures += 1;
+    if (failures < WRITE_FAILURE_LIMIT) {
+      schedule();
+      return;
+    }
+    console.warn("[FileExplorer] 终端输出合帧写入连续失败，降级为逐块直写", rejected);
+    drainDirectly();
+  }
+
+  return {
+    push(text: string): void {
+      if (!text || disposed) return;
+      if (direct && !hidden) {
+        writeDirect(text);
+        return;
+      }
+      queue.push(text);
+      queuedChars += text.length;
+      // 隐藏 / 未布局期间只攒不解析：积压超上限时丢最旧头部，内存有界（见 WRITE_BACKLOG_LIMIT_CHARS）。
+      trimBacklog();
+      schedule();
+    },
+    setHidden(next: boolean): void {
+      if (hidden === next) return;
+      hidden = next;
+      if (hidden) {
+        cancelScheduled();
+        return;
+      }
+      if (direct) drainDirectly();
+      else schedule();
+    },
+    kick(): void {
+      schedule();
+    },
+    drop(): void {
+      queue = [];
+      queuedChars = 0;
+      inFlight = 0;
+      cancelScheduled();
+    },
+    dispose(): void {
+      disposed = true;
+      cancelScheduled();
+      queue = [];
+      queuedChars = 0;
+      inFlight = 0;
+    },
+  };
+}
+
+/**
  * 创建 xterm 终端视图。
  * @param host 终端挂载宿主元素（必须有尺寸）
  * @param [options] 交互回调集合，逐项含义见 XtermViewOptions
@@ -331,8 +588,13 @@ export function createXtermView(host: HTMLElement, options: XtermViewOptions = {
     try {
       const addon = new WebglAddon();
       addon.onContextLoss(() => {
+        // addon 内部已经给过 3s 的 contextrestored 窗口才走到这里，再建一个新上下文等于
+        // 把显存重新分配一遍、然后大概率再丢一次：置 webglFailed 让 attachWebgl 永久早退。
+        webglFailed = true;
         if (webgl === addon) webgl = null;
         try {
+          // dispose 会触发 addon 自己注册的还原回调：_renderService.setRenderer(_createRenderer())，
+          // 即换回默认 DOM 渲染器，所以此后 DOM 路径照常出画面。
           addon.dispose();
         } catch {
           // 上下文已经丢了
@@ -345,6 +607,10 @@ export function createXtermView(host: HTMLElement, options: XtermViewOptions = {
       console.warn("[FileExplorer] 终端 WebGL 不可用，改用 DOM 渲染", err);
     }
   };
+
+  // 输出泵：宿主 PTY 的回调是「来一条写一条」，直接灌给 xterm 会在高频输出下逐条解析、
+  // 且 xterm 内部积压超限就 throw。所有输出先入队，按帧合并后再投喂。
+  const pump = createWritePump(term, host);
 
   // 先铺原生滚动层，xterm 画在粘性视口里，滚动条留给浏览器。
   const scrollPort = mountNativeScrollPort(host);
@@ -397,7 +663,7 @@ export function createXtermView(host: HTMLElement, options: XtermViewOptions = {
 
   return {
     write(data: string): void {
-      term.write(String(data == null ? "" : data));
+      pump.push(String(data == null ? "" : data));
     },
     fit() {
       try {
@@ -407,6 +673,8 @@ export function createXtermView(host: HTMLElement, options: XtermViewOptions = {
       }
       attachWebgl();
       nativeScroll.sync();
+      // fit 是「容器刚拿到尺寸 / 窗口刚展开」的唯一可靠信号：把收起期间攒下的输出冲出去。
+      pump.kick();
     },
     focus() {
       try {
@@ -415,8 +683,17 @@ export function createXtermView(host: HTMLElement, options: XtermViewOptions = {
         // 忽略：元素未挂载
       }
     },
+    // 隐藏 tab 不再解析输出（后台跑的大构建日志是最白花 CPU 的一档），重新可见时一次性冲刷。
+    setHidden(hidden: boolean) {
+      pump.setHidden(hidden);
+    },
+    kick() {
+      pump.kick();
+    },
     // 清空当前视口与回滚缓冲（运行窗口工具栏 🗑：清的是显示，不杀进程）。
     clear() {
+      // 连尚未冲刷的积压一起丢，否则清空后旧输出会立刻涌回来。
+      pump.drop();
       try {
         term.clear();
       } catch {
@@ -471,6 +748,7 @@ export function createXtermView(host: HTMLElement, options: XtermViewOptions = {
     },
     dispose() {
       try {
+        pump.dispose();
         nativeScroll.dispose();
         if (typeof host.removeEventListener === "function") host.removeEventListener("contextmenu", handleContextMenu);
         dataSub.dispose();

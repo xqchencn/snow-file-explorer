@@ -831,3 +831,146 @@ test("工具窗口: 右键菜单靠近视口右下边缘时被 clamp（向左/�
     proto.getBoundingClientRect = orig;
   }
 });
+
+// ───────────────────────── tab 栏差异更新 / fit 尺寸门槛 / 隐藏视图暂缓输出 ─────────────────────────
+
+/** 探针工厂的观察记录：宿主元素（供伪造尺寸）、setHidden 调用序列、fit / kick 次数。 */
+type ViewProbe = { host: HTMLElement; hidden: boolean[]; fits: number; kicks: number };
+
+/**
+ * 造一个能观察 setHidden / fit / kick 次数的假终端工厂。
+ * @returns 工厂（喂给 makeOpts）与探针列表（顺序即 getTerminals() 顺序）
+ */
+function makeProbeFactory(): { factory: FakeTerminalFactory; probes: ViewProbe[] } {
+  const probes: ViewProbe[] = [];
+  const created: FakeTerminalRecord[] = [];
+  const createTerminal: FakeTerminalFactory["createTerminal"] = (host, opts) => {
+    const probe: ViewProbe = { host, hidden: [], fits: 0, kicks: 0 };
+    probes.push(probe);
+    const record: FakeTerminalRecord = fakeRecordBase(host, opts);
+    created.push(record);
+    const view: ToolTerminalView = {
+      ...fakeView(record),
+      fit: () => {
+        probe.fits += 1;
+        record.fit += 1;
+      },
+      setHidden: (hidden: boolean) => {
+        probe.hidden.push(hidden);
+      },
+      kick: () => {
+        probe.kicks += 1;
+      },
+    };
+    record.view = view;
+    return view;
+  };
+  return { factory: { createTerminal, created }, probes };
+}
+
+/** jsdom 没有布局：把组件真正读取的两个尺寸伪造出来。 */
+function setHostSize(host: HTMLElement, width: number, height: number): void {
+  Object.defineProperty(host, "clientWidth", { configurable: true, value: width });
+  Object.defineProperty(host, "clientHeight", { configurable: true, value: height });
+}
+
+/** 取 tab 列表里的标签文本序列（不含「＋新建」按钮）。 */
+function tabLabels(list: HTMLElement): string[] {
+  return [...list.querySelectorAll<HTMLElement>(".sfe-run-tab-label")].map((node) => node.textContent || "");
+}
+
+test("工具窗口: rebuild 差异更新 tab 栏——同 id 复用节点，只改变化项，激活态与新建按钮位置不丢", () => {
+  let terms = [term("t1", "终端 1"), term("t2", "终端 2")];
+  const { pane, controller } = mount(makeOpts({ getTerminals: () => terms, getActiveId: () => "t1" }));
+  const list = q<HTMLElement>(pane, ".sfe-run-tab-list");
+  const tab1 = q<HTMLButtonElement>(list, ".sfe-run-tab");
+  const tab2 = list.querySelectorAll<HTMLButtonElement>(".sfe-run-tab")[1];
+  // !: 两个 tab 都必须存在（缺失时原写法同样抛 TypeError），复用断言正是本用例的验证点。
+  assert.ok(tab2);
+
+  controller.rebuild();
+  assert.equal(list.querySelector(".sfe-run-tab"), tab1, "集合未变时 tab 节点必须原样复用，不整条重画");
+  assert.equal(tab1.className, "sfe-run-tab active", "重复 rebuild 不得累积或丢失类名");
+
+  terms = [term("t1", "终端 1"), term("t2", "改名后的 2")];
+  controller.rebuild();
+  assert.equal(list.querySelectorAll(".sfe-run-tab")[1], tab2, "标题变化也不重建节点");
+  assert.match(tabLabels(list)[1] || "", /改名后的 2/, "标题变化要落到 label 文本上");
+  assert.ok(tab1.classList.contains("active"), "差异更新不得弄丢激活态");
+  assert.ok(list.children[list.children.length - 1].classList.contains("new"), "新建按钮仍排在末位");
+});
+
+test("工具窗口: tab 增删后 DOM 顺序始终跟随终端集合", () => {
+  let terms = [term("t1"), term("t2"), term("t3")];
+  const { pane, controller } = mount(makeOpts({ getTerminals: () => terms, getActiveId: () => "t1" }));
+  const list = q<HTMLElement>(pane, ".sfe-run-tab-list");
+  const tab1 = q<HTMLButtonElement>(list, ".sfe-run-tab");
+  assert.deepEqual(tabLabels(list), ["t1", "t2", "t3"]);
+
+  terms = [term("t1"), term("t3")];
+  controller.rebuild();
+  assert.deepEqual(tabLabels(list), ["t1", "t3"], "删掉中间 tab 后顺序仍与集合一致");
+  assert.equal(list.querySelector(".sfe-run-tab"), tab1, "保留的 tab 节点不被重建");
+
+  terms = [term("t2"), term("t1"), term("t3")];
+  controller.rebuild();
+  assert.deepEqual(tabLabels(list), ["t2", "t1", "t3"], "重新插入 + 换序后 DOM 顺序跟随集合");
+  assert.equal(list.children[list.children.length - 1], q<HTMLButtonElement>(pane, ".sfe-run-collapse.new"));
+});
+
+test("工具窗口: 切 tab 时隐藏视图收到 setHidden(true)，激活视图收到 setHidden(false)", () => {
+  let activeId = "t1";
+  const terms = [term("t1"), term("t2")];
+  const { factory, probes } = makeProbeFactory();
+  const { pane, controller } = mount(makeOpts({ getTerminals: () => terms, getActiveId: () => activeId, factory }));
+  const [p1, p2] = probes;
+
+  assert.equal(p1.host.hidden, false);
+  assert.equal(p2.host.hidden, true);
+  assert.equal(p1.hidden.at(-1), false, "激活视图保持可见");
+  assert.equal(p2.hidden.at(-1), true, "非激活视图暂缓输出解析");
+
+  activeId = "t2";
+  controller.syncActive();
+  assert.equal(p1.hidden.at(-1), true, "被切走的视图转为暂缓解析");
+  assert.equal(p2.hidden.at(-1), false, "新激活视图恢复解析");
+
+  // 重复同步只重申状态（输出泵内部忽略未变化的下发），结果必须保持一致。
+  controller.syncActive();
+  controller.rebuild();
+  assert.equal(p1.hidden.at(-1), true, "重复同步后隐藏态不变");
+  assert.equal(p2.hidden.at(-1), false, "重复同步后可见态不变");
+  assert.equal(pane.querySelectorAll(".sfe-run-terminal-host").length, 2);
+});
+
+test("工具窗口: fit 只在尺寸真的变化时调用；容器被收起时不 fit", () => {
+  const terms = [term("t1"), term("t2")];
+  const { factory, probes } = makeProbeFactory();
+  const { controller } = mount(makeOpts({ getTerminals: () => terms, getActiveId: () => "t1", factory }));
+  const [p1, p2] = probes;
+  const fittedFromMount = p1.fits;
+
+  setHostSize(p1.host, 800, 300);
+  setHostSize(p2.host, 800, 300);
+  controller.syncActive();
+  assert.equal(p1.fits, fittedFromMount + 1, "首次测到容器尺寸要 fit");
+
+  controller.syncActive();
+  controller.syncActive();
+  assert.equal(p1.fits, fittedFromMount + 1, "尺寸未变不重复 fit");
+  assert.ok(p1.kicks > 0, "跳过 fit 时仍给暂缓中的输出排一次冲刷");
+
+  controller.fit();
+  assert.equal(p1.fits, fittedFromMount + 2, "调用方明示的 handle.fit() 强制重算一次");
+
+  setHostSize(p1.host, 900, 300);
+  controller.syncActive();
+  assert.equal(p1.fits, fittedFromMount + 3, "容器尺寸变了要重新 fit");
+
+  setHostSize(p1.host, 0, 0);
+  controller.syncActive();
+  assert.equal(p1.fits, fittedFromMount + 3, "容器被收起（测不到尺寸）时不 fit，避免向 PTY 报 1x1");
+
+  controller.syncActive();
+  assert.equal(p2.fits, 0, "非激活视图不参与 fit");
+});

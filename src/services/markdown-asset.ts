@@ -110,18 +110,26 @@ export function resolveProxiedImageSrc(ref: string | null): string | null {
   return "img-proxy://localhost/" + encodeURIComponent(value);
 }
 
-// 图片读取结果缓存：render 会整体重建 DOM，缓存避免同一张图被反复走宿主 IPC
+// 图片读取结果缓存：render 会整体重建 DOM，缓存避免同一张图被反复走宿主 IPC。
+// 缓存值是完整 base64 data URL（约为原图字节 1.33 倍），必须限长：按插入序 LRU 淘汰，
+// 长会话浏览多图文档时内存不再无界增长（被淘汰的图重新访问时再走一次 IPC）。
+const IMAGE_CACHE_LIMIT = 40;
 const imageCache: Map<string, Promise<string | null>> = new Map();
 
 /**
- * 读取本地图片文件为 data URL（带进程内缓存）
+ * 读取本地图片文件为 data URL（带进程内 LRU 缓存）
  * @param absPath 图片绝对路径
  * @returns data URL；不可用或失败时返回 null
  */
 export function readImageAsDataUrl(absPath: string): Promise<string | null> {
   if (!absPath) return Promise.resolve(null);
   const cached = imageCache.get(absPath);
-  if (cached) return cached;
+  if (cached) {
+    // 刷新访问序（LRU）。
+    imageCache.delete(absPath);
+    imageCache.set(absPath, cached);
+    return cached;
+  }
 
   const task = (async () => {
     const snow = window.snow;
@@ -136,5 +144,9 @@ export function readImageAsDataUrl(absPath: string): Promise<string | null> {
   })();
 
   imageCache.set(absPath, task);
+  if (imageCache.size > IMAGE_CACHE_LIMIT) {
+    const oldest = imageCache.keys().next().value;
+    if (oldest !== undefined) imageCache.delete(oldest);
+  }
   return task;
 }

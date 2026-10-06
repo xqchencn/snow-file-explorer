@@ -128,6 +128,13 @@ export function extname(fileNameOrPath: string): string {
 }
 
 /**
+ * 目录条目的「文件夹在前、名称升序」比较器
+ * @description 预构建 Intl.Collator：带 options 的 localeCompare 每次比较都走 Intl 解析路径，
+ *   比复用 Collator 实例慢一个数量级；sortEntries 位于目录展开 / 过滤的热路径上。
+ */
+const ENTRY_COLLATOR = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+
+/**
  * 规范化目录条目列表并按“文件夹在前、名称升序”规则排序
  * @param entries 待排序的条目（宿主目录条目或树上的任意派生节点）
  * @returns 排序后的条目列表，元素类型与入参一致
@@ -138,10 +145,7 @@ export function sortEntries<T extends FileTreeEntryBase>(entries: readonly T[]):
     const aDir = !!a.isDirectory;
     const bDir = !!b.isDirectory;
     if (aDir !== bDir) return aDir ? -1 : 1;
-    return String(a.name || "").localeCompare(String(b.name || ""), undefined, {
-      numeric: true,
-      sensitivity: "base",
-    });
+    return ENTRY_COLLATOR.compare(String(a.name || ""), String(b.name || ""));
   });
 }
 
@@ -482,36 +486,45 @@ export async function detectJvmProject(
   const roots: string[] = [];
   const seenPaths: Set<string> = new Set();
 
-  async function addSourceRoot(
-    basePath: string,
-    baseEntries: FileTreeEntry[],
-    segments: string[]
-  ): Promise<void> {
-    const sourcePath = await findDirectoryFromEntries(basePath, baseEntries, segments);
-    if (sourcePath && !seenPaths.has(sourcePath)) {
-      seenPaths.add(sourcePath);
-      roots.push(sourcePath);
+  // 解析单个模块的四个标准源码根（src 下 main/test 两层，各含 java/kotlin 两种语言）。
+  // 逐层共享中间目录的读取结果：src 读一次，main/test 与 java/kotlin 层内并行，
+  // 每模块 IPC 从原 4 链 × 3 次串行（≈12 次）降到 3 次（1 串行 + 两层并行）。
+  async function resolveSourceRoots(baseEntries: FileTreeEntry[]): Promise<string[]> {
+    const srcEntry = baseEntries.find((entry) => entry.isDirectory && entry.name === "src");
+    if (!srcEntry || !srcEntry.path) return [];
+    let srcEntries: FileTreeEntry[];
+    try {
+      srcEntries = normalizeProjectEntries(await readDirectoryEntries(srcEntry.path));
+    } catch {
+      return [];
     }
-  }
-
-  async function findDirectoryFromEntries(
-    basePath: string,
-    baseEntries: FileTreeEntry[],
-    segments: string[]
-  ): Promise<string | null> {
-    let currentPath = basePath;
-    let entries = baseEntries;
-    for (const segment of segments) {
-      const match = entries.find((entry) => entry.isDirectory && entry.name === segment);
-      if (!match || !match.path) return null;
-      currentPath = match.path;
-      try {
-        entries = normalizeProjectEntries(await readDirectoryEntries(currentPath));
-      } catch {
-        return null;
+    const groups = await Promise.all(
+      (["main", "test"] as const).map(async (group) => {
+        const groupEntry = srcEntries.find((entry) => entry.isDirectory && entry.name === group);
+        if (!groupEntry || !groupEntry.path) return null;
+        let groupEntries: FileTreeEntry[];
+        try {
+          groupEntries = normalizeProjectEntries(await readDirectoryEntries(groupEntry.path));
+        } catch {
+          return null;
+        }
+        const langs = await Promise.all(
+          (["java", "kotlin"] as const).map(async (lang) => {
+            const langEntry = groupEntries.find((entry) => entry.isDirectory && entry.name === lang);
+            return langEntry && langEntry.path ? langEntry.path : null;
+          })
+        );
+        return langs;
+      })
+    );
+    const found: string[] = [];
+    for (const group of groups) {
+      if (!group) continue;
+      for (const path of group) {
+        if (path) found.push(path);
       }
     }
-    return currentPath;
+    return found;
   }
 
   // 根模块与一级子模块均检查标准源码根目录，不递归探测任意深度目录。
@@ -532,11 +545,15 @@ export async function detectJvmProject(
   for (const module of nestedModules) {
     if (module) moduleBases.push(module);
   }
-  for (const module of moduleBases) {
-    await addSourceRoot(module.path, module.entries, ["src", "main", "java"]);
-    await addSourceRoot(module.path, module.entries, ["src", "main", "kotlin"]);
-    await addSourceRoot(module.path, module.entries, ["src", "test", "java"]);
-    await addSourceRoot(module.path, module.entries, ["src", "test", "kotlin"]);
+  // 模块之间相互独立：并行解析（模块内已逐层并行），结果按模块序回填保持与原实现一致的 roots 顺序。
+  const perModuleRoots = await mapPool(moduleBases, 8, (module) => resolveSourceRoots(module.entries));
+  for (const list of perModuleRoots) {
+    for (const sourcePath of list) {
+      if (!seenPaths.has(sourcePath)) {
+        seenPaths.add(sourcePath);
+        roots.push(sourcePath);
+      }
+    }
   }
 
   return detectJvmProjectFromEntries(rootItems, roots);

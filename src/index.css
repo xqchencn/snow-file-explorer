@@ -4,7 +4,6 @@
  * 由构建脚本打包并压缩内联为根目录 index.css
  */
 
-@import "@xterm/xterm/css/xterm.css";
 @import "./styles/base.css";
 @import "./styles/tree.css";
 @import "./styles/viewer.css";
@@ -13,4 +12,5 @@
 @import "./styles/git-view.css";
 @import "./styles/diff.css";
 @import "./styles/run.css";
-@import "./styles/syntax.css";
+/* xterm.css / syntax.css 不在这里：它们的 DOM 只可能在对应懒块到达后才存在，
+   改为随块注入（build.js + lazy-chunk.ts），首屏少背约 23KB 阻塞样式。 */

@@ -41,16 +41,22 @@ export function humanSize(bytes: number | null | undefined): string {
 
 /**
  * 转义字符串中的 HTML 特殊字符，防止 XSS 并保持原样渲染
+ * @description 单趟替换：& 必须最先被转义为 &amp; 的形式，其余实体都含 & 字符，
+ *   故用回调按字符映射，一次遍历完成，避免多趟 replace 产生多份中间字符串。
  * @param str 原生文本
  * @returns 转义后的 HTML 字符串
  */
+const ESCAPE_MAP: Record<string, string> = {
+  "&": "&amp;",
+  "<": "&lt;",
+  ">": "&gt;",
+  '"': "&quot;",
+  "'": "&#39;",
+};
+
 export function escapeHtml(str: unknown): string {
-  return String(str || "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
+  const raw = String(str || "");
+  return raw.replace(/[&<>"']/g, (ch) => ESCAPE_MAP[ch]);
 }
 
 /**

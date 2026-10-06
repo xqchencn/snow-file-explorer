@@ -16,6 +16,8 @@ import {
 import type { GitStatusMap } from "../services/git-service.ts";
 import type { FileTreeEntry } from "../services/file-service.ts";
 import type { TranslateFn } from "../types/panel-state.ts";
+import { createVirtualList } from "./virtual-list.ts";
+import type { VirtualListHandle } from "./virtual-list.ts";
 
 /**
  * 文件树条目：就是 services/file-service.ts 的 FileTreeEntry（单一真源）。
@@ -56,10 +58,16 @@ export type TreeViewOptions = {
   rootNodes: TreeEntry[] | null;
   /** 展开状态字典，键为绝对路径。 */
   expanded?: TreeExpandedMap;
-  /** 当前选中的路径集合（Set），未选中时为空集合或 null。 */
-  selected?: Set<string> | null;
-  /** Git 状态映射表，键为仓库相对路径（正斜杠）。 */
-  gitStatusMap?: GitStatusMap;
+  /**
+   * 取当前选中的路径集合。必须是取值函数而不是集合本身：行节点在滚动时才创建，
+   * 快照会在「选中态就地 patch（不重建树）」之后过期，滚回来的行就会显示旧选择。
+   */
+  getSelected?: () => Set<string> | null | undefined;
+  /**
+   * 取 Git 状态映射表（键为仓库相对路径，正斜杠）。同样必须是取值函数：
+   * 状态表整体替换后只做就地 patch，快照会让滚进来的行显示变更前的徽标。
+   */
+  getGitStatusMap?: () => GitStatusMap;
   /** 是否拥有目录枚举权限。 */
   canList?: boolean;
   /** 是否拥有文件读取权限。 */
@@ -113,23 +121,48 @@ export function flattenTree(
   }
 }
 
+/** 树虚拟列表的行高估算值（.sfe-file-item：4px 上下 padding + 16px 图标内容）。 */
+const TREE_ROW_ESTIMATED_HEIGHT = 24;
+
+/** 按滚动容器缓存当前树虚拟列表：renderTreeView 重复进入时先销毁旧的，避免监听器与节点残留。 */
+const treeViewLists = new WeakMap<HTMLElement, VirtualListHandle<TreeRow>>();
+
+/**
+ * 销毁挂在 parentEl 上的树虚拟列表。
+ * @description 供不经过 renderTreeView 的替换路径使用（如搜索结果接管树容器）：
+ *   虚拟列表的 scroll 监听挂在滚动容器上，仅 replaceChildren 清不掉它。
+ * @param parentEl 树滚动容器
+ */
+export function destroyTreeView(parentEl: HTMLElement | null | undefined): void {
+  if (!parentEl) return;
+  const previous = treeViewLists.get(parentEl);
+  if (previous) {
+    previous.destroy();
+    treeViewLists.delete(parentEl);
+  }
+}
+
 /**
  * 渲染文件树 DOM 节点
- * @param parentEl 承载文件树列表的父容器
+ * @param parentEl 承载文件树列表的滚动容器
  * @param options 渲染与交互配置，字段说明见 TreeViewOptions：
- *   rootPath 工作区根目录路径、rootNodes 顶层条目列表、expanded 展开字典、
- *   selected 当前选中的路径集合、gitStatusMap Git 状态映射表、canList 是否拥有目录枚举权限、
+ *   rootPath 工作区根目录路径、rootNodes 根节点列表、expanded 展开字典、
+ *   getSelected / getGitStatusMap 取当前选中集合与 Git 状态表（取值函数，因行在滚动时才创建）、
+ *   canList 是否拥有目录枚举权限、
  *   canRead 是否拥有文件读取权限、onToggleDir 切换目录展开/折叠回调、onSelectFile 选中文件回调、
- *   onContextMenu 文件/目录右键回调、onOpenFileEdit 双击进入快速编辑回调、
+ *   onContextMenu 文件/目录右键回调（clientX/clientY 为视口坐标）、onOpenFileEdit 双击进入快速编辑回调、
  *   onSelectionChange 选中态变化回调、onTreeKeyDown 树容器键盘回调、t 国际化翻译函数
+ * @description 大仓库性能关键路径：树以「展平行 + 固定行高」走窗口化虚拟列表，
+ *   DOM 数量只与可视区相关，与树的总条目数解耦；行节点不绑事件，
+ *   click / contextmenu / dblclick / keydown 统一在内容层按 dataset.path 委托分发。
  */
 export function renderTreeView(parentEl: HTMLElement, options: TreeViewOptions): void {
   const {
     rootPath,
     rootNodes,
     expanded = {},
-    selected = null,
-    gitStatusMap = {},
+    getSelected = () => null,
+    getGitStatusMap = () => ({}) as GitStatusMap,
     canList = true,
     canRead = true,
     onToggleDir,
@@ -141,6 +174,8 @@ export function renderTreeView(parentEl: HTMLElement, options: TreeViewOptions):
     t,
   } = options;
 
+  // 旧虚拟列表先销毁（移除 scroll 监听与 spacer/content 节点），再清空容器。
+  destroyTreeView(parentEl);
   parentEl.replaceChildren();
 
   if (!canList || !canRead) {
@@ -167,18 +202,19 @@ export function renderTreeView(parentEl: HTMLElement, options: TreeViewOptions):
   flattenTree(rootNodes, 0, expanded, rows);
   // 当前可见行路径（顺序即视觉顺序）：shift 范围选择与 Ctrl+A 全选据此计算。
   const visiblePaths = rows.map((row) => row.entry.path);
+  // 事件委托的行 → 条目查找表：行节点重建不换数据，路径即稳定键。
+  const entryByPath = new Map<string, TreeEntry>();
+  for (const row of rows) entryByPath.set(row.entry.path, row.entry);
 
-  const list = el("div", "sfe-list");
-  list.tabIndex = -1;
-  // 键盘：Ctrl/Cmd+A 全选可见行、Escape 清空选择（由 index.js 处理，传入可见路径）。
-  list.addEventListener("keydown", (e) => {
-    if (typeof onTreeKeyDown === "function") onTreeKeyDown(e, visiblePaths);
-  });
-  for (const row of rows) {
+  /** 构建单行节点（纯渲染产物，不含事件监听）。 */
+  const buildRowElement = (row: TreeRow): HTMLElement => {
     const entry = row.entry;
     const isDir = !!entry.isDirectory;
     const displayName = entry.displayName || entry.name;
     const isExpanded = expanded[entry.path] === true;
+    // 行节点在滚动时才创建，选中集合与状态表都必须建行时现取，快照会在就地 patch 之后过期。
+    const selected = getSelected();
+    const gitStatusMap = getGitStatusMap();
     const isSelected = selected && typeof selected.has === "function" ? selected.has(entry.path) : false;
 
     // 解析当前项的 Git 状态：文件取自身状态；文件夹取子孙聚合状态（对齐 VS Code）
@@ -196,7 +232,7 @@ export function renderTreeView(parentEl: HTMLElement, options: TreeViewOptions):
         (isSelected ? " selected" : "")
     );
     item.style.paddingLeft = 12 + row.depth * 14 + "px";
-    // 记录条目路径：选中态变化时据此就地定位行，避免整棵树重建（大目录卡顿根因）
+    // 记录条目路径：委托分发与选中态就地 patch 都据此定位行。
     item.dataset.path = entry.path;
     if (entry.packageName) item.title = entry.packageName;
 
@@ -243,54 +279,95 @@ export function renderTreeView(parentEl: HTMLElement, options: TreeViewOptions):
         if (badge) item.appendChild(badge);
       }
     }
+    return item;
+  };
 
-    // 6. 点击事件绑定
-    item.addEventListener("click", (e) => {
-      e.stopPropagation();
-      // 让树容器获得焦点，保证 Ctrl+A / Escape 键盘操作可用。
-      try {
-        list.focus({ preventScroll: true });
-      } catch {
-        list.focus();
-      }
-      const additive = e.ctrlKey || e.metaKey;
-      const range = e.shiftKey;
-      // ctrl/cmd（切换）与 shift（范围）只改选中，不打开文件、不展开目录。
-      if (additive || range) {
-        if (typeof onSelectionChange === "function") {
-          onSelectionChange({ path: entry.path, additive, range, visiblePaths });
-        }
-        return;
-      }
-      // 普通点击：先单选（就地高亮），再展开目录或打开文件。
+  const list = createVirtualList<TreeRow>({
+    viewport: parentEl,
+    // 首帧按估算行高渲染；挂载后按首个行节点实测校准（缩放 / 系统字体差异）。
+    rowHeight: TREE_ROW_ESTIMATED_HEIGHT,
+    contentClassName: "sfe-list",
+    renderRow: buildRowElement,
+  });
+  treeViewLists.set(parentEl, list);
+
+  const listEl = list.contentEl;
+  // 与原实现一致：列表可编程聚焦接收 Ctrl+A / Escape，焦点样式由 .sfe-list:focus 抑制。
+  listEl.tabIndex = -1;
+
+  // 键盘：Ctrl/Cmd+A 全选可见行、Escape 清空选择（由 index 处理，传入可见路径）。
+  listEl.addEventListener("keydown", (e) => {
+    if (typeof onTreeKeyDown === "function") onTreeKeyDown(e, visiblePaths);
+  });
+
+  /** 从事件目标反查所在行对应的条目；不在行上时为 null（如空白区，交回容器层处理）。 */
+  const entryFromEvent = (e: Event): TreeEntry | null => {
+    const target = e.target as Element | null;
+    const item = target && typeof target.closest === "function" ? target.closest<HTMLElement>(".sfe-file-item") : null;
+    if (!item) return null;
+    return entryByPath.get(item.dataset.path || "") || null;
+  };
+
+  listEl.addEventListener("click", (e: MouseEvent) => {
+    const entry = entryFromEvent(e);
+    if (!entry) return;
+    e.stopPropagation();
+    // 让树容器获得焦点，保证 Ctrl+A / Escape 键盘操作可用。
+    try {
+      listEl.focus({ preventScroll: true });
+    } catch {
+      listEl.focus();
+    }
+    const additive = e.ctrlKey || e.metaKey;
+    const range = e.shiftKey;
+    // ctrl/cmd（切换）与 shift（范围）只改选中，不打开文件、不展开目录。
+    if (additive || range) {
       if (typeof onSelectionChange === "function") {
-        onSelectionChange({ path: entry.path, additive: false, range: false, visiblePaths });
+        onSelectionChange({ path: entry.path, additive, range, visiblePaths });
       }
-      if (isDir) {
-        if (typeof onToggleDir === "function") onToggleDir(entry);
-      } else if (typeof onSelectFile === "function") {
-        onSelectFile(entry);
-      }
-    });
+      return;
+    }
+    // 普通点击：先单选（就地高亮），再展开目录或打开文件。
+    if (typeof onSelectionChange === "function") {
+      onSelectionChange({ path: entry.path, additive: false, range: false, visiblePaths });
+    }
+    if (entry.isDirectory) {
+      if (typeof onToggleDir === "function") onToggleDir(entry);
+    } else if (typeof onSelectFile === "function") {
+      onSelectFile(entry);
+    }
+  });
 
-    item.addEventListener("contextmenu", (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      if (typeof onContextMenu === "function") {
-        onContextMenu(entry, e.clientX, e.clientY);
-      }
-    });
+  listEl.addEventListener("contextmenu", (e: MouseEvent) => {
+    const entry = entryFromEvent(e);
+    if (!entry) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (typeof onContextMenu === "function") {
+      onContextMenu(entry, e.clientX, e.clientY);
+    }
+  });
 
-    // 双击文件：进入快速编辑（目录双击仍走单击的展开/折叠，不额外处理）。
-    item.addEventListener("dblclick", (e) => {
-      e.stopPropagation();
-      if (!isDir && typeof onOpenFileEdit === "function") onOpenFileEdit(entry);
-    });
+  // 双击文件：进入快速编辑（目录双击仍走单击的展开/折叠，不额外处理）。
+  listEl.addEventListener("dblclick", (e: MouseEvent) => {
+    const entry = entryFromEvent(e);
+    if (!entry) return;
+    e.stopPropagation();
+    if (entry.isDirectory) return;
+    if (typeof onOpenFileEdit === "function") onOpenFileEdit(entry);
+  });
 
-    list.appendChild(item);
+  list.setItems(rows);
+
+  // 行高校准：估算行高与真实渲染高度有偏差时（缩放 / 系统字体差异），按首个行节点实测校准。
+  // 无布局环境（jsdom 等）测得 0，跳过；下一帧校准不影响首帧已渲染的可视行。
+  if (typeof requestAnimationFrame === "function") {
+    requestAnimationFrame(() => {
+      const first = listEl.firstElementChild as HTMLElement | null;
+      const measured = first ? first.getBoundingClientRect().height : 0;
+      if (measured > 0) list.setRowHeight(measured);
+    });
   }
-
-  parentEl.appendChild(list);
 }
 
 const GIT_NAME_CLASSES = ["sfe-git-modify", "sfe-git-untracked", "sfe-git-add", "sfe-git-delete", "sfe-git-rename"];

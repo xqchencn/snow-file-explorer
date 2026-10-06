@@ -42,6 +42,8 @@ export function installFileIcons(mod: FileIconModule | null | undefined): void {
   FILE = mod.FILE || FILE;
   FOLDER = mod.FOLDER || FOLDER;
   FOLDER_OPEN = mod.FOLDER_OPEN || FOLDER_OPEN;
+  // 数据源整体替换：已解析的 template 缓存随旧数据失效，必须清空重建。
+  iconTemplateCache.clear();
 }
 
 /**
@@ -70,6 +72,33 @@ function resolveIconId(fileName: string, isDir: boolean, isExpanded: boolean): s
 }
 
 /**
+ * 已解析图标的缓存：图标 id → 承载该 SVG 的 template 元素。
+ * @description 同一图标的 SVG 文本内容固定；逐行 innerHTML 会每次重新走 HTML 解析，
+ *   大目录首次渲染数千行时成为显著开销。预解析一次后按 id cloneNode 复用。
+ */
+const iconTemplateCache = new Map<string, HTMLTemplateElement | null>();
+
+/**
+ * 取图标 id 对应的可克隆内容片段（首次访问时解析 SVG 文本）
+ * @param id 图标 id
+ * @returns 含 SVG 子节点的克隆片段；图标不存在或解析为空时为 null
+ */
+function cloneIconContent(id: string): DocumentFragment | null {
+  let tpl = iconTemplateCache.get(id);
+  if (tpl === undefined) {
+    const svg = ICON_SVGS[id];
+    if (svg) {
+      tpl = document.createElement("template");
+      tpl.innerHTML = svg;
+    } else {
+      tpl = null;
+    }
+    iconTemplateCache.set(id, tpl);
+  }
+  return tpl ? tpl.content.cloneNode(true) as DocumentFragment : null;
+}
+
+/**
  * 获取专有文件/文件夹图标 DOM 节点
  * @param fileName 文件名
  * @param isDir 是否是目录
@@ -82,9 +111,9 @@ export function createFileIconNode(fileName: string, isDir: boolean, isExpanded:
   span.dataset.iconDir = isDir ? "1" : "0";
   span.dataset.iconOpen = isExpanded ? "1" : "0";
   const id = resolveIconId(fileName, isDir, isExpanded);
-  const svg = ICON_SVGS[id] || ICON_SVGS[FILE];
-  if (svg) {
-    span.innerHTML = svg;
+  const frag = cloneIconContent(id) || cloneIconContent(FILE);
+  if (frag) {
+    span.appendChild(frag);
   }
   return span;
 }
@@ -100,8 +129,8 @@ export function refreshInstalledIcons(root: ParentNode | null | undefined): void
   for (const span of root.querySelectorAll<HTMLSpanElement>(".sfe-type-icon")) {
     if (span.childElementCount) continue;
     const id = resolveIconId(span.dataset.iconName || "", span.dataset.iconDir === "1", span.dataset.iconOpen === "1");
-    const svg = ICON_SVGS[id] || ICON_SVGS[FILE];
-    if (svg) span.innerHTML = svg;
+    const frag = cloneIconContent(id) || cloneIconContent(FILE);
+    if (frag) span.appendChild(frag);
   }
 }
 

@@ -91,6 +91,18 @@ export type ToolTerminalView = {
   rows: number;
   /** 清空视口与回滚缓冲；可缺（工具栏 🗑），组件判 typeof 后才调。 */
   clear?: () => void;
+  /**
+   * 隐藏 / 显示该视图的输出写入；可缺，组件判 typeof 后才调。
+   * @description 真实现（terminal-view 的输出泵）在隐藏期只把输出攒进队列、不交给 xterm 解析，
+   *   重新显示时一次性冲刷——后台项目跑大构建日志时省掉全部解析开销。
+   */
+  setHidden?: (hidden: boolean) => void;
+  /**
+   * 再排一次输出冲刷；可缺，组件判 typeof 后才调。
+   * @description 组件跳过 fit（尺寸未变 / 容器不可见）时也要给暂缓中的输出一次冲刷机会，
+   *   否则「收起期间跑完」的 tab 要等下一条输出才上屏。
+   */
+  kick?: () => void;
   /** 滚动到底；可缺（工具栏 ⬇），组件判 typeof 后才调。 */
   scrollToBottom?: () => void;
   /** 是否有选区；可缺（决定「复制选中文本」可用态），组件判 typeof 后才调。 */
@@ -152,6 +164,39 @@ type RunToolbarRefs = {
   scroll: HTMLButtonElement;
   /** 「清空输出」按钮。 */
   clear: HTMLButtonElement;
+};
+
+/** 一个 tab 的视图槽：xterm 视图 + 组件为它建的宿主元素（激活者显示，其余隐藏）。 */
+type ViewSlot = { view: ToolTerminalView; host: HTMLElement };
+
+/**
+ * tab 的展示态：全部由终端记录推导，renderTabs 用它做差异比对的输入。
+ */
+type TabDisplay = {
+  /** tab 上显示的文本（模式 A 退出后带 ✓ / ✗ (code)）。 */
+  text: string;
+  /** tab 的 title 提示（退出后是「已退出（代码 N）」）。 */
+  tip: string;
+  /** 是否运行模式（决定状态点样式类）。 */
+  run: boolean;
+  /** 是否已退出（仅运行模式参与）。 */
+  exited: boolean;
+  /** 退出码是否为 0。 */
+  ok: boolean;
+};
+
+/**
+ * 一个 tab 的常驻 DOM 引用。
+ * @description renderTabs 按 id 复用这些节点，只改真正变了的属性，不再整条 replaceChildren
+ *   （旧做法每个 pty 退出 / 停止都要重画全部 tab，重建节点还会丢掉正在按住的 hover 状态）。
+ */
+type TabNode = {
+  /** tab 按钮本体。 */
+  tab: HTMLButtonElement;
+  /** 文本所在的 span（差异更新只改它的 textContent）。 */
+  label: HTMLElement;
+  /** 上次渲染的展示态签名；相同则完全不碰 DOM。 */
+  sig: string;
 };
 
 /**
@@ -337,8 +382,8 @@ export function renderToolWindow(container: HTMLElement, options: ToolWindowOpti
   tabsBar.appendChild(tabList);
 
   // 终端窗口的「＋新建」：放在 tab 列表【末尾】（紧跟最后一个 tab 之后）。
-  // 注意：renderTabs 会 replaceChildren 清空 tabList，故此处只创建、不挂载，
-  //   每次重建 tab 后由 renderTabs 末尾重新 append（节点复用，事件不丢）。
+  // 注意：此处只创建、不挂载，由 renderTabs 的差异对齐把它作为目标序列的最后一项放到末尾
+  //   （节点常驻复用，事件不丢）。
   let newTabBtn: HTMLButtonElement | null = null;
   if (!isRun && typeof onNewTerminal === "function") {
     newTabBtn = iconButton("sfe-run-collapse new", "plus", t("run.newTerminal", "新建终端"), 13);
@@ -426,14 +471,18 @@ export function renderToolWindow(container: HTMLElement, options: ToolWindowOpti
   menu.hidden = true;
   container.appendChild(menu);
 
-  // tab 节点：id → { tab }
-  let tabNodes = new Map<string, { tab: HTMLButtonElement }>();
-  // 终端视图：id → { view, host }
-  let views = new Map<string, { view: ToolTerminalView; host: HTMLElement }>();
+  // tab 节点：id → 常驻 DOM 引用（renderTabs 按 id 增量复用，不再整条重画）
+  const tabNodes = new Map<string, TabNode>();
+  // 终端视图：id → 视图槽
+  let views = new Map<string, ViewSlot>();
   // xterm 仍在加载时的占位：id → { host, cancelled }
   let pending = new Map<string, { host: HTMLElement; cancelled: boolean }>();
   // 视图尚未就绪时暂存的输出，创建完成后一次性写入。
-  let buffers = new Map<string, string>();
+  // 值为分块数组：高吞吐进程在 xterm 加载窗口期的每块输出直接 push，
+  // join 一次完成；字符串累加是 O(n²) 复制，大构建日志会放大加载卡顿。
+  let buffers = new Map<string, string[]>();
+  // 上一次 fit 的视图槽及其容器尺寸：同一槽的尺寸没变就不重复 fit（FitAddon 内部要 getComputedStyle 并触发重排）。
+  let lastFit: { slot: ViewSlot; width: number; height: number } | null = null;
   // 当前右键 / 菜单锚定的 tab id
   let menuTabId: string | null = null;
 
@@ -694,54 +743,99 @@ export function renderToolWindow(container: HTMLElement, options: ToolWindowOpti
 
   // ───────────────────────── tab 栏渲染 ─────────────────────────
 
-  /** 重建 tab 栏（终端集合变化时才需要）。 */
+  /** 由终端记录推导 tab 展示态（模式 A 退出后带 ✓/✗ + 退出码；模式 B 不显示状态）。 */
+  function tabDisplay(term: ToolWindowTerminal): TabDisplay {
+    const title = term.title || t("run.terminal", "终端");
+    const labelText = term.projectLabel ? `${title} · ${term.projectLabel}` : title;
+    const run = term.mode === "run";
+    const exited = run && term.exited === true;
+    const ok = exited && term.exitCode === 0;
+    const code = term.exitCode == null ? "?" : term.exitCode;
+    return {
+      text: exited ? `${labelText} ${ok ? "✓" : `✗ (${code})`}` : labelText,
+      tip: exited ? t("run.status.exited", "已退出（代码 {{code}}）", { code }) : labelText,
+      run,
+      exited,
+      ok,
+    };
+  }
+
+  /** 建一个 tab 的骨架（状态点 + 文本 + 关闭按钮 + 三个监听）；展示态留给 updateTabNode 填。 */
+  function createTabNode(id: string): TabNode {
+    const tab = el("button", "sfe-run-tab");
+    tab.type = "button";
+    const dot = el("span", "sfe-run-tab-dot");
+    const label = el("span", "sfe-run-tab-label");
+    const close = el("span", "sfe-run-tab-close");
+    close.title = t("run.closeTab", "关闭");
+    close.appendChild(createActionIcon("close", 10));
+    close.addEventListener("click", (event) => {
+      event.stopPropagation();
+      if (typeof onCloseTerminal === "function") onCloseTerminal(id);
+    });
+    tab.appendChild(dot);
+    tab.appendChild(label);
+    tab.appendChild(close);
+    tab.addEventListener("click", () => {
+      if (typeof onSelectTab === "function") onSelectTab(id);
+    });
+    // tab 右键菜单（两个窗口都有）。
+    tab.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      menuTabId = id;
+      openMenu(tabMenuItems(id), event.clientX, event.clientY);
+    });
+    const node: TabNode = { tab, label, sig: "" };
+    tabNodes.set(id, node);
+    return node;
+  }
+
+  /** 展示态与上次一致就完全不碰 DOM；变了才改文案、title 与 run/ok/fail 三个状态类。 */
+  function updateTabNode(node: TabNode, d: TabDisplay): void {
+    const sig = `${d.text}|${d.tip}|${d.run ? 1 : 0}${d.exited ? (d.ok ? 1 : 2) : 0}`;
+    if (node.sig === sig) return;
+    node.sig = sig;
+    node.tab.title = d.tip;
+    node.label.textContent = d.text;
+    // 整体重置类名单：状态类在切换运行态时可能不再适用（toggle 只改给定的那几个），
+    // 而激活态由 syncTabs 在本次 renderTabs 之后统一补回（rebuild 的调用顺序保证）。
+    node.tab.className = "sfe-run-tab";
+    node.tab.classList.toggle("sfe-run-tab--run", d.run);
+    node.tab.classList.toggle("sfe-run-tab--ok", d.exited && d.ok);
+    node.tab.classList.toggle("sfe-run-tab--fail", d.exited && !d.ok);
+  }
+
+  /**
+   * 按 tab id 差异更新 tab 栏：新增的建、移除的删、留下的只在展示态变化时改属性。
+   * 位置只在「该位上的节点不是目标节点」时移动，因此稳态重绘是 0 次 DOM 写入。
+   */
   function renderTabs(): void {
-    tabList.replaceChildren();
-    tabNodes = new Map<string, { tab: HTMLButtonElement }>();
+    const ordered: Node[] = [];
+    const keep = new Set<string>();
     for (const term of list()) {
-      if (term.hiddenRun) continue;
-      const tab = el("button", "sfe-run-tab");
-      tab.type = "button";
-      const labelText = term.projectLabel
-        ? `${term.title || t("run.terminal", "终端")} · ${term.projectLabel}`
-        : (term.title || t("run.terminal", "终端"));
-      // 模式 A（一次性运行）退出后显示 ✓/✗ + 退出码；模式 B（交互终端）不显示。
-      const isTermRun = term.mode === "run";
-      const exited = isTermRun && term.exited === true;
-      const ok = exited && term.exitCode === 0;
-      const code = term.exitCode == null ? "?" : term.exitCode;
-      tab.title = exited
-        ? t("run.status.exited", "已退出（代码 {{code}}）", { code })
-        : labelText;
-      if (isTermRun) tab.classList.add("sfe-run-tab--run");
-      if (exited) tab.classList.add(ok ? "sfe-run-tab--ok" : "sfe-run-tab--fail");
-      const dot = el("span", "sfe-run-tab-dot");
-      const label = el("span", "sfe-run-tab-label", exited ? `${labelText} ${ok ? "✓" : `✗ (${code})`}` : labelText);
-      const close = el("span", "sfe-run-tab-close");
-      close.title = t("run.closeTab", "关闭");
-      close.appendChild(createActionIcon("close", 10));
-      close.addEventListener("click", (event) => {
-        event.stopPropagation();
-        if (typeof onCloseTerminal === "function") onCloseTerminal(term.id);
-      });
-      tab.appendChild(dot);
-      tab.appendChild(label);
-      tab.appendChild(close);
-      tab.addEventListener("click", () => {
-        if (typeof onSelectTab === "function") onSelectTab(term.id);
-      });
-      // tab 右键菜单（两个窗口都有）。
-      tab.addEventListener("contextmenu", (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        menuTabId = term.id;
-        openMenu(tabMenuItems(term.id), event.clientX, event.clientY);
-      });
-      tabNodes.set(term.id, { tab });
-      tabList.appendChild(tab);
+      if (!term || term.hiddenRun) continue;
+      keep.add(term.id);
+      const node = tabNodes.get(term.id) || createTabNode(term.id);
+      updateTabNode(node, tabDisplay(term));
+      ordered.push(node.tab);
     }
     // 「＋新建」排在所有 tab 之后（紧跟最后一个 tab 右侧）。
-    if (newTabBtn) tabList.appendChild(newTabBtn);
+    if (newTabBtn) ordered.push(newTabBtn);
+    for (const [id, node] of tabNodes) {
+      if (keep.has(id)) continue;
+      node.tab.remove();
+      tabNodes.delete(id);
+    }
+    const wanted = new Set<Node>(ordered);
+    for (const child of Array.from(tabList.children)) {
+      if (!wanted.has(child)) tabList.removeChild(child);
+    }
+    for (let i = 0; i < ordered.length; i++) {
+      const current = tabList.children[i];
+      if (current === ordered[i]) continue;
+      tabList.insertBefore(ordered[i], current || null);
+    }
   }
 
   /** 同步 tab 激活态（不重建 tab 栏）。 */
@@ -804,9 +898,9 @@ export function renderToolWindow(container: HTMLElement, options: ToolWindowOpti
             }
             views.set(term.id, { view, host });
             const buffered = buffers.get(term.id);
-            if (buffered && view && typeof view.write === "function") {
+            if (buffered && buffered.length && view && typeof view.write === "function") {
               buffers.delete(term.id);
-              view.write(buffered);
+              view.write(buffered.join(""));
             }
             syncActiveView();
             syncToolbar();
@@ -838,20 +932,48 @@ export function renderToolWindow(container: HTMLElement, options: ToolWindowOpti
       entry.host.remove();
       views.delete(id);
       buffers.delete(id);
+      if (lastFit && lastFit.slot === entry) lastFit = null;
     }
   }
 
-  /** 显示激活终端：其余隐藏，当前 fit + focus（切 tab 后终端尺寸正确、可立即输入）。 */
+  /**
+   * 只在真需要时 fit。
+   * @param entry 目标视图槽（尺寸缓存按槽记，重建出来的新视图一定会被 fit 一次）
+   * @param force 容器刚被展开 / 尺寸刚变过（调用方明示）：无视尺寸缓存重算一次
+   */
+  function fitView(entry: ViewSlot, force: boolean): void {
+    // 即使这一次不 fit，也给暂缓中的输出排一次冲刷：fit 去重不能让输出等到下一条才上屏。
+    if (typeof entry.view.kick === "function") entry.view.kick();
+    if (!force && entry.host.hidden) return;
+    const width = entry.host.clientWidth || 0;
+    const height = entry.host.clientHeight || 0;
+    const measured = width > 0 && height > 0;
+    // 测不到尺寸分两种情况：窗口被收起（display:none）——此前 fit 过的行列数仍然有效，
+    // 再 fit 会算出 1x1 并向 PTY 报破坏性 resize，故跳过；无布局环境（单测）从未记录过尺寸，
+    // 保持原有「照调 fit」的行为，fit 时机交给调用方决定。
+    if (!force && !measured && lastFit) return;
+    if (!force && measured && lastFit && lastFit.slot === entry && lastFit.width === width && lastFit.height === height) {
+      return;
+    }
+    entry.view.fit();
+    if (measured) lastFit = { slot: entry, width, height };
+  }
+
+  /** 显示激活终端：其余隐藏并暂缓输出解析；激活视图按需 fit + focus。 */
   function syncActiveView(): void {
     const active = activeTerminal();
     const currentId = active && !active.hiddenRun ? active.id : null;
     for (const [id, item] of views) {
-      item.host.hidden = id !== currentId;
+      const hidden = id !== currentId;
+      item.host.hidden = hidden;
+      // 后台 tab 不解析输出（其他项目正在跑的大构建日志是最白花 CPU 的一档），
+      // 输出留在视图自己的队列里，切回前台一次性冲刷。
+      if (typeof item.view.setHidden === "function") item.view.setHidden(hidden);
     }
     if (!currentId) return;
     const entry = views.get(currentId);
     if (!entry) return;
-    entry.view.fit();
+    fitView(entry, false);
     entry.view.focus();
   }
 
@@ -896,7 +1018,11 @@ export function renderToolWindow(container: HTMLElement, options: ToolWindowOpti
         entry.view.write(text);
         return;
       }
-      if (pending.has(id)) buffers.set(id, (buffers.get(id) || "") + text);
+      if (pending.has(id)) {
+        const chunks = buffers.get(id);
+        if (chunks) chunks.push(text);
+        else buffers.set(id, [text]);
+      }
     },
     /** 读取某终端当前 cols/rows（供调用方建 pty 时使用真实尺寸）。 */
     getSizes(id) {
@@ -914,11 +1040,12 @@ export function renderToolWindow(container: HTMLElement, options: ToolWindowOpti
       const entry = views.get(id);
       if (entry && typeof entry.view.scrollToBottom === "function") entry.view.scrollToBottom();
     },
-    /** 窗口可见/尺寸变化后让激活终端重新适配尺寸。 */
+    /** 窗口可见/尺寸变化后让激活终端重新适配尺寸（调用方明示，强制重算一次）。 */
     fit() {
       const active = activeTerminal();
-      const entry = active ? views.get(active.id) : null;
-      if (entry) entry.view.fit();
+      if (!active) return;
+      const entry = views.get(active.id);
+      if (entry) fitView(entry, true);
     },
     /** 停靠变化后刷新右上角切换按钮（不重建终端）。 */
     syncDock,

@@ -16,8 +16,10 @@
   min-height: 0;
 }
 
-/* 树主体滚动区（搜索栏固定在顶部，只有这里滚动） */
+/* 树主体滚动区（搜索栏固定在顶部，只有这里滚动）。
+   position:relative 是虚拟列表 .sfe-vlist-content（absolute）的包含块约束。 */
 .sfe-tree-body {
+  position: relative;
   flex: 1;
   min-height: 0;
   overflow: auto;

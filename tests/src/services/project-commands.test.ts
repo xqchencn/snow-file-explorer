@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { detectProjectCommands, flattenCommands, scanProjectCommands } from "../../../src/services/project-commands.ts";
+import { detectProjectCommands, ensureProjectCommands, flattenCommands, scanProjectCommands } from "../../../src/services/project-commands.ts";
 import {
   resolveNodeEntry,
   readNodeScripts,
@@ -809,6 +809,251 @@ test("scanProjectCommands：Maven 根聚合器与子模块读取标准源码 mai
     assert.equal(adminRun.sourcePath, app);
     assert.ok(result.ecosystems.some((eco) => eco.id === "maven"));
     assert.ok(result.ecosystems.some((eco) => eco.id === "maven:admin"));
+  } finally {
+    restoreWindow(previous);
+  }
+});
+
+/* ─────────────────── 扫描预算 / 中断 / 根目录复用 ─────────────────── */
+
+/** 造一个 Maven 模块：src/main/java 下 App.java（含 main）+ count 个占位源码文件。 */
+function mavenModule(
+  directories: Map<string, DirectoryEntry[]>,
+  contents: Map<string, string>,
+  moduleDir: string,
+  count: number
+): void {
+  const java = `${moduleDir}/src/main/java`;
+  const sources = [file("App.java", `${java}/App.java`), ...Array.from({ length: count }, (_, i) => file(`Cls${i}.java`, `${java}/Cls${i}.java`))];
+  directories.set(moduleDir, [file("pom.xml", `${moduleDir}/pom.xml`), directory("src", `${moduleDir}/src`)]);
+  directories.set(`${moduleDir}/src`, [directory("main", `${moduleDir}/src/main`)]);
+  directories.set(`${moduleDir}/src/main`, [directory("java", java)]);
+  directories.set(java, sources);
+  contents.set(`${moduleDir}/pom.xml`, "spring-boot-maven-plugin");
+  contents.set(
+    `${java}/App.java`,
+    ["package demo;", "public class App {", "  public static void main(String[] args) {}", "}"].join("\n")
+  );
+  for (const entry of sources) {
+    if (!contents.has(entry.path)) contents.set(entry.path, "package demo;\npublic class Placeholder {}\n");
+  }
+}
+
+test("scanProjectCommands：JVM 源码预算跨模块共享，单模块不得独占、总量不超上限", async () => {
+  // 与源码同名的私有常量（改动时两处一起看）：整次扫描总量 240，单模块 120。
+  const MAX_SOURCE_FILES = 240;
+  const MAX_SOURCE_FILES_PER_MODULE = 120;
+  const root = "D:/multi/repo";
+  const modules = ["api", "web"];
+  const directories = new Map<string, DirectoryEntry[]>([
+    [root, [file("pom.xml", `${root}/pom.xml`), ...modules.map((name) => directory(name, `${root}/${name}`))]],
+  ]);
+  const contents = new Map<string, string>([[`${root}/pom.xml`, "<packaging>pom</packaging>"]]);
+  // 每模块 200 个源码文件：单模块预算 120 必然截断，两模块合计 240 正好等于总预算。
+  for (const name of modules) mavenModule(directories, contents, `${root}/${name}`, 200);
+
+  const sourceReads: string[] = [];
+  const previous = globalThis.window;
+  installWindow({
+    snow: {
+      readDirectoryEntries: async (dirPath) => directories.get(dirPath) || [],
+      readFileContent: async (filePath) => {
+        if (/\.java$/i.test(filePath)) sourceReads.push(filePath);
+        return fileContent(contents.get(filePath) || "");
+      },
+    },
+  });
+  try {
+    const result = await scanProjectCommands(root);
+    const readsOf = (moduleDir: string) => sourceReads.filter((path) => path.startsWith(`${moduleDir}/`)).length;
+    // 原实现是「每模块各 240」→ 两个模块 480 次整份源码跨 IPC；现在是整次扫描共享 240。
+    assert.equal(sourceReads.length, MAX_SOURCE_FILES);
+    assert.equal(readsOf(`${root}/api`), MAX_SOURCE_FILES_PER_MODULE);
+    assert.equal(readsOf(`${root}/web`), MAX_SOURCE_FILES_PER_MODULE);
+    // 总额度之内不丢候选：两个模块的 main 都还在（App.java 排在各自首位）。
+    assert.deepEqual(
+      flattenCommands(result, { includeHidden: true })
+        .filter((command) => command.mainClass === "demo.App")
+        .map((command) => command.dir)
+        .sort(),
+      ["api", "web"]
+    );
+    assert.deepEqual(
+      result.packages.filter((item) => item.ecosystem === "maven").map((item) => item.dir).sort(),
+      ["", "api", "web"]
+    );
+  } finally {
+    restoreWindow(previous);
+  }
+});
+
+test("scanProjectCommands：MAX_PACKAGES 在递归内部拦住，达上限后不再下探剩余目录", async () => {
+  const MAX_PACKAGES = 50;
+  // 包全部藏在第二层递归里：根层拦不住，只有「发现即计数」才能提前收手。
+  const total = 120;
+  const root = "D:/many/repo";
+  const many = `${root}/many`;
+  const directories = new Map<string, DirectoryEntry[]>();
+  const contents = new Map<string, string>();
+  directories.set(root, [directory("many", many)]);
+  directories.set(many, Array.from({ length: total }, (_, index) => directory(`m${index}`, `${many}/m${index}`)));
+  for (let index = 0; index < total; index += 1) {
+    const dir = `${many}/m${index}`;
+    directories.set(dir, [file("package.json", `${dir}/package.json`)]);
+    contents.set(`${dir}/package.json`, JSON.stringify({ name: `m${index}`, scripts: { dev: "vite" } }));
+  }
+  const readDirs: string[] = [];
+  const previous = globalThis.window;
+  installWindow({
+    snow: {
+      readDirectoryEntries: async (dirPath) => {
+        readDirs.push(dirPath);
+        return directories.get(dirPath) || [];
+      },
+      readFileContent: async (filePath) => fileContent(contents.get(filePath) || ""),
+    },
+  });
+  try {
+    const result = await scanProjectCommands(root);
+    assert.equal(result.packages.length, MAX_PACKAGES);
+    const scanned = readDirs.filter((path) => path.startsWith(`${many}/`)).length;
+    // 旧实现等整棵子树跑完才并入计数，120 个目录全部列过；
+    // 现在至多再放行并发窗口内已发出的在途请求（mapPool 并发 8）。
+    assert.ok(scanned <= MAX_PACKAGES + 8, `达到包上限后不应继续列目录（实际列了 ${scanned} 个）`);
+    assert.ok(scanned < total);
+  } finally {
+    restoreWindow(previous);
+  }
+});
+
+test("scanProjectCommands：shouldAbort 命中后停止下探，只放过在途请求", async () => {
+  const total = 60;
+  const root = "D:/abort/repo";
+  const many = `${root}/many`;
+  const directories = new Map<string, DirectoryEntry[]>();
+  const contents = new Map<string, string>();
+  directories.set(root, [directory("many", many)]);
+  directories.set(many, Array.from({ length: total }, (_, index) => directory(`m${index}`, `${many}/m${index}`)));
+  for (let index = 0; index < total; index += 1) {
+    const dir = `${many}/m${index}`;
+    directories.set(dir, [file("package.json", `${dir}/package.json`)]);
+    contents.set(`${dir}/package.json`, JSON.stringify({ name: `m${index}`, scripts: { dev: "vite" } }));
+  }
+  let aborted = false;
+  const readDirs: string[] = [];
+  const previous = globalThis.window;
+  installWindow({
+    snow: {
+      readDirectoryEntries: async (dirPath) => {
+        readDirs.push(dirPath);
+        // 扫到第 6 个模块目录时调用方废弃本次扫描（面板销毁 / 已切换根目录）。
+        if (dirPath === `${many}/m5`) aborted = true;
+        return directories.get(dirPath) || [];
+      },
+      readFileContent: async (filePath) => fileContent(contents.get(filePath) || ""),
+    },
+  });
+  try {
+    const result = await scanProjectCommands(root, null, { shouldAbort: () => aborted });
+    const scanned = readDirs.filter((path) => path.startsWith(`${many}/`)).length;
+    assert.ok(scanned < total, `中断后不应继续列目录（实际列了 ${scanned} 个）`);
+    assert.ok(scanned <= 10, `中断只允许放过并发窗口内的在途请求（实际列了 ${scanned} 个）`);
+    assert.ok(result.packages.length < total);
+  } finally {
+    restoreWindow(previous);
+  }
+});
+
+test("scanProjectCommands：AbortSignal 已中断时一次读取都不发起", async () => {
+  const root = "D:/aborted/repo";
+  const controller = new AbortController();
+  controller.abort();
+  const readDirs: string[] = [];
+  const readFiles: string[] = [];
+  const previous = globalThis.window;
+  installWindow({
+    snow: {
+      readDirectoryEntries: async (dirPath) => {
+        readDirs.push(dirPath);
+        return [file("package.json", `${root}/package.json`)];
+      },
+      readFileContent: async (filePath) => {
+        readFiles.push(filePath);
+        return fileContent("{}");
+      },
+    },
+  });
+  try {
+    const result = await scanProjectCommands(root, null, { signal: controller.signal });
+    assert.deepEqual(readDirs, []);
+    assert.deepEqual(readFiles, []);
+    assert.deepEqual(result.ecosystems, []);
+  } finally {
+    restoreWindow(previous);
+  }
+});
+
+test("scanProjectCommands：传入已列好的根目录条目时不再重复列根目录", async () => {
+  const root = "D:/reuse/repo";
+  const frontend = `${root}/frontend`;
+  const rootEntries = [file("package.json", `${root}/package.json`), directory("frontend", frontend)];
+  const directories = new Map<string, DirectoryEntry[]>([
+    [root, rootEntries],
+    [frontend, [file("package.json", `${frontend}/package.json`)]],
+  ]);
+  const contents = new Map<string, string>([
+    [`${root}/package.json`, JSON.stringify({ name: "root-pkg", scripts: { dev: "vite" } })],
+    [`${frontend}/package.json`, JSON.stringify({ name: "web", scripts: { build: "tsc" } })],
+  ]);
+  const readDirs: string[] = [];
+  const previous = globalThis.window;
+  installWindow({
+    snow: {
+      readDirectoryEntries: async (dirPath) => {
+        readDirs.push(dirPath);
+        return directories.get(dirPath) || [];
+      },
+      readFileContent: async (filePath) => fileContent(contents.get(filePath) || ""),
+    },
+  });
+  try {
+    const reused = await scanProjectCommands(root, rootEntries);
+    assert.deepEqual(readDirs, [frontend], "复用根目录条目时只应列子目录");
+    readDirs.length = 0;
+    const scanned = await scanProjectCommands(root);
+    assert.deepEqual(readDirs, [root, frontend], "不传则自己列一次根目录");
+    assert.deepEqual(
+      flattenCommands(reused).map((command) => `${command.dir}|${command.cmd}`).sort(),
+      flattenCommands(scanned).map((command) => `${command.dir}|${command.cmd}`).sort()
+    );
+  } finally {
+    restoreWindow(previous);
+  }
+});
+
+test("ensureProjectCommands：被中断的扫描不把半截结果写回缓存", async () => {
+  const root = "D:/cancelled/repo";
+  const directories = new Map<string, DirectoryEntry[]>([
+    [root, [file("package.json", `${root}/package.json`), directory("sub", `${root}/sub`)]],
+    [`${root}/sub`, [file("package.json", `${root}/sub/package.json`)]],
+  ]);
+  const previous = globalThis.window;
+  installWindow({
+    snow: {
+      readDirectoryEntries: async (dirPath) => directories.get(dirPath) || [],
+      readFileContent: async (filePath) => fileContent(JSON.stringify({ scripts: { dev: `vite ${filePath}` } })),
+    },
+  });
+  try {
+    const state = { projectCommands: null };
+    const controller = new AbortController();
+    controller.abort();
+    assert.equal(await ensureProjectCommands(state, root, { signal: controller.signal }), null);
+    assert.equal(state.projectCommands, null, "中断结果不得进缓存");
+
+    const ok = await ensureProjectCommands(state, root);
+    assert.ok(ok);
+    assert.equal(state.projectCommands, ok, "未中断时结果照常写回缓存");
   } finally {
     restoreWindow(previous);
   }
