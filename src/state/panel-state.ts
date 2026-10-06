@@ -10,6 +10,10 @@ import type { GitStatusResult } from "../types/host/host-git.ts";
 import type { FileTreeEntry, JvmProjectDetection } from "../services/file-service.ts";
 import type { GitStatusMap } from "../services/git-service.ts";
 import type { GitignoreRule } from "../services/file-filter.ts";
+import type { HttpRestFile } from "../services/http-file-scan.ts";
+import type { HttpParsedFile } from "../services/http-request-parser.ts";
+import type { HttpRunResult } from "../services/http-runner.ts";
+import type { HttpFormValues } from "../services/http-serialize.ts";
 import type { ViewSettings } from "../services/settings.ts";
 import type { ProjectCommandsResult, FlatRunCommand } from "../services/project-commands.ts";
 import type { PtySessionResult } from "../services/terminal-runner.ts";
@@ -21,7 +25,7 @@ import type {
 } from "../components/code-viewer.ts";
 import type { ToolWindowMode, ToolWindowDock } from "../components/tool-window.ts";
 import type { GitCommitMode, GitSection } from "../components/git-view.ts";
-import type { GitOperation, DiffViewMode } from "../types/panel-state.ts";
+import type { GitOperation, DiffViewMode, HttpViewerMode } from "../types/panel-state.ts";
 import { normalizePath } from "../services/markdown-asset.ts";
 
 /**
@@ -146,6 +150,12 @@ export type GitPreviewState = {
 export type ContextMenuState = {
   /** 菜单目标条目；空白区右键时为 null。 */
   entry: FileTreeEntry | null;
+  /**
+   * HTTP 请求文件行右键时的目标。
+   * @description 请求文件不在文件树里（树只列工作区真实目录树，扫描结果另有一份），
+   *   菜单项也不能复用「打开文件」那条分支——那会在文件视图里打开它，与当前主视图对不上。
+   */
+  httpFile?: HttpRestFile | null;
   /** 菜单左上角视口 x 坐标（clientX）。 */
   x: number;
   /** 菜单左上角视口 y 坐标（clientY）。 */
@@ -169,6 +179,12 @@ export type ConfirmDialogState = {
   danger?: boolean;
   /** 点击确认后的动作；可为异步函数，异常由 confirmDialogAction 捕获。 */
   onConfirm: () => void | Promise<void>;
+  /**
+   * 取消 / 关闭（取消按钮、遮罩点击、Escape）时的回调。
+   * @description 「问一句再继续」的流程要能被 await，就得在取消这条路上也给出答复，
+   *   否则等待方永远悬着，后续动作既不执行也不收场。
+   */
+  onCancel?: () => void;
 };
 
 /**
@@ -201,8 +217,8 @@ export const MAX_PREVIEW_BYTES = 20 * 1024 * 1024;
 
 /**
  * 骨架 DOM 引用集合（layoutEls）。
- * @description ensureLayout 只建一次；treePane/previewPane/gitPane/gitPreviewPane 随主视图
- *   重建后置 null 再回填；treeBody/searchInput/searchClear 只有对应视图构建后才存在。
+ * @description ensureLayout 只建一次；treePane/previewPane/gitPane/gitPreviewPane/httpPane/httpPreviewPane
+ *   随主视图重建后置 null 再回填；treeBody/searchInput/searchClear 只有对应视图构建后才存在。
  */
 export type LayoutEls = {
   /** 插件挂载根节点（.sfe-root），弹窗与右键菜单都挂在它下面。 */
@@ -219,6 +235,8 @@ export type LayoutEls = {
   fileViewBtn?: HTMLButtonElement;
   /** 「Git 变更」主视图按钮；可缺。 */
   gitViewBtn?: HTMLButtonElement;
+  /** 「HTTP 请求」主视图按钮；可缺。 */
+  httpViewBtn?: HTMLButtonElement;
   /** 入口栏「运行」按钮；可缺。 */
   runSideBtn?: HTMLButtonElement;
   /** 入口栏「运行」按钮上的运行中圆点；可缺。 */
@@ -253,6 +271,10 @@ export type LayoutEls = {
   gitPane: HTMLElement | null;
   /** Git 右侧查看器面板；未构建 Git 视图时为 null。 */
   gitPreviewPane: HTMLElement | null;
+  /** HTTP 请求文件列表面板；未构建 HTTP 视图时为 null。 */
+  httpPane: HTMLElement | null;
+  /** HTTP 右侧查看器面板；未构建 HTTP 视图时为 null。 */
+  httpPreviewPane: HTMLElement | null;
   /** 文件树滚动容器，仅文件视图存在。 */
   treeBody?: HTMLElement | null;
   /** 搜索输入框，仅文件视图存在。 */
@@ -290,8 +312,8 @@ export type PanelState = {
   showOtherProjectRuns: boolean;
   /** 工具窗口停靠：bottom 底栏 / right 右侧，两窗口共用。 */
   toolDock: ToolWindowDock;
-  /** 主视图二选一：files 文件树 / git 变更列表。 */
-  mainView: "files" | "git";
+  /** 主视图三选一：files 文件树 / git 变更列表 / http 请求文件列表。 */
+  mainView: "files" | "git" | "http";
   /** 目录展开态表，键为绝对路径；初值与切换项目、切包视图时重置为空表。 */
   expanded: Record<string, boolean>;
   /** 文件树选中集合（多选，绝对路径）；空集表示无选中。 */
@@ -320,6 +342,44 @@ export type PanelState = {
   gitignoreFullyLoaded: boolean;
   /** 已补读过 .gitignore 的目录键（pathKey 归一），避免重复读盘。 */
   gitignoreLoadedDirs: Set<string>;
+  /** 「HTTP 请求」主视图扫描到的请求文件清单（按相对路径升序）；空数组表示还没扫或确实没有。 */
+  httpFiles: HttpRestFile[];
+  /** HTTP 请求文件扫描是否进行中；用于列表进行态文案与重复触发去抖。 */
+  httpScanning: boolean;
+  /** 最近一次 HTTP 扫描是否因目录预算触顶而未扫完；true 时列表要说明结果不完整。 */
+  httpTruncated: boolean;
+  /** 最近一次 HTTP 扫描里列目录失败的目录数；>0 时列表要说明结果不完整。 */
+  httpScanFailed: number;
+  /** HTTP 视图折叠中的目录相对路径集合；不在集合内的目录默认展开。 */
+  httpCollapsed: Set<string>;
+  /** HTTP 视图当前打开的请求文件绝对路径；未打开为 null。 */
+  httpSelected: string | null;
+  /** HTTP 右侧查看器的形态：GUI 表单或文本；偏好经 settings 持久化。 */
+  httpMode: HttpViewerMode;
+  /** 当前打开文件的解析结果；与 httpSelected 同一次读取的产物，未打开为 null。 */
+  httpFile: HttpParsedFile | null;
+  /** GUI 表单的当前值，键为请求下标；换文件时整体重建。 */
+  httpForms: Map<number, HttpFormValues>;
+  /** 每条请求最近一次的执行结果，键为请求下标；换文件时清空。 */
+  httpResponses: Map<number, HttpRunResult>;
+  /** 正在发送的请求下标；空闲为 null（同一时刻只发一条，避免变量互相踩）。 */
+  httpRunning: number | null;
+  /** 文本态右分栏显示的是哪一条请求的结果（最近一次发送的那条）；没发过为 null。 */
+  httpResultIndex: number | null;
+  /** `# @prompt` 由用户填进来的值，键为 `` `${请求下标}:${变量名}` ``。 */
+  httpPrompts: Map<string, string>;
+  /** 展开的卡片 / 文本块键（请求块 `r<下标>`，其余 `o<下标>`）；默认空集即全部折叠，换文件时清空。 */
+  httpExpanded: Set<string>;
+  /**
+   * 「请求构建区（请求头 / 提示变量 / 请求体）已收起」的请求下标集合。
+   * @description 构建区的开合由「这条请求发过没有」派生，不靠一个全局开关记：
+   *   没发过的请求默认摊开供编辑；发过响应的请求默认收起、把结果让到眼前。
+   *   本集合只记「用户手动收起过」这一种偏离（发送完成也会自动计入），
+   *   因此折叠卡片再展开、切来切去，看到的都是该请求此刻该有的默认态，不会被别的请求带偏。
+   */
+  httpBodyCollapsed: Set<number>;
+  /** HTTP 正文缓冲里有还没写盘的改动；写盘成功由保存通道清掉。 */
+  httpDirty: boolean;
   /** 右键菜单状态；null 表示未打开。 */
   contextMenu: ContextMenuState | null;
   /** 确认弹窗状态；null 表示未打开。 */
@@ -393,6 +453,22 @@ export function createPanelState(): PanelState {
     gitignoreRules: [],
     gitignoreFullyLoaded: false,
     gitignoreLoadedDirs: new Set(),
+    httpFiles: [],
+    httpScanning: false,
+    httpTruncated: false,
+    httpScanFailed: 0,
+    httpCollapsed: new Set(),
+    httpSelected: null,
+    httpMode: "gui",
+    httpFile: null,
+    httpForms: new Map(),
+    httpResponses: new Map(),
+    httpRunning: null,
+    httpResultIndex: null,
+    httpPrompts: new Map(),
+    httpExpanded: new Set(),
+    httpBodyCollapsed: new Set(),
+    httpDirty: false,
     contextMenu: null,
     confirmDialog: null,
     operationBusy: false,

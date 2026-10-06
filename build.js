@@ -93,10 +93,11 @@ async function runBuild() {
 
   // 2b. 按需块自带的样式：这些 DOM 只可能在块到达之后才存在，随块注入就不会有无样式帧，
   //     而首屏不必为它们背下阻塞渲染的字节。
+  //     注意：只有 xterm 属于这一类。syntax.css 的 token 配色作用在首屏 DOM
+  //     （.sfe-file-viewer-code / .sfe-diff-scroll）上，必须随首屏样式表一起打包。
   console.log('🎨 [Build] 打包按需块样式 -> dist/chunks/*.css...');
   const chunkCssTargets = [
     { entry: path.join(__dirname, 'node_modules', '@xterm', 'xterm', 'css', 'xterm.css'), out: path.join(chunksDir, 'terminal.css') },
-    { entry: path.join(srcDir, 'styles', 'syntax.css'), out: path.join(chunksDir, 'highlighter.css') },
   ];
   for (const target of chunkCssTargets) {
     await esbuild.build({

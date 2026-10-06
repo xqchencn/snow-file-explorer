@@ -1,12 +1,17 @@
 /**
  * 现代多语言语法高亮引擎 (src/components/highlighter.ts)
  * 基于 PrismJS 全量语言包（297 种语言）构建，提供精准分词高亮与 XSS 防御
+ * @description `.http` / `.rest` 不在这里实现：它们的着色只靠正则、不需要 Prism，
+ *   由首屏模块 syntax-basic.ts 同步提供（见 highlight-client.ts 的分流），
+ *   这样懒加载块没就绪时 http 文件里的 JSON 正文也不会一片白。
  */
 
 import { escapeHtml } from '../utils/dom.ts';
 import Prism, { EXT_TO_PRISM_LANG } from './prism-langs.ts';
-import { shouldHighlight } from './highlight-policy.ts';
+import { shouldHighlight, measureText, MAX_HIGHLIGHT_LEN, MAX_HIGHLIGHT_LINES } from './highlight-policy.ts';
+import { basicHighlightCodeHtml } from './syntax-basic.ts';
 
+/** 本模块只 re-export 策略常量/函数，供懒块内的消费方使用。 */
 export {
   isLargeText,
   shouldHighlight,
@@ -57,7 +62,18 @@ export function highlightCodeHtml(code: string, ext: string): string {
 
   let html: string;
   // 超大文本保护快速通道（字符数 / 行数任一超限即转义为纯文本）
-  if (!shouldHighlight(raw)) {
+  if (cleanExt === 'http' || cleanExt === 'rest') {
+    // `.http` / `.rest` 一律走行级自足高亮（与首屏 syntax-basic.ts 同一份实现）：
+    // 整篇（小文件）与单行（大文件虚拟列表逐行）结果一致，正文 JSON 无论有没有
+    // Content-Type、文件多大都能着色。
+    // 熔断只看总字符数 / 行数：**不能**用 shouldHighlight（它含「单行超长即熔断」，
+    // 那是给 Prism 防正则回溯用的），否则压缩成一行的 JSON 会把整篇拖成纯文本。
+    const measured = measureText(raw);
+    html =
+      measured.length > MAX_HIGHLIGHT_LEN || measured.lines > MAX_HIGHLIGHT_LINES
+        ? escapeHtml(raw)
+        : basicHighlightCodeHtml(raw, cleanExt);
+  } else if (!shouldHighlight(raw)) {
     html = escapeHtml(raw);
   } else {
     const prismLang = EXT_TO_PRISM_LANG[cleanExt] || cleanExt;

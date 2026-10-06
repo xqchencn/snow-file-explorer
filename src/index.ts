@@ -5,7 +5,7 @@
 
 import type { PluginRuntimeApi, SystemWriteActionName } from "./types/plugin-runtime.ts";
 import type { GitSyncIndicatorHandle } from "./components/git-sync-indicator.ts";
-import type { TranslateFn } from "./types/panel-state.ts";
+import type { TranslateFn, HttpViewerMode } from "./types/panel-state.ts";
 import type { Unsubscribe } from "./types/snow-api.ts";
 import type { GitFileStatus } from "./types/host/host-git.ts";
 import type { FileTreeEntry, ErrorLike, FileWriteResult } from "./services/file-service.ts";
@@ -27,19 +27,25 @@ import {
   relativePath,
   resolveActiveDirectoryPath,
 } from "./services/file-service.ts";
+import { isHttpRestFileName } from "./services/http-file-scan.ts";
 import { subscribeGitStatus, partitionGitFiles } from "./services/git-service.ts";
 import { loadChunk, releaseChunkStyles } from "./services/lazy-chunk.ts";
 import { installFileIcons, refreshInstalledIcons, createFileIconNode } from "./icons/file-icons.ts";
 import { renderTreeView, destroyTreeView } from "./components/tree-view.ts";
 import { renderCodeViewer, disposeViewerViewport } from "./components/code-viewer.ts";
 import { renderGitCommitBar, renderGitList, closeGitContextMenu } from "./components/git-view.ts";
+import { renderHttpList } from "./components/http-view.ts";
+import { renderHttpRequestPanel } from "./components/http-request-panel.ts";
+import { renderHttpResult } from "./components/http-result-view.ts";
+import { formValuesOfRequest } from "./services/http-serialize.ts";
 import { renderGitSyncIndicator } from "./components/git-sync-indicator.ts";
-import { loadViewSettings, loadDiffViewMode } from "./services/settings.ts";
+import { loadViewSettings, loadDiffViewMode, loadHttpViewerMode } from "./services/settings.ts";
 import { ensureProjectCommands, flattenCommands } from "./services/project-commands.ts";
 import { renderRunToolbar } from "./components/run-toolbar.ts";
 import { isRightPanelFullscreen } from "./utils/panel-fullscreen.ts";
 import { createPanelState, pathKey } from "./state/panel-state.ts";
 import { createGitController } from "./controllers/git-controller.ts";
+import { createHttpController } from "./controllers/http-controller.ts";
 import { createTreeController } from "./controllers/tree-controller.ts";
 import { createPreviewController } from "./controllers/preview-controller.ts";
 import { createTerminalController } from "./controllers/terminal-controller.ts";
@@ -173,7 +179,7 @@ export function mount(
     closeContextMenu,
     openConfirmDialog,
     setOperationStatus,
-    previewFile: (entry) => preview.previewFile(entry),
+    previewFile: (entry) => openFileFromExplorer(entry),
     refreshGitAll: () => git.refreshGitAll(),
     resetPreviewForDeletedPaths: (paths) => preview.resetPreviewForDeletedPaths(paths),
     pruneSelectionForDeletedPaths: (paths) => preview.pruneSelectionForDeletedPaths(paths),
@@ -213,7 +219,54 @@ export function mount(
     renderRunToolbarView,
   });
 
-    // 1. 获取当前工作区目录（宿主当前激活项目）
+  const http = createHttpController({
+    state, t, api,
+    isDisposed: () => disposed,
+    renderHttpPane,
+    renderHttpPreview,
+    // 文本态刷新结果只走这条窄通道：只重建右分栏，左边的编辑区与光标原样不动。
+    renderHttpResultPane: () => renderHttpResultPane(),
+    previewFile: (entry) => preview.previewFile(entry),
+    savePreview: async () => {
+      await preview.handleSavePreview();
+    },
+    // 文本态没有卡片可挂进行态与结果，发送的回音与「未保存」状态走面板状态条这条既有通道。
+    setStatus: (text, persistent) => setStatusText(text, persistent),
+    // 换请求文件会丢掉没写盘的改动，先问一句（切项目不问：那时项目已经切过去了）。
+    confirmDiscard: () =>
+      askConfirm({
+        title: t("http.discardTitle", "有未保存的改动"),
+        message: t("http.discardMessage", "当前请求文件里还有没写盘的内容，继续就会丢掉这些改动。"),
+        confirmLabel: t("http.discardConfirm", "丢弃并继续"),
+      }),
+  });
+
+  /**
+   * 文件树统一打开入口：HTTP 请求文件复用独立 HTTP 视图的解析、表单、保存与发送链路。
+   * 普通文件仍走原来的代码查看器；切走 HTTP 文件前先提交缓冲，避免文件视图覆盖未保存正文。
+   */
+  async function openFileFromExplorer(entry: FileTreeEntry): Promise<void> {
+    if (!entry || entry.isDirectory) return;
+    if (isHttpRestFileName(entry.name)) {
+      const relPath = relativePath(state.rootPath, entry.path) || entry.name;
+      await http.openFile({
+        name: entry.name,
+        path: entry.path,
+        relPath,
+        size: typeof entry.size === "number" ? entry.size : 0,
+      });
+      return;
+    }
+    if (isActiveHttpDocument() && http.isDirty()) await http.commit();
+    await preview.previewFile(entry);
+  }
+
+  /** 当前右侧正文是否就是文件树直接打开的 HTTP 请求文件。 */
+  function isActiveHttpDocument(): boolean {
+    return Boolean(state.httpSelected && pathKey(state.preview.path) === pathKey(state.httpSelected));
+  }
+
+  // 1. 获取当前工作区目录（宿主当前激活项目）
   // 面板槽位固定为 plugin:<pluginId>:<panelId>，由宿主保证「同一面板唯一」；
   // 插件不自建多项目会话、不提供目录选择入口，只跟随宿主项目。
   async function resolveRoot() {
@@ -258,6 +311,8 @@ export function mount(
     state.searching = false;
     state.pendingRevealLine = null;
     state.contextMenu = null;
+    // 换项目会把弹窗直接作废：等待确认的流程（如换请求文件）也要收到答复，别把 await 悬在那里。
+    if (state.confirmDialog && typeof state.confirmDialog.onCancel === "function") state.confirmDialog.onCancel();
     state.confirmDialog = null;
     state.operationBusy = false;
     state.gitStatus = null;
@@ -269,6 +324,7 @@ export function mount(
     state.gitignoreLoadedDirs = new Set();
     state.gitPreview = null;
     state.gitSelected = null;
+    http.resetForProject();
     preview.bumpRequestIds();
     state.preview = {
       kind: "empty",
@@ -290,6 +346,10 @@ export function mount(
       renderToolbar();
       return;
     }
+    // 切项目时 resetForProject 清空了请求文件清单，而 render 只重绘、不扫描：
+    // 正停在「HTTP 请求」视图的用户会看到列表一直空着，直到手动点刷新。
+    // 新根尚未扫过（scannedRootKey 已被 resetForProject 作废），这里补一次。
+    if (state.mainView === "http") void http.rescan();
     // 先列出根目录。图标、JVM 和 Git 在树出现之后补；运行识别再等它们结束。
     await tree.loadRoot({ followups: true });
     tree.startDirectoryWatch();
@@ -315,6 +375,27 @@ export function mount(
       operationTimer = null;
       renderToolbar();
     }, 3200);
+  }
+
+  /**
+   * 面板状态条：写一行任意文案，空串即清除。
+   * @description HTTP 发送这类「有过程也有结果」的动作按原样显示（发送中 / 200 OK · 12 毫秒 / 失败原因），
+   *   与 setOperationStatus 的「操作成功／操作失败」措辞不同，故单开一条通道，共用同一个定时器。
+   */
+  function setStatusText(text: string, persistent = false) {
+    state.status = text;
+    renderToolbar();
+    if (operationTimer) clearTimeout(operationTimer);
+    operationTimer = null;
+    // persistent 用于「有未保存的改动」这类必须一直挂着的状态：由后续动作显式清掉。
+    if (!text || persistent) return;
+    // 结果留得比「操作成功」久一点，但不常驻：用户随时可能回去改文件。
+    operationTimer = setTimeout(() => {
+      if (disposed) return;
+      state.status = "";
+      operationTimer = null;
+      renderToolbar();
+    }, 6000);
   }
 
   async function runSystemWriteAction(
@@ -373,8 +454,32 @@ export function mount(
 
   function closeConfirmDialog() {
     if (!state.confirmDialog) return;
+    const cancelled = state.confirmDialog.onCancel;
     state.confirmDialog = null;
     renderConfirmDialog();
+    // 取消也要给等待方一个答复（见 askConfirm）。
+    if (typeof cancelled === "function") cancelled();
+  }
+
+  /**
+   * 把回调式确认框包成可 await 的一次询问。
+   * @param options 标题 / 正文 / 确认按钮文案
+   * @returns 用户确认时 true；取消、关闭或已有别的弹窗在用时 false
+   * @description 用于「改动没保存，继续就丢」这类必须等答复才能往下走的流程。
+   */
+  function askConfirm(options: { title: string; message: string; confirmLabel: string }): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      const opened = openConfirmDialog({
+        ...options,
+        onConfirm: () => resolve(true),
+        onCancel: () => resolve(false),
+      });
+      if (!opened) {
+        // 已有别的弹窗在用：明确告诉用户为什么点了没反应，而不是静默什么都不做。
+        setStatusText(t("http.confirmBusy", "请先处理当前对话框"));
+        resolve(false);
+      }
+    });
   }
 
   async function confirmDialogAction() {
@@ -472,6 +577,12 @@ export function mount(
     if (oldMenu) oldMenu.remove();
     const context = state.contextMenu;
     if (!context) return;
+    // 忙碌或已有确认弹窗时不弹菜单：菜单会盖在遮罩之上，点进去只会撞上「请先处理当前对话框」。
+    // 闸门放在这里，所有入口（文件树 / Git / HTTP 列表 / 空白区）自动一致。
+    if (state.operationBusy || state.confirmDialog) {
+      state.contextMenu = null;
+      return;
+    }
 
     const menu = el("div", "sfe-context-menu");
     menu.setAttribute("role", "menu");
@@ -492,6 +603,46 @@ export function mount(
       menu.appendChild(item);
     };
     const separator = () => menu.appendChild(el("div", "sfe-context-menu-separator"));
+
+    // HTTP 请求文件行的右键菜单：与文件树/Git 列表对等的那几项。
+    // 不复用下面的 entry 分支：「打开文件」在那边走的是文件树通道，会与当前主视图对不上。
+    const httpFile = context.httpFile;
+    if (httpFile) {
+      addItem(
+        t("action.openFile", "打开文件"),
+        () => {
+          closeContextMenu();
+          void http.openFile(httpFile);
+        },
+        disabled,
+      );
+      separator();
+      addItem(
+        t("action.revealInExplorer", "在资源管理器中打开"),
+        () => handleRevealInExplorer({ path: httpFile.path }),
+        disabled,
+      );
+      addItem(t("action.copyPath", "复制路径"), () => copyPathText(httpFile.path), disabled);
+      addItem(
+        t("action.copyRelativePath", "复制相对路径"),
+        () => {
+          const value = relativePath(state.rootPath, httpFile.path);
+          if (value == null) setOperationStatus(false, "目标路径不在当前工作区内");
+          else void copyPathText(value);
+        },
+        disabled,
+      );
+      separator();
+      addItem(
+        t("action.refresh", "刷新"),
+        () => {
+          closeContextMenu();
+          void http.rescan({ force: true });
+        },
+        disabled,
+      );
+      return;
+    }
 
     // 勾选型菜单项（视图开关）：右侧用 ✓ 标记勾选态（与常见菜单一致），未勾选留空位保持对齐。
     const addToggleItem = (label: string, checked: boolean, action: () => void, isDisabled = false) => {
@@ -517,7 +668,12 @@ export function mount(
         state.viewSettings.respectGitignore !== false,
         () => {
           closeContextMenu();
-          void tree.toggleViewSetting("respectGitignore");
+          // 忽略开关直接决定请求文件清单该不该含被忽略项：先作废缓存的扫描根，
+          // 正停在 HTTP 视图就立刻重扫，否则等下次进入该视图时再扫。
+          http.invalidateScan();
+          void tree.toggleViewSetting("respectGitignore").then(() => {
+            if (state.mainView === "http") void http.rescan({ force: true });
+          });
         },
         isDisabled,
       );
@@ -716,6 +872,8 @@ export function mount(
     runToolbar = renderRunToolbar(wrap, {
       t,
       getState: () => {
+        // HTTP 请求视图里发送就在每条请求上点，顶栏这套运行控件在这里没有落点，整组收起。
+        if (state.mainView === "http") return { commands: [] as FlatRunCommand[], ready: true, isCommandRunning: () => false };
         const commands = mergeRunCommands(flattenCommands(state.projectCommands), state.manualScriptCommands);
         return {
           commands,
@@ -791,11 +949,12 @@ export function mount(
       parent.appendChild(btn);
       return btn;
     };
-    // 顶部主视图二选一：文件 / Git 变更（必有其一激活，不可都关）。
+    // 顶部主视图三选一：文件 / Git 变更 / HTTP 请求（必有其一激活，不可都关）。
     const sidebarTop = el("div", "sfe-sidebar-top");
     sidebar.appendChild(sidebarTop);
     const fileViewBtn = sidebarBtn(sidebarTop, "folderOpen", t("sidebar.files", "文件"), () => switchMainView("files"));
     const gitViewBtn = sidebarBtn(sidebarTop, "folderGit2", t("sidebar.git", "Git 变更"), () => switchMainView("git"));
+    const httpViewBtn = sidebarBtn(sidebarTop, "globe", t("sidebar.http", "REST 请求"), () => switchMainView("http"));
     // 底部按钮组（运行 / 终端）：靠 margin-top:auto 推到底部，与顶部主视图入口分开。
     const sidebarBottom = el("div", "sfe-sidebar-bottom");
     sidebar.appendChild(sidebarBottom);
@@ -866,6 +1025,7 @@ export function mount(
       sidebarBottom,
       fileViewBtn,
       gitViewBtn,
+      httpViewBtn,
       runSideBtn,
       runSideDot,
       terminalSideBtn,
@@ -883,28 +1043,37 @@ export function mount(
       previewPane: null,
       gitPane: null,
       gitPreviewPane: null,
+      httpPane: null,
+      httpPreviewPane: null,
     };
     return layoutEls;
   }
 
   /**
-   * 切换主视图（文件 / Git 变更）——二选一，必有其一激活，不可都关。
+   * 切换主视图（文件 / Git 变更 / HTTP 请求）——三选一，必有其一激活，不可都关。
    * @description 手动切换后仅改 state.mainView 并重建主视图；mainView 不持久化，
    *   每次重新打开面板从「文件」开始。
-   * @param {"files"|"git"} view 目标主视图
+   * @param view 目标主视图；"files" / "git" / "http" 之一
    */
   async function switchMainView(view: PanelState["mainView"]) {
-    if (disposed || (view !== "files" && view !== "git")) return;
+    if (disposed || (view !== "files" && view !== "git" && view !== "http")) return;
     if (state.mainView === view) return;
+    // 离开 HTTP 视图前先把缓冲里的改动落盘：它是「焦点移开就写回」的延伸——
+    // 正文缓冲会被别的视图的预览覆盖，等切回来时原文已经找不回来了。
+    if ((state.mainView === "http" || isActiveHttpDocument()) && view !== "http") await http.commit();
+    if (disposed) return;
     state.mainView = view;
     if (view === "files") {
       // 离开 Git 变更视图：清空查看器状态，否则再切回时会残留上次打开的比对。
       state.gitPreview = null;
       state.gitSelected = null;
     }
+    if (view === "http") http.syncWithSelection();
     render();
     // 首次进入 Git 变更视图且尚未拉取过状态时补齐数据。
     if (view === "git" && !state.gitStatus) await git.refreshGitViewStatus();
+    // 首次进入 HTTP 请求视图时扫一遍工作区的请求文件（同根只扫一次）。
+    if (view === "http") await http.rescan();
   }
 
   /** 同步左侧入口栏选中态与运行中圆点。 */
@@ -912,6 +1081,7 @@ export function mount(
     if (!layoutEls) return;
     if (layoutEls.fileViewBtn) layoutEls.fileViewBtn.classList.toggle("active", state.mainView === "files");
     if (layoutEls.gitViewBtn) layoutEls.gitViewBtn.classList.toggle("active", state.mainView === "git");
+    if (layoutEls.httpViewBtn) layoutEls.httpViewBtn.classList.toggle("active", state.mainView === "http");
     if (layoutEls.runSideBtn) layoutEls.runSideBtn.classList.toggle("active", state.bottomView === "run");
     if (layoutEls.terminalSideBtn) layoutEls.terminalSideBtn.classList.toggle("active", state.bottomView === "terminal");
     if (layoutEls.runSideDot) layoutEls.runSideDot.hidden = terminal.runningCount() <= 0;
@@ -998,11 +1168,20 @@ export function mount(
     layoutEls!.previewPane = null;
     layoutEls!.gitPane = null;
     layoutEls!.gitPreviewPane = null;
+    layoutEls!.httpPane = null;
+    layoutEls!.httpPreviewPane = null;
 
     if (state.mainView === "git") {
       buildGitView(mainView);
       renderGitPane();
       renderGitPreview();
+      syncGitIndicator();
+      return;
+    }
+    if (state.mainView === "http") {
+      buildHttpView(mainView);
+      renderHttpPane();
+      renderHttpPreview();
       syncGitIndicator();
       return;
     }
@@ -1108,9 +1287,9 @@ export function mount(
         canList: true,
         canRead: true,
         onToggleDir: (entry) => tree.toggleDir(entry),
-        onSelectFile: (entry) => preview.previewFile(entry),
+        onSelectFile: (entry) => openFileFromExplorer(entry),
         onContextMenu: handleContextMenu,
-        onOpenFileEdit: (entry) => preview.handleOpenFileEdit(entry),
+        onOpenFileEdit: (entry) => openFileFromExplorer(entry),
         onSelectionChange: (change) => tree.handleTreeSelectionChange(change),
         onTreeKeyDown: (event, visiblePaths) => tree.handleTreeKeyDown(event, visiblePaths),
         t,
@@ -1148,7 +1327,14 @@ export function mount(
       info.appendChild(el("span", "sfe-search-result-name", result.name));
       info.appendChild(el("span", "sfe-search-result-path", result.relativePath || ""));
       head.appendChild(info);
-      head.addEventListener("click", () => preview.handleSearchResultOpen(result));
+      head.addEventListener("click", () => {
+        if (isHttpRestFileName(result.name)) {
+          // 搜索结果没有可靠的请求块定位；HTTP 文件打开后交给 GUI/文本切换器处理。
+          void openFileFromExplorer(result);
+          return;
+        }
+        void preview.handleSearchResultOpen(result);
+      });
       row.appendChild(head);
       // 内容匹配行：点击直接跳转到对应行号。
       for (const match of result.lineMatches || []) {
@@ -1156,7 +1342,14 @@ export function mount(
         lineEl.title = `${result.path}:${match.line}`;
         lineEl.appendChild(el("span", "sfe-search-line-no", String(match.line)));
         lineEl.appendChild(el("span", "sfe-search-line-text", match.text || ""));
-        lineEl.addEventListener("click", () => preview.handleSearchResultOpen(result, match.line));
+        lineEl.addEventListener("click", () => {
+          if (isHttpRestFileName(result.name)) {
+            // HTTP 文本行可能是请求体或注释，不能把普通代码行号硬套到请求 GUI。
+            void openFileFromExplorer(result);
+            return;
+          }
+          void preview.handleSearchResultOpen(result, match.line);
+        });
         row.appendChild(lineEl);
       }
       list.appendChild(row);
@@ -1164,18 +1357,26 @@ export function mount(
     parent.appendChild(list);
   }
 
-  // 局部：普通文件预览
-  function renderPreview() {
-    if (disposed || !layoutEls || !layoutEls.previewPane) return;
-    renderCodeViewer(layoutEls.previewPane, {
+  // 局部：普通文件预览（代码查看器本体，落点由调用方给）
+  function drawCodeViewer(pane: HTMLElement | null) {
+    if (disposed || !pane) return;
+    const inHttpView = state.mainView === "http" || isActiveHttpDocument();
+    renderCodeViewer(pane, {
       preview: state.preview,
       rootPath: state.rootPath,
       copied: state.copied,
       onCopy: () => preview.handleCopyCode(),
       onSetMode: (mode) => preview.setPreviewMode(mode),
       onToggleEdit: (next) => preview.setPreviewEditable(next),
-      onEditInput: (value) => preview.handlePreviewInput(value),
-      onSave: () => preview.handleSavePreview(),
+      onEditInput: (value) => {
+        preview.handlePreviewInput(value);
+        // 只有 HTTP 视图把「正文动过」记进自己的脏标记，文件视图的保存节奏一字不改。
+        if (inHttpView) http.markDirty();
+      },
+      // HTTP 视图里的保存（工具栏按钮）与失焦写盘走同一条路：脏标记只有控制器能清，
+      // 直连保存通道会留下一个清不掉的假「未保存」。文件视图的节奏一字不改。
+      onSave: inHttpView ? () => void http.commit() : () => preview.handleSavePreview(),
+      onEditBlur: inHttpView ? () => void http.commit() : undefined,
       onRevealFile: () => preview.handlePreviewRevealFile(),
       onCopyPath: () => preview.handlePreviewCopyPath(),
       onCopyRelativePath: () => preview.handlePreviewCopyRelativePath(),
@@ -1185,10 +1386,34 @@ export function mount(
       // 右键「运行」分组的上限：与顶栏下拉同一份列表，菜单不得多出顶栏没有的命令。
       runMenuCommands: () => mergeRunCommands(flattenCommands(state.projectCommands), state.manualScriptCommands),
       onRunCommand: (command) => terminal.handleRunCommand(command),
+      // HTTP 请求文件：每条请求那一行的行号槽给一个 ▶，点了就发这一条（同 package.json 的 scripts）。
+      gutterMarkers: inHttpView
+        ? () =>
+            http
+              .runMarkers()
+              .map((marker) => ({
+                line: marker.line,
+                title: `${t("http.runRequest", "发送此请求")}: ${marker.title}`,
+                onRun: () => void http.send(marker.index),
+              }))
+        : undefined,
       editable: state.preview.editable === true,
       saving: state.preview.saveState === "saving",
+      // HTTP 视图没选文件时右侧也是这块查看器，空态要给一句「点左边」而不是一片白。
+      emptyHint: inHttpView ? t("http.previewHint", "点击左侧的请求文件查看内容") : undefined,
       t,
     });
+  }
+
+  // 局部：普通文件预览。HTTP 请求文件无论从独立列表还是文件树打开，都落到同一套请求查看器。
+  function renderPreview() {
+    if (disposed || !layoutEls) return;
+    if (state.mainView === "http" || isActiveHttpDocument()) {
+      renderHttpPreview();
+      return;
+    }
+    // 同一个 state.preview 通道，落点随主视图走。
+    drawCodeViewer(layoutEls.previewPane);
   }
 
   // Git 变更视图选项（提交框与列表共用）
@@ -1279,6 +1504,53 @@ export function mount(
     });
   }
 
+  // 构建 HTTP 请求视图骨架（左列表 + 右查看器）
+  function buildHttpView(mainView: HTMLElement) {
+    const httpPane = el("div", "sfe-http-pane");
+    // 空白区右键：与文件树同一套工作区级菜单兜底，否则浏览器原生菜单会冒出来。
+    httpPane.addEventListener("contextmenu", (event) => {
+      const target = event.target as Element | null;
+      if (target && typeof target.closest === "function" && target.closest(".sfe-http-row")) return;
+      event.preventDefault();
+      state.contextMenu = { entry: null, x: event.clientX, y: event.clientY };
+      renderContextMenu();
+    });
+    mainView.appendChild(httpPane);
+    layoutEls!.httpPane = httpPane;
+
+    // 查看器与文件视图共用 state.preview 通道（请求文件首先是文本文件），
+    // 因此这里另给一个容器，让 renderPreview 按 mainView 选落点。
+    const httpPreviewPane = el("div", "sfe-preview-pane");
+    mainView.appendChild(httpPreviewPane);
+    layoutEls!.httpPreviewPane = httpPreviewPane;
+  }
+
+  // 局部：请求文件列表
+  function renderHttpPane() {
+    if (disposed || !layoutEls || !layoutEls.httpPane) return;
+    renderHttpList(layoutEls.httpPane, {
+      files: state.httpFiles,
+      scanning: state.httpScanning,
+      truncated: state.httpTruncated,
+      failedCount: state.httpScanFailed,
+      selectedPath: state.httpSelected,
+      collapsed: state.httpCollapsed,
+      onOpenFile: (file) => {
+        void http.openFile(file);
+      },
+      onToggleCollapse: (relPath) => http.toggleCollapse(relPath),
+      onRefresh: () => {
+        void http.rescan({ force: true });
+      },
+      // 右键：与文件树/Git 列表同一套菜单通道（定位 + 目标），选项见 renderContextMenu 的 httpFile 分支。
+      onContextMenu: (file, event) => {
+        state.contextMenu = { entry: null, httpFile: file, x: event.clientX, y: event.clientY };
+        renderContextMenu();
+      },
+      t,
+    });
+  }
+
   // 局部：Git 右侧文件查看器（差异 / 内容）
   function renderGitPreview() {
     if (disposed || !layoutEls || !layoutEls.gitPreviewPane) return;
@@ -1304,9 +1576,145 @@ export function mount(
     renderGitViewSwitchInToolbar();
   }
 
+  // 构建「GUI / 文本」分段控件（工具栏用，与 Git 的「差异 / 内容」同款外观：图标 + 文字）
+  function buildHttpViewSwitch(current: HttpViewerMode) {
+    const switcher = el("div", "sfe-md-mode-switch-inline");
+    switcher.setAttribute("role", "group");
+    const segments = [
+      { key: "gui", icon: "gui", label: t("http.modeGui", "GUI") },
+      { key: "text", icon: "code", label: t("http.modeText", "文本") },
+    ] as const;
+    for (const seg of segments) {
+      const isActive = seg.key === current;
+      const btn = el("button", "sfe-md-mode-btn" + (isActive ? " active" : ""));
+      btn.type = "button";
+      btn.title = seg.label;
+      btn.setAttribute("aria-label", seg.label);
+      btn.setAttribute("aria-pressed", isActive ? "true" : "false");
+      btn.appendChild(createActionIcon(seg.icon, 13));
+      // 与 Git 那组一样带上文字：只画图标的控件，用户得先猜 Rows3 是「GUI」还是「分栏」。
+      btn.appendChild(el("span", "sfe-md-mode-label", seg.label));
+      if (!isActive) btn.addEventListener("click", () => http.setMode(seg.key));
+      switcher.appendChild(btn);
+    }
+    return switcher;
+  }
+
+  // 同步工具栏中的「GUI / 文本」切换：独立 HTTP 视图和文件树直接打开请求文件都可用。
+  function renderHttpViewSwitchInToolbar() {
+    if (!layoutEls || !layoutEls.gitViewSwitchWrap) return;
+    const wrap = layoutEls.gitViewSwitchWrap;
+    // 与 Git 的切换共用容器：同一时刻只可能有一个视图需要它。
+    const terminalOwnsRight = state.toolDock === "right" && (state.bottomView === "run" || state.bottomView === "terminal");
+    const httpDocumentOpen = state.mainView === "http" || isActiveHttpDocument();
+    if (!httpDocumentOpen || !state.httpFile || !isRightPanelFullscreen() || terminalOwnsRight) {
+      // 与 Git 分支同规矩：隐藏时把旧节点清掉，否则每次渲染都往这个共用容器里续一批不可见按钮。
+      if (wrap.firstChild) wrap.replaceChildren();
+      wrap.hidden = true;
+      return;
+    }
+    wrap.hidden = false;
+    wrap.replaceChildren(buildHttpViewSwitch(state.httpMode));
+  }
+
+  // 局部：HTTP 右侧查看器（GUI 卡片 / 文本＝这篇文件的代码查看器）。
+  // 文件树直接打开时复用普通预览槽，独立 HTTP 视图则使用自己的右侧槽。
+  function renderHttpPreview() {
+    if (disposed || !layoutEls) return;
+    const pane = state.mainView === "http" ? layoutEls.httpPreviewPane : layoutEls.previewPane;
+    if (!pane) return;
+    // 上一轮若是文本态，左分栏里挂过查看器的虚拟列表与视口观察者：容器马上要被换掉，
+    // 先断开它们，否则每次切形态都会漏一份（观察者会拖住整块可视行与闭包里的全文）。
+    disposeViewerViewport(pane.querySelector<HTMLElement>(".sfe-http-text-code"));
+    if (state.httpMode === "gui" && state.httpFile) {
+      renderHttpRequestPanel(pane, {
+        file: state.httpFile,
+        getForm: (index) => {
+          const stored = state.httpForms.get(index);
+          if (stored) return stored;
+          const request = state.httpFile ? state.httpFile.requests[index] : null;
+          // 表单与解析结果不同源时（刚重扫过）按当前请求摊一份初值，而不是把 undefined 递进组件。
+          return request ? formValuesOfRequest(request) : { method: "GET", url: "", headers: [], body: null };
+        },
+        responses: state.httpResponses,
+        runningIndex: state.httpRunning,
+        expanded: state.httpExpanded,
+        collapsedBodies: state.httpBodyCollapsed,
+        onToggle: (key) => http.toggleExpand(key),
+        onToggleBody: (index, open) => http.setRequestBodyOpen(index, open),
+        dirty: http.isDirty(),
+        // 保存走控制器：它才知道「保存成功要清脏标记」这件事（直连保存通道会留下
+        // 一个清不掉的假「未保存」，直到切文件）。
+        onSave: () => void http.commit(),
+        onReload: () => void http.discardChanges(),
+        onFormChange: (index, values) => http.handleFormChange(index, values),
+        onCommit: () => void http.commit(),
+        onSend: (index) => void http.send(index),
+        onPromptChange: (index, name, value) => http.handlePromptChange(index, name, value),
+        getPromptValue: (index, name) => http.promptValue(index, name),
+        t,
+      });
+      renderHttpViewSwitchInToolbar();
+      return;
+    }
+    // 文本态就是这篇文件本来的代码查看器（行号、高亮、复制、右键菜单一个不少），
+    // 只多了行号槽上的 ▶ 与「失焦即存盘」；重读文件之后也要停在编辑态。
+    // 右侧再分一栏摆「请求体 + 响应」（对标上游的 Exchange 预览，也像 Git 的 split 比对）：
+    // 文本态没有别的地方放结果，不分栏就只能靠跳去 GUI 看，那正是之前「点了没反应」的来源。
+    if (state.httpMode === "text") http.ensureEditable();
+    // 代码模式：没发过请求时不给右分栏——空着摆一块「点 ▶ 发送」的占位纯属碍眼，
+    // 代码查看器独占整幅宽度。发出请求后（httpResultIndex 非空）才分出右栏摆结果。
+    if (http.resultIndex() === null) {
+      const codeOnly = el("div", "sfe-http-text-code");
+      pane.replaceChildren(codeOnly);
+      drawCodeViewer(codeOnly);
+      renderHttpViewSwitchInToolbar();
+      return;
+    }
+    const split = el("div", "sfe-http-text-split");
+    const codePane = el("div", "sfe-http-text-code");
+    const resultPane = el("div", "sfe-http-text-result");
+    split.appendChild(codePane);
+    split.appendChild(resultPane);
+    pane.replaceChildren(split);
+    drawCodeViewer(codePane);
+    renderHttpResultPane(resultPane);
+    renderHttpViewSwitchInToolbar();
+  }
+
+  /**
+   * 渲染文本态右分栏：最近一次发送的请求体与响应。
+   * @param host 目标容器；缺省时按当前布局里的右分栏找
+   * @description 只重建这一栏。发送期间与发送完成后都只刷这里，
+   *   左边的代码编辑区（含光标、选区、滚动位置）一动不动。
+   */
+  function renderHttpResultPane(host?: HTMLElement | null) {
+    if (disposed) return;
+    const previewPane =
+      layoutEls && (state.mainView === "http" ? layoutEls.httpPreviewPane : layoutEls.previewPane);
+    const target = host || (previewPane ? previewPane.querySelector<HTMLElement>(".sfe-http-text-result") : null);
+    if (!target) return;
+    target.replaceChildren();
+    const index = http.resultIndex();
+    const result = index === null ? null : state.httpResponses.get(index);
+    if (index === null || !result) {
+      target.appendChild(
+        el("div", "sfe-http-empty", t("http.resultHint", "点左边行号上的 ▶ 发送，请求体和响应会显示在这里"))
+      );
+      return;
+    }
+    const request = state.httpFile ? state.httpFile.requests[index] : null;
+    const name = request ? request.title || request.name || request.url : "";
+    target.appendChild(
+      el("div", "sfe-http-result-title", `${t("http.requestN", "请求 {{n}}", { n: index + 1 })}${name ? ` · ${name}` : ""}`)
+    );
+    renderHttpResult(target, result, t);
+  }
+
   // 局部：按当前视图刷新「正在使用的」查看器（复制按钮反馈用）
   function renderActiveViewer() {
     if (state.mainView === "git") renderGitPreview();
+    else if (state.mainView === "http") renderHttpPreview();
     else renderPreview();
   }
 
@@ -1438,10 +1846,11 @@ export function mount(
   // 首屏不被 585KB 的块拖死。
   void ensureIcons();
   void (async () => {
-    const [initialRoot, viewSettings, diffMode, commitMode, toolDock] = await Promise.all([
+    const [initialRoot, viewSettings, diffMode, httpMode, commitMode, toolDock] = await Promise.all([
       resolveRoot(),
       loadViewSettings(api),
       loadDiffViewMode(api),
+      loadHttpViewerMode(api),
       (async () => {
         try {
           if (api.storage && typeof api.storage.getJson === "function") {
@@ -1469,8 +1878,14 @@ export function mount(
     if (commitMode === "commitAndPush") state.gitCommitMode = "commitAndPush";
     if (toolDock === "right") state.toolDock = "right";
     state.diffMode = diffMode;
+    state.httpMode = httpMode;
     render();
     if (state.rootPath) {
+      // 根目录此刻才就绪（resolveRoot 是异步 IPC，侧边栏按钮早在 renderChrome 里建好了）：
+      // 用户若在这段空窗里点过「HTTP 请求」，那次 rescan 会因 rootPath 还是空串被跳过，
+      // 而 render 只重绘不扫描——列表会一直空着，直到先切去文件视图再切回来。
+      // 这里按当前视图补一次；rescan 对「同根且非扫描中」自会短路，不会重复跑。
+      if (state.mainView === "http") void http.rescan();
       await tree.loadRoot({ followups: true });
       if (disposed) return;
     }
@@ -1545,6 +1960,16 @@ export function mount(
     // 不断开就会拖住整块可视行与闭包里的全文（宿主多次重载插件时线性累积）。
     disposeViewerViewport(layoutEls && layoutEls.previewPane);
     disposeViewerViewport(layoutEls && layoutEls.gitPreviewPane);
+    // HTTP 文本态把同一个代码查看器画在自己的查看器面板上，这块也得断：漏掉它观察者与
+    // 虚拟列表会随每次重载插件线性累积。
+    disposeViewerViewport(layoutEls && layoutEls.httpPreviewPane);
+    // 文本态现在把查看器嵌在左右分栏的左栏里，挂载状态（__sfeVList / 观察者）也在那一层，
+    // 只断外层面板会漏掉它。
+    disposeViewerViewport(
+      layoutEls && layoutEls.httpPreviewPane
+        ? layoutEls.httpPreviewPane.querySelector<HTMLElement>(".sfe-http-text-code")
+        : null
+    );
     // 两个工具窗口控制器随面板销毁（xterm 实例与监听一起释放）。
     terminal.releaseWindows();
     // 随懒块注入的样式随插件一起摘除，不在宿主 head 里留残留（重挂载时 loadChunk 会重新注入）。

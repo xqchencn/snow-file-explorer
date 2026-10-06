@@ -1,0 +1,1128 @@
+/* ==========================================================================
+   Snow App File Explorer - HTTP 请求视图样式 (styles/http.css)
+   左侧请求文件列表 + 右侧查看器；双栏尺寸规则与 Git 变更视图逐字对齐，
+   100% 继承宿主主题变量，不自建配色。
+   ========================================================================== */
+
+.sfe-http-pane {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* 宿主全屏态：左侧列表收窄为侧栏宽度并固定上限，右侧查看器占满剩余空间。 */
+:root:has(.right-panel.fullscreen) .sfe-http-pane,
+:root:has(.app-shell.right-panel-fullscreen) .sfe-http-pane,
+html:has(.right-panel.fullscreen) .sfe-http-pane,
+html:has(.app-shell.right-panel-fullscreen) .sfe-http-pane {
+  width: var(--right-panel-width, 380px);
+  min-width: 340px;
+  max-width: 500px;
+  flex: none;
+  border-right: 1px solid var(--border-color, var(--border-light));
+}
+
+/* --------------------------------------------------------------------------
+   列表头部：视图名 + 文件计数 + 重新扫描
+   -------------------------------------------------------------------------- */
+.sfe-http-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 12px 4px;
+  flex-shrink: 0;
+}
+
+.sfe-http-head-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.sfe-http-head-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sfe-http-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--bg-active);
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.sfe-http-head-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm, 4px);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.1s ease, color 0.1s ease;
+}
+
+.sfe-http-head-action:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.sfe-http-head-action:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* --------------------------------------------------------------------------
+   列表主体
+   -------------------------------------------------------------------------- */
+.sfe-http-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding-bottom: 4px;
+}
+
+.sfe-http-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  /* 行是原生 button：重置掉浏览器默认的边框/底色/字体，只保留列表行自己的观感 */
+  width: 100%;
+  box-sizing: border-box;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  padding: 4px 12px;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.1s ease;
+}
+
+/* 键盘走到哪一行要看得见（鼠标点击不画框） */
+.sfe-http-row:focus-visible {
+  outline: 1px solid var(--accent-color);
+  outline-offset: -1px;
+}
+
+.sfe-http-row:hover {
+  background: var(--bg-hover);
+}
+
+.sfe-http-row.selected {
+  background: var(--bg-active);
+}
+
+.sfe-http-name {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  overflow: hidden;
+}
+
+.sfe-http-row.selected .sfe-http-name {
+  color: var(--text-primary);
+}
+
+.sfe-http-name-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 1;
+  min-width: 0;
+}
+
+.sfe-http-folder-row .sfe-http-name-text {
+  font-weight: 600;
+}
+
+.sfe-http-empty,
+.sfe-http-note {
+  padding: 12px 14px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* 空态说明行：主行说结论（没有请求文件），这行说这里是干什么的，弱一级以免喧宾夺主。 */
+.sfe-http-empty-title {
+  color: var(--text-secondary);
+}
+
+.sfe-http-empty-hint {
+  margin-top: 4px;
+  color: var(--text-muted);
+}
+
+.sfe-http-note {
+  padding: 8px 14px;
+  border-top: 1px solid var(--border-light);
+}
+
+/* ==========================================================================
+   右侧 GUI 面板：请求列表 + 聚焦中的请求工作台
+   折叠的请求是列表里的一行；展开（聚焦）的那条撑满主区，内部拆成
+   「请求构建区 / 响应区」两段各自滚动——对标 Postman 的 Request Builder / Response Viewer。
+   ========================================================================== */
+.sfe-http-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px 12px;
+  /* 撑满右侧面板高度，聚焦的请求才有「剩余空间」可用；内容超出时整体滚动 */
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.sfe-http-card {
+  display: flex;
+  flex-direction: column;
+  padding: 0 0 10px;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-md, 6px);
+  background: var(--surface-island-muted, var(--bg-secondary));
+  /* 卡片是纵向 flex 面板的 flex 子项：默认 flex-shrink:1 会在内容超高时把它「压扁」去适配
+     面板高度，再被 overflow:hidden 裁掉——表现为「没有滚动条、内容还被遮」。必须钉死不收缩，
+     让它按内容定高，由 .sfe-http-panel 统一滚动。 */
+  flex-shrink: 0;
+  transition: border-color 0.12s ease;
+}
+
+/* 聚焦中的请求：不设固定高度，内容自然向下延伸，由面板统一滚动（避免内部再套滚动条） */
+.sfe-http-card.expanded {
+  padding-bottom: 0;
+}
+
+.sfe-http-card:hover {
+  border-color: var(--border-color, var(--border-light));
+}
+
+/* 折叠态：卡片里只有头部一行，整块收紧成一行 */
+.sfe-http-card:not(.expanded) {
+  padding-bottom: 0;
+}
+
+.sfe-http-card:not(.expanded) > .sfe-http-card-head {
+  border-bottom: none;
+}
+
+/* 卡片头部带：折叠态是唯一可见行；展开态作为通栏标题条。
+   圆角靠子元素各自贴齐，不靠卡片 overflow:hidden（那会把超高内容裁掉）。 */
+.sfe-http-card-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 7px 10px;
+  background: var(--bg-hover);
+  border-bottom: 1px solid var(--border-light);
+  border-radius: var(--radius-md, 6px) var(--radius-md, 6px) 0 0;
+  flex-shrink: 0;
+}
+
+.sfe-http-card-index {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  border-radius: 9px;
+  background: var(--bg-active);
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-weight: 700;
+  font-family: var(--font-mono, monospace);
+}
+
+.sfe-http-card-name {
+  /* flex 子项默认 min-width:auto，按内容撑宽会让 ellipsis 失效、把「发送」挤出可视区 */
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+/* 卡片头整行可点：折叠箭头 + 序号 + 标题（折叠时再带上方法与地址）。 */
+.sfe-http-card-fold {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm, 4px);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sfe-http-card-fold:hover {
+  color: var(--text-primary);
+}
+
+.sfe-http-card-fold > svg {
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+.sfe-http-card-summary {
+  /* 同上：长地址在窄面板里必须能被截断，否则整行被撑出去 */
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.sfe-http-chip {
+  padding: 1px 6px;
+  border-radius: 9px;
+  font-size: 10.5px;
+  background: var(--bg-active);
+  color: var(--text-secondary);
+}
+
+.sfe-http-chip.warn {
+  background: var(--accent-amber-bg, var(--bg-active));
+  color: var(--accent-amber-text, var(--text-secondary));
+}
+
+.sfe-http-chip.unknown {
+  color: var(--text-muted);
+  border: 1px dashed var(--border-color, var(--border-light));
+  background: transparent;
+}
+
+.sfe-http-send {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  border: none;
+  border-radius: var(--radius-sm, 4px);
+  background: var(--accent-color);
+  color: var(--text-on-accent, #fff);
+  font-size: 12px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.sfe-http-send:hover:not(:disabled) {
+  filter: brightness(1.06);
+}
+
+.sfe-http-send:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* 表单控件：祖先 .sfe-container 设了 user-select:none，输入框必须显式放开，
+   否则无法用鼠标选中文字或放置光标（与 Git 提交输入框同一条坑）。 */
+.sfe-http-panel input,
+.sfe-http-panel select,
+.sfe-http-panel textarea {
+  user-select: text;
+  font-family: var(--app-font-family, var(--font-sans, inherit));
+  font-size: 12.5px;
+  color: var(--text-primary);
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color, var(--border-light));
+  border-radius: var(--radius-sm, 4px);
+  padding: 4px 7px;
+}
+
+.sfe-http-panel input:focus,
+.sfe-http-panel select:focus,
+.sfe-http-panel textarea:focus {
+  outline: none;
+  border-color: var(--accent-color);
+}
+
+/* ==========================================================================
+   聚焦中的请求：上方请求构建区 + 下方响应区。
+   整个面板只有 .sfe-http-panel 一条滚动条——各分区都不再自己滚（否则滚动条一层套一层），
+   内容自然向下延伸，滚到底就是响应末尾。
+   ========================================================================== */
+.sfe-http-builder {
+  display: flex;
+  flex-direction: column;
+  border-bottom: 1px solid var(--border-light);
+}
+
+/* 配置区（请求头 / 提示变量 / 请求体）：跟随面板滚动，不自己滚 */
+.sfe-http-builder-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px;
+}
+
+.sfe-http-response {
+  padding: 10px;
+}
+
+/* 地址行 = Omnibar：方法下拉 / 地址框 / 发送按钮 一条线，固定在构建区顶部 */
+.sfe-http-line {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-shrink: 0;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border-light);
+}
+
+/* 构建区收起时的 Omnibar：整行是一个「展开请求区」按钮（只读摘要 + 箭头），右侧留发送按钮 */
+.sfe-http-builder-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm, 4px);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sfe-http-builder-toggle:hover {
+  color: var(--text-primary);
+}
+
+.sfe-http-builder-toggle > svg {
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+.sfe-http-builder-summary {
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.sfe-http-method {
+  flex-shrink: 0;
+}
+
+.sfe-http-url {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono, monospace);
+}
+
+.sfe-http-section-title {
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* 区块标题里的行内动作（如「格式化」）：推到最右，不与标题抢视线 */
+.sfe-http-body-action {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 7px;
+  border: none;
+  border-radius: var(--radius-sm, 4px);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: 0;
+  cursor: pointer;
+  transition: background 0.1s ease, color 0.1s ease;
+}
+
+.sfe-http-body-action:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.sfe-http-headers,
+.sfe-http-prompts,
+.sfe-http-body-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.sfe-http-header-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sfe-http-header-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.sfe-http-header-name {
+  flex: 0 0 34%;
+  min-width: 0;
+  font-family: var(--font-mono, monospace);
+}
+
+.sfe-http-header-value {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono, monospace);
+}
+
+.sfe-http-header-remove,
+.sfe-http-header-add {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  height: 22px;
+  padding: 0 6px;
+  border: none;
+  border-radius: var(--radius-sm, 4px);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 11.5px;
+  flex-shrink: 0;
+}
+
+.sfe-http-header-remove:hover,
+.sfe-http-header-add:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.sfe-http-prompt-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sfe-http-prompt-label {
+  flex: 0 0 40%;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sfe-http-prompt-input {
+  flex: 1;
+  min-width: 0;
+}
+
+/* 请求体编辑器：高亮层（可着色，绝对定位铺满）+ 透明 textarea（可编辑）叠层。
+   与项目里代码编辑态（.sfe-file-viewer-edit-highlight + .sfe-file-viewer-textarea）同一套做法，
+   让请求体的 JSON 也能结构化着色，而不是一片纯文本。 */
+.sfe-http-body-editor {
+  position: relative;
+  border: 1px solid var(--border-color, var(--border-light));
+  border-radius: var(--radius-sm, 4px);
+  background: var(--bg-primary);
+  overflow: hidden;
+}
+
+.sfe-http-body-editor:focus-within {
+  border-color: var(--accent-color);
+}
+
+.sfe-http-body-highlight {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  box-sizing: border-box;
+  /* padding 必须与下方 textarea 完全一致，否则两层文字错位 */
+  padding: 4px 7px;
+  overflow: hidden;
+  pointer-events: none;
+  user-select: none;
+  font-family: var(--font-mono, monospace);
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-primary);
+}
+
+.sfe-http-hl-line {
+  min-height: 1.5em;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* textarea 层：文字透明、光标可见，正好把高亮层的颜色透出来 */
+.sfe-http-body-editor > .sfe-http-body {
+  position: relative;
+  z-index: 1;
+  display: block;
+  width: 100%;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  caret-color: var(--text-primary);
+  padding: 4px 7px;
+  font-family: var(--font-mono, monospace);
+  font-size: 12.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  overflow: auto;
+  resize: vertical;
+  min-height: 0;
+}
+
+/* 透明文字下 placeholder 会被一并弄透明，显式给回颜色 */
+.sfe-http-body-editor > .sfe-http-body::placeholder {
+  color: var(--text-muted);
+  -webkit-text-fill-color: var(--text-muted);
+}
+
+.sfe-http-hint,
+.sfe-http-variable {
+  font-size: 11px;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+/* 变量条容器：横向换行，变量多也不吃掉首屏 */
+.sfe-http-variables {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.sfe-http-variable {
+  font-family: var(--font-mono, monospace);
+  padding: 3px 8px;
+  border-radius: var(--radius-sm, 4px);
+  background: var(--bg-hover);
+  border: 1px solid var(--border-light);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sfe-http-warning {
+  font-size: 11.5px;
+  color: var(--accent-amber-text, var(--text-secondary));
+  overflow-wrap: anywhere;
+}
+
+.sfe-http-error {
+  font-size: 11.5px;
+  color: var(--accent-red-text, var(--accent-red));
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* 响应区内容：外层 .sfe-http-response 已是滚动容器，这里只负责纵向排布 */
+.sfe-http-result {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sfe-http-result-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* 结果元信息整体右对齐的复制动作：调接口最常用的收尾动作，放最顺手的位置 */
+.sfe-http-result-actions {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sfe-http-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border: 1px solid var(--border-color, var(--border-light));
+  border-radius: var(--radius-sm, 4px);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+  transition: background 0.1s ease, color 0.1s ease;
+}
+
+.sfe-http-copy:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.sfe-http-copy.copied {
+  color: var(--accent-green-text, var(--accent-green));
+  border-color: var(--accent-green, var(--border-color, var(--border-light)));
+}
+
+.sfe-http-status {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 8px;
+  border-radius: 9px;
+  font-size: 11.5px;
+  font-weight: 700;
+  font-family: var(--font-mono, monospace);
+}
+
+.sfe-http-status.ok {
+  background: var(--accent-green-bg, var(--bg-active));
+  color: var(--accent-green-text, var(--accent-green));
+}
+
+.sfe-http-status.redirect {
+  background: var(--accent-blue-bg, var(--bg-active));
+  color: var(--accent-blue-text, var(--accent-blue));
+}
+
+.sfe-http-status.client {
+  background: var(--accent-amber-bg, var(--bg-active));
+  color: var(--accent-amber-text, var(--text-secondary));
+}
+
+.sfe-http-status.server,
+.sfe-http-status.failed {
+  background: var(--accent-red-bg, var(--bg-active));
+  color: var(--accent-red-text, var(--accent-red));
+}
+
+.sfe-http-meta {
+  font-size: 11px;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.sfe-http-headers-details {
+  font-size: 11.5px;
+  color: var(--text-secondary);
+}
+
+.sfe-http-headers-details summary {
+  cursor: pointer;
+  user-select: none;
+}
+
+.sfe-http-headers-dump,
+.sfe-http-response-body {
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm, 4px);
+  background: var(--bg-primary);
+  border: 1px solid var(--border-light);
+  font-family: var(--font-mono, monospace);
+  font-size: 11.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+/* 实际发出的请求：与响应头同一套等宽展示，默认收起 */
+.sfe-http-sent {
+  font-size: 11.5px;
+  color: var(--text-secondary);
+}
+
+.sfe-http-sent summary {
+  cursor: pointer;
+  user-select: none;
+  color: var(--text-muted);
+}
+
+.sfe-http-sent-dump {
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm, 4px);
+  background: var(--bg-primary);
+  border: 1px solid var(--border-light);
+  font-family: var(--font-mono, monospace);
+  font-size: 11.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+/* 发出的请求：请求行 / 头部行（纯文本）+ 正文块（JSON 时语义着色） */
+.sfe-http-sent-line {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.sfe-http-sent-body {
+  margin-top: 6px;
+}
+
+/* 语义着色层（响应正文 / 请求体里的非 JSON 文本）：逐行高亮，等宽换行。
+   不进折叠视图、只上色的场景共用这一套。 */
+.sfe-http-response-json-hl,
+.sfe-json-hl {
+  padding: 8px 10px;
+  font-family: var(--font-mono, monospace);
+  font-size: 11.5px;
+  line-height: 1.55;
+  user-select: text;
+}
+
+.sfe-json-hl-line {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* --------------------------------------------------------------------------
+   文本态左右分栏：左边请求代码，右边请求体 + 响应（像 Git 的 split 比对）
+   -------------------------------------------------------------------------- */
+.sfe-http-text-split {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  /* 分栏用一条 1px 的底色缝：和 Git 比对的分隔线同一套视觉，不额外画边框 */
+  gap: 1px;
+  background: var(--border-color);
+}
+
+.sfe-http-text-code {
+  display: flex;
+  /* 与 .sfe-preview-pane 同向，让查看器的滚动容器继续按列撑满 */
+  flex-direction: column;
+  flex: 1 1 58%;
+  min-width: 0;
+  min-height: 0;
+  background: var(--bg-primary);
+  /* 查看器工具栏是 position: absolute，锚点必须落在左栏里：
+     否则它会锚到整块查看面板上，跑到右栏上方去。 */
+  position: relative;
+}
+
+/* 查看器的滚动容器撑满左栏；空态/图片等其它形态保持各自的高度与居中，不强行拉伸 */
+.sfe-http-text-code > .sfe-file-viewer-code-scroll,
+.sfe-http-text-code > .sfe-file-viewer-edit-scroll,
+.sfe-http-text-code > .sfe-file-viewer-image-container {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+.sfe-http-text-result {
+  flex: 1 1 42%;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  padding: 8px 10px;
+  background: var(--bg-primary);
+}
+
+.sfe-http-result-title {
+  margin-bottom: 6px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border-light);
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+/* 分栏里的响应正文不再受视口高度限制：右栏本身就是固定高度的滚动容器 */
+.sfe-http-text-result .sfe-http-response-json {
+  max-height: none;
+}
+
+.sfe-http-text-result .sfe-http-response-body,
+.sfe-http-text-result .sfe-http-headers-dump,
+.sfe-http-text-result .sfe-http-sent-dump {
+  max-height: none;
+}
+
+/* 分栏里没发过请求时的提示 */
+.sfe-http-text-result .sfe-http-empty {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+/* --------------------------------------------------------------------------
+   JSON 折叠视图：长响应逐块收起，高度随内容自适应（折叠后自然变矮）
+   -------------------------------------------------------------------------- */
+.sfe-http-response-json {
+  margin-top: 6px;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm, 4px);
+  background: var(--bg-primary);
+  /* 由面板统一滚动，这里不再自己滚（否则 JSON 里再套一层滚动条） */
+}
+
+/* 请求体 / 响应正文的折叠外壳（`<details>`）：与「响应头」「实际发出的请求」同一套外观。
+   操作型区块（请求体）默认展开、内容型区块（响应正文）默认折叠，由 TS 侧决定 open。 */
+.sfe-json-details {
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm, 4px);
+  background: var(--bg-primary);
+  font-size: 11.5px;
+  color: var(--text-secondary);
+}
+
+/* 响应正文的 details 外框已由 .sfe-http-response-json 提供，这里不再叠一层 */
+.sfe-http-response-json .sfe-json-details {
+  border: none;
+  border-radius: 0;
+  background: transparent;
+}
+
+/* 三角箭头是 <summary> 的原生 marker：一旦给它 display:flex 就会被抹掉，
+   与「响应头」「实际发出的请求」对不齐。这里只做块级布局，把右侧的「编辑」按钮浮到行尾。 */
+.sfe-json-details > summary {
+  position: relative;
+  /* 右侧留出「编辑」按钮的位置；左侧交给原生 marker，箭头才与响应头一致 */
+  padding: 4px 64px 4px 8px;
+  cursor: pointer;
+  user-select: none;
+}
+
+/* 「编辑」按钮落在 summary 里：绝对定位靠右。点它只切编辑态（JS 里挡了冒泡，不会折叠整块）。 */
+.sfe-json-edit-btn {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 7px;
+  border: 1px solid var(--border-color, var(--border-light));
+  border-radius: var(--radius-sm, 4px);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.sfe-json-edit-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+/* 请求体为空时的占位 */
+.sfe-http-body-host,
+.sfe-http-body-empty {
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+.sfe-json-view {
+  display: flex;
+  flex-direction: column;
+}
+
+.sfe-json-block,
+.sfe-json-children {
+  display: flex;
+  flex-direction: column;
+}
+
+/* 折叠态只藏子块，收尾行（`}` / `],`）照旧显示，结构一眼可见 */
+.sfe-json-node.collapsed > .sfe-json-children {
+  display: none;
+}
+
+.sfe-json-line {
+  display: flex;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 0 8px;
+  font-family: var(--font-mono, monospace);
+  font-size: 11.5px;
+  line-height: 1.55;
+  /* pre-wrap：保住缩进，同时让超长值换行，不撑出横向滚动条、也不被卡片裁掉 */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.sfe-json-line:hover {
+  background: var(--bg-hover);
+}
+
+.sfe-json-toggle,
+.sfe-json-toggle-spacer {
+  flex-shrink: 0;
+  width: 14px;
+  height: 1.55em;
+}
+
+.sfe-json-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.sfe-json-toggle:hover {
+  color: var(--text-primary);
+}
+
+/* 折叠时在起始行尾提示收起了多少行 */
+.sfe-json-ellipsis {
+  display: none;
+  color: var(--text-muted);
+}
+
+.sfe-json-node.collapsed > .sfe-json-line .sfe-json-ellipsis {
+  display: inline;
+}
+
+/* JSON 语义着色：键 / 字符串 / 数字 / 布尔 / null / 标点各一色，全部取自宿主主题变量。
+   这是 JSON 美化该有的样子——不是代码分词，是把结构分清。 */
+.sfe-json-key {
+  color: var(--accent-blue-text, var(--accent-blue, var(--text-primary)));
+}
+
+.sfe-json-string {
+  color: var(--accent-green-text, var(--accent-green, var(--text-primary)));
+}
+
+.sfe-json-number {
+  color: var(--accent-red-text, var(--accent-red, var(--text-primary)));
+}
+
+.sfe-json-boolean {
+  color: var(--accent-purple, var(--accent-color));
+  font-weight: 600;
+}
+
+.sfe-json-null {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.sfe-json-punct {
+  color: var(--text-muted);
+}
+
+.sfe-http-response-json .sfe-json-code {
+  overflow-wrap: anywhere;
+}
+
+/* 未保存改动条：贴在面板底部，保存 / 放弃都走预览通道既有的写盘动作 */
+.sfe-http-dirty {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: var(--radius-sm, 4px);
+  background: var(--surface-island, var(--bg-secondary));
+  border: 1px solid var(--border-color, var(--border-light));
+}
+
+.sfe-http-dirty-label {
+  flex: 1;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+/* 这条常驻、按状态收起：display:flex 会盖掉 [hidden]，必须显式让位。 */
+.sfe-http-dirty[hidden] {
+  display: none;
+}
+
+.sfe-http-dirty-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 9px;
+  border: 1px solid var(--border-color, var(--border-light));
+  border-radius: var(--radius-sm, 4px);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.sfe-http-dirty-btn.primary {
+  background: var(--accent-color);
+  border-color: transparent;
+  color: var(--text-on-accent, #fff);
+}
+
+/* 只给次按钮换底色：`.primary` 与 `:hover` 特异性相同，下面这条若不加 :not()，
+   主按钮一悬停就被刷成次按钮外观（强调色没了）。 */
+.sfe-http-dirty-btn:not(.primary):hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.sfe-http-dirty-btn.primary:hover {
+  filter: brightness(1.06);
+}

@@ -3,7 +3,9 @@
  * @description 视图层不直接 import Prism。块加载完成前退回纯文本，加载后只刷新当前视口。
  */
 
-import { shouldHighlight } from "./highlight-policy.ts";
+import { shouldHighlight, measureText, MAX_HIGHLIGHT_LEN, MAX_HIGHLIGHT_LINES } from "./highlight-policy.ts";
+import { escapeHtml } from "../utils/dom.ts";
+import { isBasicHighlightExt, basicHighlightCodeHtml } from "./syntax-basic.ts";
 import { loadChunk } from "../services/lazy-chunk.ts";
 
 /** 懒加载高亮块（chunks/highlighter.js）暴露的接口，单测可直接注入同一形状。 */
@@ -60,8 +62,22 @@ export function ensureHighlighter(): Promise<HighlighterModule | null> {
  * @param code 源码
  * @param ext 扩展名
  * @returns 高亮 HTML；不可用时为空串
+ * @description 例外：`.http` / `.rest` 的着色只靠正则、不需要 Prism，由首屏内置着色器
+ *   **同步**完成——否则懒加载块一旦没就绪，http 文件里的 JSON 正文就整篇无色。
  */
 export function highlightCodeHtml(code: string, ext: string): string {
+  const raw = String(code || "");
+  if (!raw) return "";
+  // http / rest 走首屏同步通道：不依赖高亮块是否到达。
+  if (isBasicHighlightExt(ext)) {
+    // 关键：不能沿用 shouldHighlight —— 它含 `单行超长即熔断` 这条规则（为 Prism 防正则回溯而设）。
+    // http/rest 是**行级自足**的纯正则着色，一行超长只该跳过那一行（见 basicHighlightCodeHtml），
+    // 若让它连累整篇，压缩成一行的 JSON / 超长 URL 就会把整个文件变成一片白。
+    // 整篇熔断只看总字符数与行数这两条真正的体量上限。
+    const measured = measureText(raw);
+    if (measured.length > MAX_HIGHLIGHT_LEN || measured.lines > MAX_HIGHLIGHT_LINES) return escapeHtml(raw);
+    return basicHighlightCodeHtml(raw, ext);
+  }
   if (!highlighterReady()) return "";
   // 上面的 highlighterReady 已保证 installed 非空（类型层面无法由函数调用推导，故显式断言）。
   if (installed!.shouldHighlight && !installed!.shouldHighlight(code)) return "";

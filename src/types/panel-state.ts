@@ -69,3 +69,12 @@ export type TranslateFn = (
  * - `split`：左右两栏配对。
  */
 export type DiffViewMode = "unified" | "split";
+
+/**
+ * HTTP 请求文件的查看形态。
+ * - `gui`：每条请求一张卡片（方法 / 地址 / 头部表 / 请求体 / 发送 / 响应）。
+ * - `text`：走代码查看器看文件原文，可编辑可保存。
+ * @description 与 `git` 的「差异 / 内容」、Markdown 的「预览 / 代码」同属查看器二级切换，
+ *   持久化开关在 `services/settings.ts`。
+ */
+export type HttpViewerMode = "gui" | "text";

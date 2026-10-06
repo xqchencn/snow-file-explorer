@@ -26,10 +26,10 @@ export type ChunkModuleMap = {
 
 const cache: Map<string, Promise<LazyChunkModule | null>> = new Map();
 
-/** 随块注入的样式（其余样式仍在首屏 index.css）：块没加载就不该为这些规则付解析成本。 */
+/** 随块注入的样式（其余样式仍在首屏 index.css）：块没加载就不该为这些规则付解析成本。
+    高亮块没有随块样式——syntax.css 的 token 配色作用在首屏 DOM 上，已在 index.css 里。 */
 const CHUNK_CSS: Partial<Record<LazyChunkName, string>> = {
   terminal: "terminal.css",
-  highlighter: "highlighter.css",
 };
 
 /** 本会话已读到的块样式文本（键 = 样式文件名）：卸载摘除样式后，重挂载可凭它重新注入。 */

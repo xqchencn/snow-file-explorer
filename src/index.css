@@ -10,7 +10,12 @@
 @import "./styles/markdown.css";
 @import "./styles/menu.css";
 @import "./styles/git-view.css";
+@import "./styles/http.css";
 @import "./styles/diff.css";
 @import "./styles/run.css";
-/* xterm.css / syntax.css 不在这里：它们的 DOM 只可能在对应懒块到达后才存在，
-   改为随块注入（build.js + lazy-chunk.ts），首屏少背约 23KB 阻塞样式。 */
+@import "./styles/syntax.css";
+/* xterm.css 不在这里：终端 DOM 只可能在终端懒块到达后才存在，随块注入即可。
+   syntax.css 必须留在首屏：token 配色作用于 .sfe-file-viewer-code / .sfe-diff-scroll，
+   而这些容器是首屏 DOM（文本态代码查看器、编辑态高亮层），并不依赖高亮块先到达。
+   曾把它也塞进按需块，后果是「块样式没注入 → 全站代码零着色」，且因 ensureHighlighter
+   一旦 ready 就不再走 loadChunk，卸载摘除样式后永远补不回来。 */

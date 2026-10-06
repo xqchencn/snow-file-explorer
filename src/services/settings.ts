@@ -5,7 +5,7 @@
  */
 
 import type { PluginStorageApi } from "../types/plugin-runtime.ts";
-import type { DiffViewMode } from "../types/panel-state.ts";
+import type { DiffViewMode, HttpViewerMode } from "../types/panel-state.ts";
 
 const STORAGE_KEY = "viewSettings";
 
@@ -144,3 +144,41 @@ export function saveDiffViewMode(api: SettingsRuntimeApi | null, mode: DiffViewM
 }
 
 // 差异范围固定显示完整文件，不再持久化范围切换偏好。
+
+const HTTP_MODE_KEY = "httpViewerMode";
+
+/**
+ * 读取 HTTP 请求文件的查看形态偏好（gui / text），默认 gui
+ * @param api 宿主插件运行时 API
+ * @returns 已持久化的形态；值非法或未持久化时为 gui
+ */
+export async function loadHttpViewerMode(api: SettingsRuntimeApi | null): Promise<HttpViewerMode> {
+  try {
+    if (api && api.storage && typeof api.storage.getJson === "function") {
+      // 同上：fallback 必填，undefined→null 不改变假值判定。
+      const saved: unknown = await api.storage.getJson<unknown>(HTTP_MODE_KEY, null);
+      if (saved === "text" || saved === "gui") return saved;
+    }
+  } catch (err) {
+    console.warn("[FileExplorer] 读取 HTTP 查看形态失败:", err);
+  }
+  return "gui";
+}
+
+/**
+ * 保存 HTTP 请求文件的查看形态偏好（尽力而为，不抛异常）
+ * @param api 宿主插件运行时 API
+ * @param mode 查看形态
+ */
+export function saveHttpViewerMode(api: SettingsRuntimeApi | null, mode: HttpViewerMode): void {
+  try {
+    if (api && api.storage && typeof api.storage.setJson === "function") {
+      // 同 setDiffViewMode：拒绝必须在 .catch 里落地，外层同步 try 抓不到异步失败。
+      api.storage.setJson(HTTP_MODE_KEY, mode === "text" ? "text" : "gui").catch((err) => {
+        console.warn("[FileExplorer] 保存 HTTP 查看形态失败:", err);
+      });
+    }
+  } catch (err) {
+    console.warn("[FileExplorer] 保存 HTTP 查看形态失败:", err);
+  }
+}

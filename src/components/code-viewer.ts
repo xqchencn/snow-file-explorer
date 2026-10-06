@@ -16,6 +16,7 @@ import {
 } from "./highlight-policy.ts";
 import type { MeasuredText } from "./highlight-policy.ts";
 import { ensureHighlighter, highlighterReady, highlightCodeHtml } from "./highlight-client.ts";
+import { isBasicHighlightExt } from "./syntax-basic.ts";
 import { createVirtualList } from "./virtual-list.ts";
 import { createActionIcon } from "../icons/action-icons.ts";
 import { resolveMarkdownAssetPath, resolveProxiedImageSrc } from "../services/markdown-asset.ts";
@@ -102,15 +103,18 @@ export function disposeViewerViewport(bodyEl: HTMLElement | null | undefined): v
  * @description 与 highlight-policy 的 shouldVirtualize 逐条件等价（同阈值、同比较符），
  *   只是把 measureText 的全文扫描留给调用方做一次。
  * @param measured 文本体量事实
+ * @param ext 扩展名；http/rest 时豁免单行熔断（见下）
  * @returns 是否改用虚拟列表渲染
  */
-function shouldVirtualizeMeasured(measured: MeasuredText): boolean {
+function shouldVirtualizeMeasured(measured: MeasuredText, ext: string): boolean {
   if (!measured.length) return false;
-  return (
-    measured.length > MAX_HIGHLIGHT_LEN ||
-    measured.lines > VIRTUAL_LINE_THRESHOLD ||
-    measured.maxLineLen > MAX_HIGHLIGHT_LINE_LEN
-  );
+  if (measured.length > MAX_HIGHLIGHT_LEN) return true;
+  if (measured.lines > VIRTUAL_LINE_THRESHOLD) return true;
+  // 单行熔断是为 Prism 防正则回溯而设，对 http/rest 完全不适用：
+  // 它们是行级自足的纯正则着色，超长行只该跳过那一行（basicHighlightCodeHtml 内部已按
+  // MAX_BASIC_LINE_LEN 单独跳过），一行压缩 JSON 不该把整篇拖成虚拟列表 / 纯文本。
+  if (isBasicHighlightExt(ext)) return false;
+  return measured.maxLineLen > MAX_HIGHLIGHT_LINE_LEN;
 }
 
 /**
@@ -118,15 +122,15 @@ function shouldVirtualizeMeasured(measured: MeasuredText): boolean {
  * @description 与 highlight-policy 的 shouldHighlight 逐条件等价；上限即只读熔断上限，
  *   编辑态不另设更紧的阈值（见 highlight-policy 顶部不变量说明）。
  * @param measured 文本体量事实
+ * @param ext 扩展名；http/rest 时豁免单行熔断（见 shouldVirtualizeMeasured 说明）
  * @returns 是否应当做整篇高亮
  */
-function shouldHighlightMeasured(measured: MeasuredText): boolean {
+function shouldHighlightMeasured(measured: MeasuredText, ext: string): boolean {
   if (!measured.length) return false;
-  return !(
-    measured.length > MAX_HIGHLIGHT_LEN ||
-    measured.lines > MAX_HIGHLIGHT_LINES ||
-    measured.maxLineLen > MAX_HIGHLIGHT_LINE_LEN
-  );
+  if (measured.length > MAX_HIGHLIGHT_LEN) return false;
+  if (measured.lines > MAX_HIGHLIGHT_LINES) return false;
+  if (isBasicHighlightExt(ext)) return true;
+  return measured.maxLineLen <= MAX_HIGHLIGHT_LINE_LEN;
 }
 
 /**
@@ -135,12 +139,15 @@ function shouldHighlightMeasured(measured: MeasuredText): boolean {
  *   整篇长度不超过单行上限时最长行必然也不超，无需再逐字符重扫全文。
  * @param source 当前文本
  * @param lineCount source 的行数（按 \n 计，与 measureText 同口径）
+ * @param ext 扩展名；http/rest 时豁免单行熔断（同 shouldHighlightMeasured）
  * @returns 是否应当做整篇高亮
  */
-function canHighlightByParts(source: string, lineCount: number): boolean {
+function canHighlightByParts(source: string, lineCount: number, ext: string): boolean {
   if (!source.length) return false;
   if (lineCount > MAX_HIGHLIGHT_LINES) return false;
   if (source.length > MAX_HIGHLIGHT_LEN) return false;
+  // http/rest 行级自足：总长 / 行数没超就整篇上色，不再为最长行多扫一遍全文。
+  if (isBasicHighlightExt(ext)) return true;
   if (source.length <= MAX_HIGHLIGHT_LINE_LEN) return true;
   return shouldHighlight(source);
 }
@@ -368,6 +375,14 @@ export type CodeViewerOptions = {
   runMenuCommands?: () => FlatRunCommand[];
   /** 运行命令回调 (command)。 */
   onRunCommand?: (command: FlatRunCommand) => void;
+  /**
+   * 行号槽上额外的可点标记（HTTP 请求行前的 ▶）。
+   * @description 由装配层按行给出，查看器不认识它点的是什么，只知道往哪一行挂、点了叫谁。
+   *   与 package.json 的 scripts ▶ 同一条行号槽、同一套样式。
+   */
+  gutterMarkers?: () => ViewerGutterMarker[];
+  /** 编辑文本框失焦回调；缺省时失焦什么都不做（文件视图仍靠保存按钮落盘）。 */
+  onEditBlur?: () => void;
   /** 当前是否处于编辑状态；出处 index.js 的 `state.preview.editable`，默认 false。 */
   editable?: boolean;
   /** 是否正在保存；出处 index.js 的 `state.preview.saveState === "saving"`，默认 false。 */
@@ -376,6 +391,20 @@ export type CodeViewerOptions = {
   emptyHint?: string;
   /** 本地化翻译函数。 */
   t: TranslateFn;
+};
+
+/**
+ * 行号槽上的一个可点标记。
+ * @description 行号是 1 基（与行号槽显示一致）；`title` 同时用作悬停提示与无障碍名，
+ *   `onRun` 由装配层闭包携带它自己的语义（请求下标等），查看器只负责调用。
+ */
+export type ViewerGutterMarker = {
+  /** 所在行号（1 基）。 */
+  line: number;
+  /** 悬停提示文字。 */
+  title: string;
+  /** 点击回调。 */
+  onRun: () => void;
 };
 
 /**
@@ -399,6 +428,25 @@ function createGutterRunButton(
     event.preventDefault();
     event.stopPropagation();
     if (typeof onRunCommand === "function") onRunCommand(command);
+  });
+  return btn;
+}
+
+/**
+ * 构造行号槽上的通用标记按钮（与 npm script 的 ▶ 同款外观与同款点击抑制）。
+ * @param marker 标记（行号 / 提示 / 回调）
+ * @returns 标记按钮
+ */
+function createGutterMarkerButton(marker: ViewerGutterMarker): HTMLButtonElement {
+  const btn = el("button", "sfe-file-viewer-gutter-run");
+  btn.type = "button";
+  btn.title = marker.title;
+  btn.setAttribute("aria-label", marker.title);
+  btn.appendChild(createActionIcon("play", 14));
+  btn.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    marker.onRun();
   });
   return btn;
 }
@@ -937,6 +985,8 @@ export function renderCodeViewer(
     runCommands,
     runMenuCommands,
     onRunCommand,
+    gutterMarkers,
+    onEditBlur,
     editable = false,
     saving = false,
     emptyHint,
@@ -953,6 +1003,11 @@ export function renderCodeViewer(
   const prevBinding = bodyEl[VIEWER_CONTEXT_MENU_BINDING];
   if (typeof prevBinding === "function") prevBinding();
   bodyEl.replaceChildren();
+  // 行号槽的通用标记（HTTP 请求的 ▶）：一次取好按行建索引，只读态与编辑态两条行号槽共用。
+  const markerByLine = new Map<number, ViewerGutterMarker>();
+  for (const marker of gutterMarkers ? gutterMarkers() : []) {
+    if (!markerByLine.has(marker.line)) markerByLine.set(marker.line, marker);
+  }
   bindViewerContextMenu(bodyEl, {
     preview,
     rootPath,
@@ -1164,6 +1219,8 @@ export function renderCodeViewer(
         for (let i = current + 1; i <= lineCount; i++) {
           const row = el("div", "sfe-file-viewer-gutter-row");
           row.appendChild(el("span", "sfe-file-viewer-gutter-no", String(i)));
+          const marker = markerByLine.get(i);
+          if (marker) row.appendChild(createGutterMarkerButton(marker));
           frag.appendChild(row);
         }
         gutter.appendChild(frag);
@@ -1185,11 +1242,13 @@ export function renderCodeViewer(
       let editHighlightTimer: ReturnType<typeof setTimeout> | 0 = 0;
       // 进入编辑态时 textarea.value 与 preview.text 同源，熔断判定取本次渲染已测的体量。
       const initialEditText = String(preview.text ?? "");
-      const canHighlightInitial = (): boolean => shouldHighlightMeasured(measurePreview());
+      const canHighlightInitial = (): boolean => shouldHighlightMeasured(measurePreview(), extname(preview.name));
       const paintEditHighlight = (source: string, canHighlight: boolean): void => {
         // 编辑态高亮上限就是只读熔断上限（highlight-policy 里写死了这条不变量）：
         // 只读能上色的文件在编辑态必须同样上色，手感靠下面的停顿合并与进入时复用换来。
-        if (!canHighlight || !highlighterReady()) {
+        // 注意：http/rest 的着色不依赖高亮块（highlightCodeHtml 内部分流到首屏着色器），
+        // 所以这里的 canHighlight 只按体量熔断判，不再被 !highlighterReady() 拦下。
+        if (!canHighlight) {
           editHighlight.textContent = source;
         } else {
           const html = highlightCodeHtml(source, extname(preview.name));
@@ -1211,11 +1270,13 @@ export function renderCodeViewer(
       // 进入编辑态：只读态算过、且仍与当前文本同源的整篇 HTML 直接复用，点铅笔不再把全文重分词一遍。
       // 前提由约定保证：highlightedHtml 非空即逐字符对应 preview.text（文本一改即清空，见 index.ts handlePreviewInput）。
       const seededHtml = preview.highlightedHtml || "";
-      // 超过只读虚拟化阈值（400 行）且没有可复用整篇 HTML：编辑态改走「可视区切片高亮」。
-      // 与只读虚拟路径同策略——只对可视区 ± OVERSCAN 的行分词，滚动 / 停顿输入时重算；
-      // 全篇分词对熔断上限内的文件单次可达几十到几百 ms，且每次输入停顿都重跑。
+      // 编辑态改走「可视区切片高亮」的条件与只读态虚拟化**同一判定**（shouldVirtualizeMeasured）：
+      // 只对可视区 ± OVERSCAN 的行分词，滚动 / 停顿输入时重算。
+      // 判定必须逐条件对齐只读态，不能只看行数：只读态对「字符数超 25 万但不足 400 行」的
+      // .http 文件（docs/test2.http 这类）走虚拟列表逐行着色，编辑态若只按行数判就会退回整篇、
+      // 再被整篇熔断写成纯文本——表现即「其他场景都有色、只有代码模式一片白」。
       // 阈值内的小文件仍整篇高亮（跨行 token 不被切片拆开），成本有界且进入时可复用只读 HTML。
-      const useWindowedHl = !seededHtml && measurePreview().lines > VIRTUAL_LINE_THRESHOLD;
+      const useWindowedHl = !seededHtml && shouldVirtualizeMeasured(measurePreview(), extname(preview.name));
       if (!useWindowedHl) {
         if (seededHtml) {
           editHighlight.innerHTML = seededHtml;
@@ -1223,7 +1284,7 @@ export function renderCodeViewer(
         } else {
           updateEditHighlight(initialEditText, canHighlightInitial(), true);
         }
-        if (!seededHtml && !highlighterReady() && canHighlightInitial()) {
+        if (!seededHtml && !highlighterReady() && canHighlightInitial() && !isBasicHighlightExt(extname(preview.name))) {
           void ensureHighlighter().then(() => {
             if (!editHighlight.isConnected) return;
             // 上面的守卫已判定可整篇高亮且文本未变，直接给结论，不再判一次。
@@ -1265,7 +1326,8 @@ export function renderCodeViewer(
 
       /** 按当前滚动位置重算并重绘可视切片；文本已变（dirty）时即使区间未变也重绘。 */
       const syncEditHighlightSlice = (): void => {
-        if (!highlighterReady()) return; // 块未就绪：保持纯文本底色，就绪回调里再切片。
+        // 块未就绪：http/rest 仍可由首屏着色器同步上色；其余语言保持纯文本底色，等就绪回调再切片。
+        if (!highlighterReady() && !isBasicHighlightExt(extname(preview.name))) return;
         const lh = editLineHeightPx();
         if (!(lh > 0)) {
           // 量不出行高（无布局环境 / 异常样式）：切片无法与 textarea 对齐，
@@ -1274,7 +1336,7 @@ export function renderCodeViewer(
             hlStart = -2;
             hlEnd = -1;
             hlLinesDirty = false;
-            paintEditHighlight(textarea.value, canHighlightByParts(textarea.value, countLines(textarea.value)));
+            paintEditHighlight(textarea.value, canHighlightByParts(textarea.value, countLines(textarea.value), extname(preview.name)));
           }
           return;
         }
@@ -1352,10 +1414,15 @@ export function renderCodeViewer(
             hlLinesDirty = true;
             scheduleEditHighlightSync();
           } else {
-            updateEditHighlight(value, canHighlightByParts(value, lineCount));
+            updateEditHighlight(value, canHighlightByParts(value, lineCount, extname(preview.name)));
           }
           onEditInput(value);
         });
+      }
+      if (typeof onEditBlur === "function") {
+        // 失焦只通报「焦点离开了编辑框」，谁接、接了做什么（存盘）由装配层定；
+        // 通报同步发生在按钮的 click 之前，行号槽上的 ▶ 不会被这次失焦吃掉。
+        textarea.addEventListener("blur", () => onEditBlur());
       }
       editArea.appendChild(editHighlight);
       editArea.appendChild(textarea);
@@ -1369,8 +1436,8 @@ export function renderCodeViewer(
       syncEditHeight();
       if (useWindowedHl) {
         // 挂载后再做首切片：行高与可视高度都要真实布局（见 editLineHeightPx）。
-        if (!highlighterReady()) {
-          // 块未到：先整篇纯文本底色（一次 textContent），到齐后由回调切出可视区。
+        if (!highlighterReady() && !isBasicHighlightExt(extname(preview.name))) {
+          // 块未到且非 http/rest：先整篇纯文本底色（一次 textContent），到齐后由回调切出可视区。
           editHighlight.textContent = initialEditText;
           if (initialEditText.endsWith("\n")) editHighlight.appendChild(document.createTextNode(" "));
           void ensureHighlighter().then(() => {
@@ -1378,6 +1445,7 @@ export function renderCodeViewer(
             syncEditHighlightSlice();
           });
         } else {
+          // http/rest 无需等高亮块，直接切出可视区。
           syncEditHighlightSlice();
         }
         editScroll.addEventListener("scroll", onEditHighlightScroll, { passive: true });
@@ -1395,7 +1463,7 @@ export function renderCodeViewer(
 
       // 约 400 行以上只渲染可视行。小文件仍整块高亮，避免把跨行 token 按行切碎。
       // 大文件同样给可视行上色；只有超长单行跳过，避免压缩文件把分词拖死。
-      if (shouldVirtualizeMeasured(measurePreview())) {
+      if (shouldVirtualizeMeasured(measurePreview(), extname(preview.name))) {
         scroll.classList.add("sfe-file-viewer-code-scroll-virtual");
         bodyEl.appendChild(scroll);
         const ext = extname(preview.name);
@@ -1406,11 +1474,13 @@ export function renderCodeViewer(
             row.appendChild(el("span", "sfe-file-viewer-line-no", String(index + 1)));
             const command = runLineMap.get(index + 1);
             if (command) row.appendChild(createGutterRunButton(command, onRunCommand, t));
+            const marker = markerByLine.get(index + 1);
+            if (marker) row.appendChild(createGutterMarkerButton(marker));
             const text = el("span", "sfe-file-viewer-line-text");
             const source = String(lineText ?? "");
-            const html = source.length > 0 && source.length <= MAX_HIGHLIGHT_LINE_LEN && highlighterReady()
-              ? highlightCodeHtml(source, ext)
-              : "";
+            // http/rest 由首屏着色器同步上色（不依赖高亮块）；其余语言需块就绪。
+            const canHl = source.length > 0 && source.length <= MAX_HIGHLIGHT_LINE_LEN && (highlighterReady() || isBasicHighlightExt(ext));
+            const html = canHl ? highlightCodeHtml(source, ext) : "";
             if (html) text.innerHTML = html;
             else text.textContent = source;
             row.appendChild(text);
@@ -1441,6 +1511,8 @@ export function renderCodeViewer(
           row.appendChild(el("span", "sfe-file-viewer-gutter-no", String(i)));
           const command = runLineMap.get(i);
           if (command) row.appendChild(createGutterRunButton(command, onRunCommand, t));
+          const marker = markerByLine.get(i);
+          if (marker) row.appendChild(createGutterMarkerButton(marker));
           gutter.appendChild(row);
         }
         pre.appendChild(gutter);
@@ -1451,16 +1523,25 @@ export function renderCodeViewer(
           content.innerHTML = preview.highlightedHtml;
         } else {
           content.innerHTML = escapeHtml(rawText);
-          if (shouldHighlightMeasured(measurePreview())) {
+          if (shouldHighlightMeasured(measurePreview(), extname(preview.name))) {
             const ext = extname(preview.name);
-            void ensureHighlighter().then(() => {
-              if (!content.isConnected || !highlighterReady()) return;
+            // http/rest 由首屏着色器同步上色，无需等高亮块到达。
+            if (isBasicHighlightExt(ext)) {
               const html = highlightCodeHtml(rawText, ext);
-              if (!html) return;
-              content.innerHTML = html;
-              // 回写供编辑态复用：这份 HTML 与 rawText 同源，文本被改动时会被清空。
-              preview.highlightedHtml = html;
-            });
+              if (html) {
+                content.innerHTML = html;
+                preview.highlightedHtml = html;
+              }
+            } else {
+              void ensureHighlighter().then(() => {
+                if (!content.isConnected || !highlighterReady()) return;
+                const html = highlightCodeHtml(rawText, ext);
+                if (!html) return;
+                content.innerHTML = html;
+                // 回写供编辑态复用：这份 HTML 与 rawText 同源，文本被改动时会被清空。
+                preview.highlightedHtml = html;
+              });
+            }
           }
         }
         pre.appendChild(content);

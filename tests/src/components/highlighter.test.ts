@@ -4,6 +4,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { highlightCodeHtml, shouldHighlight, isLargeText } from '../../../src/components/highlighter.ts';
+import { highlightCodeHtml as clientHighlight } from '../../../src/components/highlight-client.ts';
+import { isBasicHighlightExt, highlightHttpLine } from '../../../src/components/syntax-basic.ts';
 
 const CSS_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../src/styles/syntax.css');
 
@@ -108,6 +110,63 @@ test('语法高亮: 真实多语言样本产出的所有 token 类别均有 CSS 
   assert.deepEqual(missing, [], `以下 token 类别缺少 CSS 配色规则: ${missing.join(', ')}`);
 });
 
+test('语法高亮: .http 文件正文 JSON 着色（不写 Content-Type 也要着色）', () => {
+  // 项目里的 .http 请求行不带 HTTP 版本号、也常不写 Content-Type 头，
+  // 而 Prism 自带的 http 语法只认 Content-Type 才给正文上色 → 正文一片纯白。
+  // 这里断言：无论有没有 Content-Type，正文里的 JSON 键都要着色。
+  const withCt = ['POST https://a.test/users', 'Content-Type: application/json', '', '{ "name": "Ada" }'].join('\n');
+  const withoutCt = ['POST https://a.test/users', '', '{ "name": "Ada", "age": 37 }'].join('\n');
+  for (const [label, code] of [['有 Content-Type', withCt], ['无 Content-Type', withoutCt]] as const) {
+    const html = highlightCodeHtml(code, 'http');
+    // 正文里的键（转义后是 &quot;）必须包在 token property 里
+    assert.match(html, /token property">&quot;/, `${label}: 正文键要着色`);
+  }
+  // 多分节：每节的正文键都着色（方法也是 property，故只数被引号包住的键）
+  const multi = ['### 一', 'POST https://a.test/a', '', '{ "a": 1 }', '', '### 二', 'POST https://a.test/b', '', '{ "b": 2 }'].join('\n');
+  const html = highlightCodeHtml(multi, 'http');
+  assert.equal((html.match(/token property">&quot;/g) || []).length, 2, '两节正文各自着色');
+});
+
+test('语法高亮: .rest 文件也按 HTTP 请求着色，不走 reStructuredText', () => {
+  const code = ['GET https://a.test/users', 'Accept: application/json', '', '{ "ok": true }'].join('\n');
+  const html = highlightCodeHtml(code, 'rest');
+  assert.match(html, /token property">&quot;/, '正文键要着色');
+  assert.match(html, /class="token [^"]*\bkeyword\b/, '头部名要着色');
+});
+
+test('语法高亮: .http 与 .rest 同一输入输出逐字节一致（两种扩展名同构）', () => {
+  // 用户诉求：`.http` 和 `.rest` 必须是同一套语法。扫描、解析、图标已共用一份实现，
+  // 高亮也必须如此——同一份文本走两个扩展名，输出不能有任何差别。
+  const sample = [
+    '### 登录',
+    '# 注释行',
+    '@host = https://api.example.com',
+    '',
+    'POST {{host}}/login HTTP/1.1',
+    'Content-Type: application/json',
+    '',
+    '{"user":"tom","age":18,"ok":true,"n":null}',
+    '',
+    'GET /plain',
+  ].join('\n');
+  assert.equal(
+    highlightCodeHtml(sample, 'http'),
+    highlightCodeHtml(sample, 'rest'),
+    '.http 与 .rest 的高亮输出必须逐字节一致'
+  );
+});
+
+test('语法高亮: 请求行认 {{变量}} 前缀地址，方法/变量/路径/版本各自着色且版本不被当 JSON 数字', () => {
+  // rest-client 最主流的写法是 `{{host}}/login`：地址不是 http(s):// 也不是 / 开头，
+  // 旧的请求行正则整行漏掉，方法/地址不着色、`HTTP/1.1` 还被当 JSON 数字染色。
+  const html = highlightCodeHtml('POST {{host}}/login HTTP/1.1', 'http');
+  assert.match(html, /token property">POST</, '方法要着色');
+  assert.match(html, /token variable">\{\{host\}\}</, '地址里的变量段单独着色');
+  assert.match(html, /token url">\/login</, '相对路径按 URL 着色');
+  assert.match(html, /token keyword">HTTP\/1\.1</, 'HTTP 版本单独着色');
+  assert.doesNotMatch(html, /token number/, 'HTTP 版本不该被当成 JSON 数字');
+});
+
 test('语法高亮: shouldHighlight 熔断判定同时按字符数与行数', () => {
   // 小文本：高亮
   assert.equal(shouldHighlight('const a = 1;'), true);
@@ -142,4 +201,41 @@ test('语法高亮: isLargeText 判定大文件，空文本不算大', () => {
   assert.equal(isLargeText('x'.repeat(250001)), true);
   // 单行超长（行数远未超限）同样视为大文件，交由虚拟化渲染
   assert.equal(isLargeText('x'.repeat(20001)), true);
+});
+
+test('语法高亮: http/rest 由首屏内置着色器同步上色，不依赖懒加载高亮块', () => {
+  // 回归：着色逻辑曾只住在 575KB 的懒加载块里，块没就绪就整篇无色——
+  // 表现为「http 文件里的 JSON 一片白」。http/rest 的着色只靠正则，必须能同步给出。
+  assert.equal(isBasicHighlightExt('http'), true);
+  assert.equal(isBasicHighlightExt('.REST'), true);
+  assert.equal(isBasicHighlightExt('js'), false);
+
+  // 不安装高亮块（等价于块从未到达），http 仍必须产出 token
+  const http = clientHighlight('POST https://a.test/x\n\n{ "k": 1, "b": false }', 'http');
+  assert.match(http, /token property">POST</, '请求方法要着色');
+  assert.match(http, /token property">&quot;k&quot;/, 'JSON 键要着色');
+  assert.match(http, /token number">1</, 'JSON 数字要着色');
+  assert.match(http, /token boolean">false</, 'JSON 布尔要着色');
+
+  // 对照：其它语言在块未就绪时仍返回空串（由调用方回退纯文本，块到了再上色）
+  assert.equal(clientHighlight('const a = 1;', 'js'), '');
+
+  // 行级自足：单行调用（大文件虚拟列表路径）与整篇调用结果一致
+  const line = '{ "k": 1 }';
+  assert.equal(highlightHttpLine(line), clientHighlight(line, 'http'));
+});
+
+test('语法高亮: http 文件含超长单行时，其余行仍照常着色（单行熔断不连累整篇）', () => {
+  // 回归：真实文件里有一行 12 万字符的压缩 JSON，曾触发 `单行超长即熔断`，
+  // 把整个文件拖成一片纯文本——用户看到的正是「http 里的 JSON 一片白」。
+  // 单行熔断只该跳过那一行，其余行必须照常着色。
+  const longLine = 'x'.repeat(30000);
+  const code = ['### 一', 'POST https://a.test/x', '', '{ "k": 1, "b": false }', longLine, '', '### 二', '{ "n": 2 }'].join('\n');
+  const html = clientHighlight(code, 'http');
+  assert.match(html, /token property">&quot;k&quot;/, '超长行之前的 JSON 键要着色');
+  assert.match(html, /token boolean">false</, '超长行之前的布尔要着色');
+  assert.match(html, /token property">&quot;n&quot;/, '超长行之后的 JSON 键也要着色');
+  assert.match(html, /token property">POST</, '请求方法要着色');
+  // 超长行本身按纯文本处理，但不得以 token 形式出现
+  assert.doesNotMatch(html, /token [^"]*">x{100}/, '超长行自身不着色');
 });

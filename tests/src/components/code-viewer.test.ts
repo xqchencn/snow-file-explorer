@@ -1656,3 +1656,205 @@ test('预览组件: 组件内体量判定与 highlight-policy 逐条件等价（
 });
 
 
+test('预览组件: 行号槽标记只钉在指定行，点击交回它自己的回调', () => {
+  const host = document.createElement('div');
+  const runs: string[] = [];
+  const preview: CodeTextPreview = {
+    kind: 'text',
+    name: 'a.http',
+    path: 'D:/repo/a.http',
+    text: '@host = a.test\n\n### 登录\nGET https://{{host}}/users',
+    highlightedHtml: '',
+    isMarkdown: false,
+    mode: 'preview',
+  };
+  renderCodeViewer(host, {
+    preview,
+    copied: false,
+    onCopy: () => {},
+    gutterMarkers: () => [{ line: 3, title: '发送此请求: 登录', onRun: () => runs.push('登录') }],
+    t,
+  });
+  const rows = host.querySelectorAll('.sfe-file-viewer-gutter-row');
+  assert.equal(rows.length, 4, '行号槽按行数铺满');
+  assert.equal(rows[0].querySelector('.sfe-file-viewer-gutter-run'), null, '没标记的行不该有箭头');
+  const button = q<HTMLButtonElement>(rows[2], '.sfe-file-viewer-gutter-run');
+  assert.equal(button.title, '发送此请求: 登录');
+  assert.equal(button.getAttribute('aria-label'), '发送此请求: 登录');
+  button.click();
+  assert.deepEqual(runs, ['登录']);
+});
+
+test('预览组件: 编辑态行号槽同样带标记，失焦只通报一次', () => {
+  const host = document.createElement('div');
+  let blurred = 0;
+  const preview: CodeTextPreview = {
+    kind: 'text',
+    name: 'a.http',
+    path: 'D:/repo/a.http',
+    text: '### 登录\nGET https://a.test/users',
+    highlightedHtml: '',
+    isMarkdown: false,
+    mode: 'preview',
+  };
+  renderCodeViewer(host, {
+    preview,
+    copied: false,
+    onCopy: () => {},
+    onEditInput: () => {},
+    onSave: () => {},
+    editable: true,
+    onEditBlur: () => (blurred += 1),
+    gutterMarkers: () => [{ line: 1, title: '发送此请求: 登录', onRun: () => blurred += 100 }],
+    t,
+  });
+  const area = q<HTMLTextAreaElement>(host, 'textarea');
+  assert.ok(host.querySelector('.sfe-file-viewer-edit-gutter .sfe-file-viewer-gutter-run'), '编辑态的行号槽也该挂上 ▶');
+  area.dispatchEvent(new dom.window.Event('blur', { bubbles: false }));
+  assert.equal(blurred, 1, '失焦通报与发送是两件事');
+});
+
+test('代码查看器: http 文件在未注入高亮块时仍上色（只读 + 编辑态）', () => {
+  // 回归：着色逻辑曾只住在懒加载高亮块里，块没就绪就整篇无色——用户看到的正是「http 里的 JSON 一片白」。
+  // 这里清空注入（等价于块从未到达），渲染 http 文件必须仍产出 token。
+  installHighlighter(null);
+  try {
+    const text = '### 登录\nPOST https://a.test/x\nContent-Type: application/json\n\n{ "k": 1, "b": false }';
+    const base: CodeTextPreview = {
+      kind: 'text',
+      name: 'a.http',
+      path: 'D:/repo/a.http',
+      text,
+      highlightedHtml: '',
+      isMarkdown: false,
+      mode: 'preview',
+    };
+
+    // 只读态：小文件整块高亮
+    const ro = document.createElement('div');
+    renderCodeViewer(ro, { preview: base, copied: false, onCopy: () => {}, onSetMode: () => {}, t });
+    const content = q<HTMLElement>(ro, '.sfe-file-viewer-code-content');
+    assert.ok(content.querySelector('.token.property'), '只读态：方法 / JSON 键要着色');
+    assert.ok(content.querySelector('.token.string'), '只读态：字符串要着色');
+    assert.ok(content.querySelector('.token.boolean'), '只读态：布尔要着色');
+    assert.ok(content.querySelector('.token.number'), '只读态：数字要着色');
+
+    // 编辑态：高亮层（textarea 文字透明，颜色全出自这一层）
+    const ed = document.createElement('div');
+    renderCodeViewer(ed, {
+      preview: base,
+      copied: false,
+      onCopy: () => {},
+      onEditInput: () => {},
+      editable: true,
+      t,
+    });
+    const hl = q<HTMLElement>(ed, '.sfe-file-viewer-edit-highlight');
+    assert.ok(hl.querySelector('.token.property'), '编辑态：方法 / JSON 键要着色');
+    assert.ok(hl.querySelector('.token.boolean'), '编辑态：布尔要着色');
+  } finally {
+    installHighlighter({ highlightCodeHtml, shouldHighlight });
+  }
+});
+
+test('代码查看器: http 文件含超长单行时，只读与编辑态仍整篇上色（单行熔断不连累）', () => {
+  // 用户真实场景：docs/test.http 第 23 行是 12 万字符的压缩 JSON / URL 编码串。
+  // 旧判定把「单行超长」当整篇熔断（那是给 Prism 防正则回溯的），结果整个文件零 token。
+  // http/rest 是行级自足的纯正则着色，超长行只该跳过那一行，绝不能连累整篇。
+  installHighlighter(null); // 块未加载也不影响 http
+  try {
+    const longLine = '"long": "' + 'a'.repeat(25000) + '"';
+    const text = [
+      '### 一',
+      'POST https://a.test/x',
+      'Content-Type: application/json',
+      '',
+      '{ "k": 1, "b": false }',
+      longLine,
+    ].join('\n');
+    const base: CodeTextPreview = {
+      kind: 'text',
+      name: 'a.http',
+      path: 'D:/repo/a.http',
+      text,
+      highlightedHtml: '',
+      isMarkdown: false,
+      mode: 'preview',
+    };
+
+    // 只读态：不得因超长单行被判成大文件走纯文本，仍要整篇着色
+    const ro = document.createElement('div');
+    renderCodeViewer(ro, { preview: base, copied: false, onCopy: () => {}, t });
+    assert.equal(!!ro.querySelector('.sfe-file-viewer-code-scroll-virtual'), false, '超长单行不该把整篇拖进虚拟列表');
+    const content = q<HTMLElement>(ro, '.sfe-file-viewer-code-content');
+    assert.ok(content.querySelector('.token.property'), '只读态：方法 / JSON 键要着色');
+    assert.ok(content.querySelector('.token.boolean'), '只读态：布尔要着色');
+
+    // 编辑态：高亮层同样不能被超长单行熔断成纯文本
+    const ed = document.createElement('div');
+    renderCodeViewer(ed, {
+      preview: base,
+      copied: false,
+      onCopy: () => {},
+      onEditInput: () => {},
+      editable: true,
+      t,
+    });
+    const hl = q<HTMLElement>(ed, '.sfe-file-viewer-edit-highlight');
+    assert.ok(hl.querySelector('.token.property'), '编辑态：方法 / JSON 键要着色');
+    assert.ok(hl.querySelector('.token.boolean'), '编辑态：布尔要着色');
+  } finally {
+    installHighlighter({ highlightCodeHtml, shouldHighlight });
+  }
+});
+
+test('代码查看器: http 文件字符数超整篇上限但不足 400 行时，编辑态仍按切片上色', () => {
+  // 用户真实场景：docs/test2.http（440KB / 159 行）、docs/landscape.http（392KB / 386 行）。
+  // 旧判定编辑态只看行数（> 400 才切片），这类文件行数不够、退回整篇，又被整篇字符熔断
+  // 写成纯文本——表现即「其他场景都有色、只有代码模式一片白」。
+  // 判定必须与只读态的 shouldVirtualizeMeasured 同一套，才不会再分叉出这种只有某一路没色的缺口。
+  installHighlighter(null); // http 不依赖懒加载块
+  // 切片偏移按真实行高换算；jsdom 量到的是 line-height:normal，量不出行高会退回整篇纯文本，
+  // 故把行高固定为 20px（textarea 的 12.5px × 1.6 即此值），与同文件既有的切片用例同一手法。
+  const originalComputedStyle = dom.window.getComputedStyle;
+  dom.window.getComputedStyle = (() => ({ lineHeight: '20px' })) as unknown as typeof originalComputedStyle;
+  try {
+    // 总字符数越过 MAX_HIGHLIGHT_LEN（25 万），行数留在 400 以内：两个条件必须分开构造。
+    const filler = Array.from({ length: 180 }, () => 'x'.repeat(1500));
+    const text = [
+      '### 请求一',
+      'POST https://a.test/x',
+      'Content-Type: application/json',
+      '',
+      '{ "k": 1, "b": false }',
+      ...filler,
+    ].join('\n');
+    assert.ok(text.length > 250000, '前置：文本须越过整篇字符熔断上限');
+    assert.ok(text.split('\n').length <= 400, '前置：行数须留在切片阈值以内');
+
+    const preview: CodeTextPreview = {
+      kind: 'text',
+      name: 'a.http',
+      path: 'D:/repo/a.http',
+      text,
+      highlightedHtml: '',
+      isMarkdown: false,
+      mode: 'preview',
+    };
+    const ed = document.createElement('div');
+    renderCodeViewer(ed, {
+      preview,
+      copied: false,
+      onCopy: () => {},
+      onEditInput: () => {},
+      editable: true,
+      t,
+    });
+    const hl = q<HTMLElement>(ed, '.sfe-file-viewer-edit-highlight');
+    assert.ok(hl.querySelector('.token.property'), '编辑态：方法 / JSON 键要着色');
+    assert.ok(hl.querySelector('.token.boolean'), '编辑态：布尔要着色');
+  } finally {
+    dom.window.getComputedStyle = originalComputedStyle;
+    installHighlighter({ highlightCodeHtml, shouldHighlight });
+  }
+});

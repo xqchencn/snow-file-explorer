@@ -497,10 +497,16 @@ export function createPreviewController(deps: PreviewControllerDeps) {
   function syncPreviewChrome(): boolean {
     const layout = getLayout();
     if (!layout) return false;
-    const pane = state.mainView === "git" ? layout.gitPreviewPane : layout.previewPane;
+    const pane =
+      state.mainView === "git"
+        ? layout.gitPreviewPane
+        : state.mainView === "http"
+          ? layout.httpPreviewPane
+          : layout.previewPane;
     if (!pane) return false;
-    // 保存状态只属于 files 面板的预览（state.preview）；Git 查看器内容来自 gitPreviewView
-    // 的新对象，不得消费 files 的保存态，否则会在 Git 面板画出无关的「已保存」提示条。
+    // 保存状态只属于走 state.preview 的面板（files 与 http 都走这一条通道）；
+    // Git 查看器内容来自 gitPreviewView 的新对象，不得消费 files 的保存态，
+    // 否则会在 Git 面板画出无关的「已保存」提示条。
     const ownsSaveState = state.mainView !== "git";
     return syncViewerChrome(pane, {
       copied: state.copied,

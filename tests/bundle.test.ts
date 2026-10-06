@@ -73,12 +73,21 @@ test('分发包完整性: dist 目录存在且包含所有直接安装运行所�
   const cssStat = fs.statSync(cssPath);
   assert.ok(cssStat.size > 5 * 1024, `dist/index.css 体积需合理 (>5KB)，当前: ${(cssStat.size / 1024).toFixed(1)}KB`);
 
-  // 终端与高亮的样式随各自块走（首屏不背），块加载时由 lazy-chunk 注入。
-  for (const chunkCss of ['terminal.css', 'highlighter.css']) {
-    const cssChunkPath = path.join(distDir, 'chunks', chunkCss);
-    assert.ok(fs.existsSync(cssChunkPath), `dist/chunks/${chunkCss} 必须存在`);
-    assert.ok(fs.statSync(cssChunkPath).size > 512, `dist/chunks/${chunkCss} 不得为空`);
-  }
+  // 只有终端的样式随块走（首屏不背），块加载时由 lazy-chunk 注入。
+  const cssChunkPath = path.join(distDir, 'chunks', 'terminal.css');
+  assert.ok(fs.existsSync(cssChunkPath), 'dist/chunks/terminal.css 必须存在');
+  assert.ok(fs.statSync(cssChunkPath).size > 512, 'dist/chunks/terminal.css 不得为空');
+
+  // 防回归：语法高亮的 token 配色必须内联在首屏 index.css。
+  // 曾把它塞进按需块，块样式没注入就是「全站代码零着色」，且高亮块一旦 ready 就不再
+  // 走 loadChunk，卸载摘除样式后永远补不回来——这条断言钉死它不许再被拆走。
+  const firstScreenCss = fs.readFileSync(cssPath, 'utf8');
+  assert.match(firstScreenCss, /\.token\.comment/, '首屏样式必须包含语法高亮 token 配色');
+  assert.equal(
+    fs.existsSync(path.join(distDir, 'chunks', 'highlighter.css')),
+    false,
+    'syntax.css 不得再被拆成按需块样式'
+  );
 
   const localesDir = path.join(distDir, 'locales');
   assert.ok(fs.existsSync(localesDir), 'dist/locales/ 必须存在');

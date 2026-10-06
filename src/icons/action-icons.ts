@@ -32,6 +32,7 @@ import {
   GitBranch,
   FolderOpen,
   FolderGit2,
+  Globe,
   Play,
   RotateCw,
   Package,
@@ -68,6 +69,8 @@ const ICON_MAP: Record<string, IconNode> = {
   // 差异视图模式切换：统一视图（Rows3）/ 分栏视图（Columns2），与宿主 DiffViewer 一致
   unified: Rows3,
   split: Columns2,
+  // HTTP 请求的 GUI 表单态：一行一字段的多列表单观感，沿用同一枚 Rows3。
+  gui: Rows3,
   // 同步：下载远端更新 + 上传本地提交。
   sync: ArrowDownUp,
   // 同步计数：未推送（↑，发往远端）/ 未拉取（↓，来自远端）。
@@ -78,6 +81,8 @@ const ICON_MAP: Record<string, IconNode> = {
   folderOpen: FolderOpen,
   // Git 变更主视图入口（侧栏顶部，与「文件」二选一）
   folderGit2: FolderGit2,
+  // HTTP 请求文件主视图入口（侧栏顶部，紧随 Git）：网络请求语义取 Globe。
+  globe: Globe,
   // 项目运行：播放（启动命令）、重新运行（Rerun）、配置图标（Package）、终端（运行面板标题）、关闭（收起面板）、清空（输出区）
   play: Play,
   rerun: RotateCw,

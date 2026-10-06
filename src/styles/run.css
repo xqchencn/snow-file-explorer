@@ -299,7 +299,8 @@
 }
 
 .sfe-body[data-tool-dock="right"] .sfe-tree-pane,
-.sfe-body[data-tool-dock="right"] .sfe-git-pane {
+.sfe-body[data-tool-dock="right"] .sfe-git-pane,
+.sfe-body[data-tool-dock="right"] .sfe-http-pane {
   width: var(--right-panel-width, 380px);
   min-width: 340px;
   max-width: 500px;

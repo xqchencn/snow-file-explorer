@@ -104,6 +104,22 @@ export type ErrorLike = {
 };
 
 /**
+ * 从捕获到的任意异常里取一句可展示的原因文案。
+ * @param err 捕获值；可能是 Error、带 message 的对象，或字符串 / 数字等任意抛出物
+ * @returns 非空的原因文案：message 有真值就用它，否则把抛出值整体转成字符串
+ * @description 捕获块里各写一遍这个三元表达式，写法迟早漂移——本仓库曾同时存在
+ *   `(err as ErrorLike).message` 与 `"message" in err` 两种，后者遇到 `message: undefined`
+ *   会得到字符串 "undefined" 而不是真正的抛出值。统一从这里取，只保留前一种语义。
+ */
+export function errorMessage(err: unknown): string {
+  if (err && typeof err === "object" && "message" in err) {
+    const message = (err as ErrorLike).message;
+    if (message) return String(message);
+  }
+  return String(err);
+}
+
+/**
  * 获取文件或路径的基准名称 (basename)
  * @param p 文件路径
  * @returns 末段名称
