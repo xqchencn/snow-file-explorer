@@ -34,7 +34,9 @@ function collect(dir: string, acc: string[] = []): string[] {
 }
 
 const files = [
-  ...SCAN_DIRS.flatMap((d) => collect(path.join(rootDir, d))),
+  // docs/ 不入库，全新检出（CI）里它根本不存在；缺目录要跳过，不能让 readdirSync 抛 ENOENT
+  // 把整个测试文件带走。下面 SCAN_FILES 已经是同样的兜法。
+  ...SCAN_DIRS.map((d) => path.join(rootDir, d)).filter((d) => fs.existsSync(d)).flatMap((d) => collect(d)),
   ...SCAN_FILES.map((f) => path.join(rootDir, f)).filter((f) => fs.existsSync(f)),
 ];
 
