@@ -131,6 +131,16 @@
   white-space: pre;
 }
 
+/* 长行可见：内容层按最宽行撑开（改 right:auto 才不会被 right:0 钉回容器宽度），
+   溢出屏幕的部分由 .sfe-diff-scroll 的 overflow:auto 出横向滚动条拖动查看；
+   min-width 保证短差异仍铺满整行宽度，增删底色与指示条不变形。
+   与代码视图 .sfe-file-viewer-code-scroll-virtual .sfe-vlist-content 同一手法。 */
+.sfe-diff-scroll .sfe-vlist-content {
+  right: auto;
+  width: max-content;
+  min-width: 100%;
+}
+
 /* 单行差异：旧行号 + 新行号 + 标记 + 正文（对标 VS Code：左边框差异指示条） */
 .sfe-diff-line {
   display: flex;
@@ -157,9 +167,9 @@
   color: var(--text-muted);
 }
 
+/* 正文不收缩：行随内容撑宽（超屏部分靠容器横向滚动查看），不能被压窄裁掉。 */
 .sfe-diff-text {
-  flex: 1;
-  min-width: 0;
+  flex: 1 0 auto;
   padding-right: 12px;
   white-space: pre;
 }
@@ -198,42 +208,51 @@
 /* --------------------------------------------------------------------------
    Split（左右分栏）视图
    -------------------------------------------------------------------------- */
-/* 分栏时横向可滚动（两侧内容各自不换行） */
-.sfe-diff-scroll.split {
-  overflow-x: auto;
-}
-
-.sfe-diff-split-row {
+/* 分栏容器：左右两栏并排，各占一半宽度。每栏是一个独立的 .sfe-diff-scroll
+   （overflow:auto + position:relative 由基类提供）——横向各自滚动（拖左边只动旧版本、
+   拖右边只动新版本，对标 VS Code），纵向滚动由 diff-view.ts 的 scrollTop 互锁同步。 */
+.sfe-diff-split-body {
   display: flex;
-  align-items: stretch;
-  min-height: 1.55em;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
 }
 
-/* 单个单元格：行号 + 行号 + 标记 + 正文，占半栏（对标 VS Code：左边框差异指示条） */
+.sfe-diff-scroll.side {
+  flex: 1 1 50%;
+  min-width: 0;
+}
+
+/* 两栏的分隔线画在右栏左缘 */
+.sfe-diff-scroll.side.right {
+  border-left: 1px solid var(--border-light);
+}
+
+/* 单元格就是所在侧的一整行：正文不收缩，长行把本侧内容层撑宽、横向滚动由本侧容器提供；
+   min-width:100% 保证短行铺满侧宽，行底色与差异指示条不缩成一小段。 */
 .sfe-diff-split-cell {
   display: flex;
   align-items: stretch;
-  flex: 1 1 50%;
-  min-width: 0;
-  width: 50%;
+  flex: 1 0 auto;
+  min-width: 100%;
+  min-height: 1.55em;
   border-left: 3px solid transparent;
   box-sizing: border-box;
 }
 
-/* 左栏加分隔线，视觉上区分两栏 */
-.sfe-diff-split-cell.left {
-  border-right: 1px solid var(--border-light);
+/* 本侧横向拖动时行号钉在左侧保持可见（VS Code 惯例）；
+   background:inherit 让行号底色跟随该行的增删底色，滚动时盖住从它底下经过的正文。 */
+.sfe-diff-split-cell .sfe-diff-no {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background: inherit;
 }
 
 /* 对侧无配对行时的空白占位（保持左右行高对齐） */
 .sfe-diff-split-cell.empty {
   background: var(--surface-island-muted, var(--bg-secondary));
   opacity: 0.5;
-}
-
-/* 分栏单元格内容裁切：正文为 white-space:pre，不裁切会溢出到相邻栏 */
-.sfe-diff-split-cell .sfe-diff-text {
-  overflow: hidden;
 }
 
 /* 分栏内的删除/新增着色（复用 unified 的语义色与指示条） */

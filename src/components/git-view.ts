@@ -824,19 +824,20 @@ function openGitContextMenu(
   if (section !== "staged" && typeof opts.onDiscard === "function") {
     // 上面的 typeof 判定已保证可调用；闭包内类型层面无法沿用该判定。
     menu.addItem("discard", opts.t("git.discardFile", "丢弃更改"), "undo", () => opts.onDiscard!([file]), {
+      separator: true,
       danger: true,
     });
   }
-  menu.addItem("copy-relative", opts.t("git.copyRelativePath", "复制相对路径"), "copy", () => {
-    if (typeof opts.onCopyRelativePath === "function") opts.onCopyRelativePath(file);
-  }, { separator: true });
-  menu.addItem("copy-absolute", opts.t("git.copyAbsolutePath", "复制绝对路径"), "copy", () => {
-    if (typeof opts.onCopyAbsolutePath === "function") opts.onCopyAbsolutePath(file);
-  });
-  // 刷新：重新拉取文件树与 Git 状态（与文件树右键菜单保持一致）
+  // 刷新放在复制路径之前；与丢弃更改保持危险操作分组隔离。
   menu.addItem("refresh", opts.t("action.refresh", "刷新"), "refresh", () => {
     if (typeof opts.onRefresh === "function") opts.onRefresh();
   }, { separator: true });
+  menu.addItem("copy-relative", opts.t("git.copyRelativePath", "复制相对路径"), "copy", () => {
+    if (typeof opts.onCopyRelativePath === "function") opts.onCopyRelativePath(file);
+  });
+  menu.addItem("copy-absolute", opts.t("git.copyAbsolutePath", "复制绝对路径"), "copy", () => {
+    if (typeof opts.onCopyAbsolutePath === "function") opts.onCopyAbsolutePath(file);
+  });
   menu.open();
 }
 
@@ -872,21 +873,23 @@ function openGitFolderContextMenu(
   if (!isStaged && first && typeof opts.onDiscard === "function") {
     // 上面的 typeof 判定已保证可调用；闭包内类型层面无法沿用该判定。
     menu.addItem("discard", opts.t("git.discardFolder", "丢弃此目录更改"), "undo", () => opts.onDiscard!(files), {
+      separator: true,
       danger: true,
     });
   }
   menu.addItem("reveal", opts.t("git.revealInExplorer", "在资源管理器中打开"), "folderOpen", () => {
     if (first && typeof opts.onRevealFile === "function") opts.onRevealFile(first);
   }, { separator: true });
+  // 刷新放在复制路径之前；丢弃此目录更改始终单独作为危险操作。
+  menu.addItem("refresh", opts.t("action.refresh", "刷新"), "refresh", () => {
+    if (typeof opts.onRefresh === "function") opts.onRefresh();
+  });
   menu.addItem("copy-relative", opts.t("git.copyRelativePath", "复制相对路径"), "copy", () => {
     if (first && typeof opts.onCopyRelativePath === "function") opts.onCopyRelativePath(first);
   });
   menu.addItem("copy-absolute", opts.t("git.copyAbsolutePath", "复制绝对路径"), "copy", () => {
     if (first && typeof opts.onCopyAbsolutePath === "function") opts.onCopyAbsolutePath(first);
   });
-  menu.addItem("refresh", opts.t("action.refresh", "刷新"), "refresh", () => {
-    if (typeof opts.onRefresh === "function") opts.onRefresh();
-  }, { separator: true });
   menu.open();
 }
 

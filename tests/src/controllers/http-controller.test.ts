@@ -12,6 +12,8 @@ import { createPanelState } from "../../../src/state/panel-state.ts";
 import { parseHttpFile } from "../../../src/services/http-request-parser.ts";
 import { formValuesOfRequest } from "../../../src/services/http-serialize.ts";
 import { installWindow, restoreWindow } from "../utils/window-stub.ts";
+import { diskKey, listDiskChildren } from "../utils/virtual-disk.ts";
+import { pluginConfigDirectory, ENVIRONMENT_FILE_NAME, PRIVATE_ENVIRONMENT_FILE_NAME, SHARED_ENVIRONMENT_NAME } from "../../../src/services/http-env.ts";
 
 /** 翻译桩：按下标页面的 `{{name}}` 口径插值，否则断言里看到的是没换过的占位符。 */
 const t = (key: string, fallback?: string, params?: Record<string, unknown>) => {
@@ -52,7 +54,6 @@ function openDocument(text: string, fetchImpl?: (url: string) => Promise<unknown
     name: "api.http",
     path: "D:/proj/api.http",
     text,
-    highlightedHtml: "",
     isMarkdown: false,
     mode: "preview",
     html: "",
@@ -421,5 +422,418 @@ test("HTTP 控制器: 根目录尚未就绪时扫描是空操作，就绪后再�
     );
   } finally {
     restoreWindow(previous);
+  }
+});
+
+/** 环境表该落的那个位置（写动作的落点断言都对着它）。 */
+const ENV_TARGET = `${pluginConfigDirectory("D:/proj")}/${ENVIRONMENT_FILE_NAME}`;
+
+/**
+ * 搭一块虚拟磁盘：读文件与列目录走 window.snow，写盘走 api.write.run。
+ * @description 创建与保存这两条路要看的正是「真实写到了哪个路径、写了什么内容」，
+ *   所以写成功时把内容同步并进磁盘，后面的重读断言才有东西可读。
+ *   读一个不存在的文件按宿主原话抛 `File does not exist: 路径`——它不是回一份空结果，
+ *   「这里没有」这件事在宿主那边长得就像失败，桩必须一样，否则测不出真实形状。
+ * @param options.files 初始磁盘内容（绝对路径 → 文本）
+ * @param options.writeResult 给一个 ok:false 时，写通道原样回它，用来验失败路径
+ * @param options.readFails 读盘通道整体坏掉（列目录也抛错），用来验「说不清就不许落盘」
+ */
+function writeHarness(options: { files?: Record<string, string>; writeResult?: unknown; readFails?: boolean } = {}) {
+  const previous = globalThis.window;
+  const key = diskKey;
+  const disks = new Map(Object.entries(options.files ?? {}).map(([path, text]) => [key(path), text]));
+  const writes: Array<{ filePath: string; content: string }> = [];
+  // 落盘走的是哪一层：门控写动作（api.write.run）还是新建文件用的原始通道。
+  // 两条路的入参规矩不一样（前者不许空正文，后者只要求「是个字符串」），
+  // 混在一份清单里就看不出「新建其实撞了前者的门」。
+  const via: string[] = [];
+  const statuses: string[] = [];
+  const renders: number[] = [];
+  const previews: string[] = [];
+  function fail(message: string): never {
+    throw new Error(message);
+  }
+  installWindow({
+    snow: {
+      readDirectoryEntries: async (dirPath: string) => {
+        if (options.readFails) fail("Access is denied. (os error 5)");
+        // 目录条目也照宿主那样回：请求文件清单要能钻进子目录，新建完的文件才列得出来。
+        return listDiskChildren(disks, key(dirPath));
+      },
+      readFileContent: async (filePath: string) => {
+        if (options.readFails) fail("Access is denied. (os error 5)");
+        const text = disks.get(key(filePath));
+        if (text === undefined) fail(`File does not exist: ${filePath}`);
+        return {
+          content: text,
+          isBinary: false,
+          isImage: false,
+          isSvg: false,
+          mimeType: "application/json",
+          encoding: "utf8",
+          size: text.length,
+        };
+      },
+      writeFileContent: async (filePath: string, content: string) => {
+        // 装机版宿主这一层只要求「路径是非空白字符串、正文是字符串」，空正文照样落盘。
+        if (typeof filePath !== "string" || !filePath.trim()) fail("File path is required");
+        if (typeof content !== "string") fail("File content must be a string");
+        const path = key(filePath.trim());
+        writes.push({ filePath: path, content });
+        via.push("raw");
+        disks.set(path, content);
+      },
+    },
+  });
+  const state = createPanelState();
+  state.rootPath = "D:/proj";
+  state.httpSelected = "D:/proj/api.http";
+  const controller = createHttpController({
+    state,
+    t,
+    api: {
+      net: { fetch: async () => netResponse("https://a.test/x") },
+      write: {
+        run: async (actionId: string, params: { filePath: string; content: string }) => {
+          // 照装机版 admin.ts 的 filesystem.writeFile：两个入参都过 requireString，纯空白也抛。
+          if (actionId === "filesystem.writeFile") {
+            for (const name of ["filePath", "content"]) {
+              const value = name === "filePath" ? params.filePath : params.content;
+              if (typeof value !== "string" || !value.trim()) {
+                return { ok: false, action: actionId, error: `Parameter '${name}' must be a non-empty string` };
+              }
+            }
+          }
+          const path = key(params.filePath);
+          writes.push({ filePath: path, content: params.content });
+          via.push("gated");
+          if (options.writeResult && (options.writeResult as { ok?: boolean }).ok === false) return options.writeResult;
+          disks.set(path, params.content);
+          return { ok: true, action: actionId, data: { filePath: params.filePath } };
+        },
+      },
+    } as never,
+    isDisposed: () => false,
+    renderHttpPane: () => {},
+    renderHttpPreview: () => {
+      renders.push(1);
+    },
+    previewFile: async (entry) => {
+      previews.push(entry.path);
+    },
+    savePreview: async () => {},
+    setStatus: (value) => statuses.push(value),
+  });
+  return { state, controller, writes, via, statuses, renders, previews, restore: () => restoreWindow(previous) };
+}
+
+test("HTTP 控制器: 一份表都没有时第一次保存就把文件建出来，落点是配置目录", async () => {
+  const scene = writeHarness();
+  try {
+    const saved = await scene.controller.saveEnvironmentTables([
+      { name: "local", variables: [{ key: "host", value: "l.test" }] },
+    ]);
+    assert.equal(saved, true);
+    assert.equal(scene.writes.length, 1, "只写公开表那一份");
+    assert.equal(scene.writes[0].filePath, ENV_TARGET, "宿主的写动作连父目录一起建，落点必须在配置目录里");
+    assert.deepEqual(scene.controller.environmentSummary().names, ["local"], "写完立刻重读，界面不用再点一次文件");
+    assert.equal(scene.renders.length, 1, "写成了才重画：弹窗这时已经关了，没有正在敲的格子");
+    assert.equal(
+      scene.statuses.some((line) => line.includes("读不出") || line.includes("目录读不出")),
+      false,
+      "缺文件是宿主的正常回答，不许当成「读不通」报给用户"
+    );
+  } finally {
+    scene.restore();
+  }
+});
+
+test("HTTP 控制器: 保存只碰公开表，私密表那份原样留着", async () => {
+  const privateTarget = `${pluginConfigDirectory("D:/proj")}/${PRIVATE_ENVIRONMENT_FILE_NAME}`;
+  const scene = writeHarness({
+    files: {
+      [ENV_TARGET]: JSON.stringify({ local: { host: "mine.test" } }),
+      [privateTarget]: JSON.stringify({ local: { token: "secret" } }),
+    },
+  });
+  try {
+    await scene.controller.saveEnvironmentTables([
+      { name: "local", variables: [{ key: "host", value: "next.test" }] },
+    ]);
+    assert.deepEqual(scene.writes.map((write) => write.filePath), [ENV_TARGET], "一次都不该写到私密表那里");
+    const summary = scene.controller.environmentSummary();
+    assert.equal(summary.tables.get("local")?.get("host"), "next.test", "公开表写回来的就是弹窗那一份");
+    assert.equal(summary.names.join(","), "local", "私密表里的段没被当成新增环境冒出来");
+    assert.deepEqual(summary.privateKeys, ["local/token"], "私密表仍然盖着这个键，那份没被动过");
+  } finally {
+    scene.restore();
+  }
+});
+
+test("HTTP 控制器: 整张写回时不许把私密表里的值抄进公开表", async () => {
+  // 合并表里那些值本来就盖着公开表，拿合并表当草稿就等于把密钥抄进随仓库走的那一份。
+  const privateTarget = `${pluginConfigDirectory("D:/proj")}/${PRIVATE_ENVIRONMENT_FILE_NAME}`;
+  const scene = writeHarness({
+    files: {
+      [ENV_TARGET]: JSON.stringify({ local: { host: "mine.test" } }),
+      [privateTarget]: JSON.stringify({ local: { token: "secret" }, staging: { host: "s.test" } }),
+    },
+  });
+  try {
+    await scene.controller.saveEnvironmentTables([
+      {
+        name: "local",
+        variables: [
+          { key: "host", value: "next.test" },
+          { key: "port", value: "8080" },
+        ],
+      },
+    ]);
+    const content = scene.writes[0].content;
+    assert.equal(content.includes("secret"), false, "私密表里那个 token 不该出现在公开表里");
+    assert.equal(content.includes("s.test"), false, "只住在私密表里的那一段也不该被抄出来");
+    assert.equal(content.includes("next.test"), true, "该写的还是照写");
+  } finally {
+    scene.restore();
+  }
+});
+
+test("HTTP 控制器: 交回来的就是整张表，没给的段从文件里消失", async () => {
+  // 弹窗一次管完整张表，所以「写什么」完全由草稿说了算：这里钉住这条契约，
+  // 免得哪天又改成「先读盘当底稿再叠」——那样一来弹窗里删掉的段会被盘上那份复活。
+  const scene = writeHarness();
+  try {
+    await scene.controller.saveEnvironmentTables([
+      { name: "local", variables: [{ key: "host", value: "l.test" }] },
+      { name: "production", variables: [{ key: "host", value: "p.test" }] },
+    ]);
+    await scene.controller.saveEnvironmentTables([
+      { name: "local", variables: [{ key: "host", value: "l.test" }] },
+      { name: "staging", variables: [{ key: "host", value: "s.test" }] },
+    ]);
+    assert.equal(scene.writes.length, 2);
+    const last = JSON.parse(scene.writes[1].content) as Record<string, Record<string, string>>;
+    assert.deepEqual(Object.keys(last).sort(), ["local", "staging"], "第二次写带着第一段、去掉第二段");
+  } finally {
+    scene.restore();
+  }
+});
+
+test("HTTP 控制器: 写回的 JSON 键序稳定，共享段打头", async () => {
+  const scene = writeHarness();
+  try {
+    await scene.controller.saveEnvironmentTables([
+      { name: "production", variables: [{ key: "host", value: "api.test" }] },
+    ]);
+    const saved = await scene.controller.saveEnvironmentTables([
+      { name: "production", variables: [{ key: "host", value: "api.test" }] },
+      { name: SHARED_ENVIRONMENT_NAME, variables: [{ key: "version", value: "v1" }] },
+    ]);
+    assert.equal(saved, true);
+    assert.equal(scene.writes[1].filePath, ENV_TARGET);
+    assert.equal(scene.writes[1].content.startsWith(`{\n  "${SHARED_ENVIRONMENT_NAME}"`), true, "共享段排在最前");
+    assert.equal(scene.controller.environmentSummary().hasShared, true, "保存后重读，界面立刻看见新表");
+  } finally {
+    scene.restore();
+  }
+});
+
+test("HTTP 控制器: 删一段就是从公开表里摘掉那一段，别段都留着", async () => {
+  const scene = writeHarness({
+    files: {
+      [ENV_TARGET]: JSON.stringify({
+        local: { host: "l.test" },
+        production: { host: "p.test" },
+      }),
+    },
+  });
+  try {
+    const removed = await scene.controller.saveEnvironmentTables([
+      { name: "production", variables: [{ key: "host", value: "p.test" }] },
+    ]);
+    assert.equal(removed, true);
+    assert.equal(scene.writes.length, 1);
+    const written = JSON.parse(scene.writes[0].content) as Record<string, unknown>;
+    assert.deepEqual(Object.keys(written), ["production"], "只少那一段");
+    assert.deepEqual(scene.controller.environmentSummary().names, ["production"]);
+    assert.equal(scene.renders.length, 1, "清单要跟着换掉那一行");
+  } finally {
+    scene.restore();
+  }
+});
+
+test("HTTP 控制器: 一字未改的整张表不再重抄，改了才写", async () => {
+  // 弹窗现在也能只翻开看文件变量那一页，看完顺手点保存不该动一次盘
+  // （动盘会改文件时间、在版本状态里凭空多一条没改过的记录，还白读一次）。
+  const scene = writeHarness({ files: { [ENV_TARGET]: JSON.stringify({ local: { host: "l.test" } }) } });
+  try {
+    // 打开弹窗前现读一遍盘（askEnvironmentTables 就是这条回路），这样才有可比对的基准。
+    await scene.controller.reloadEnvironment();
+    const renders = scene.renders.length;
+    const saved = await scene.controller.saveEnvironmentTables([
+      { name: "local", variables: [{ key: "host", value: "l.test" }] },
+    ]);
+    assert.equal(saved, true, "本来就是这样也算保存成功");
+    assert.equal(scene.writes.length, 0, "盘上已经是这一份，一个字都不必再写");
+    assert.equal(scene.renders.length, renders + 1, "不写盘也要重画：界面等着这次保存的结果");
+    await scene.controller.saveEnvironmentTables([
+      { name: "local", variables: [{ key: "host", value: "next.test" }] },
+    ]);
+    assert.equal(scene.writes.length, 1, "真改了照样落盘");
+    assert.equal(scene.controller.environmentSummary().publicTables.get("local")?.get("host"), "next.test");
+  } finally {
+    scene.restore();
+  }
+});
+
+test("HTTP 控制器: 只住在私密表里的那一段动不了，那份文件一个字都不写", async () => {
+  const privateTarget = `${pluginConfigDirectory("D:/proj")}/${PRIVATE_ENVIRONMENT_FILE_NAME}`;
+  const scene = writeHarness({ files: { [privateTarget]: JSON.stringify({ ghost: { host: "g.test" } }) } });
+  try {
+    const saved = await scene.controller.saveEnvironmentTables([
+      { name: "local", variables: [{ key: "host", value: "l.test" }] },
+    ]);
+    assert.equal(saved, true);
+    assert.deepEqual(scene.writes.map((write) => write.filePath), [ENV_TARGET], "这里只管公开表那一份");
+    assert.equal(scene.writes[0].content.includes("g.test"), false, "公开表里不该冒出私密表那段的内容");
+    assert.equal(
+      scene.controller.environmentSummary().tables.get("ghost")?.get("host"),
+      "g.test",
+      "私密表那一段照旧生效：它没被这次保存碰到"
+    );
+  } finally {
+    scene.restore();
+  }
+});
+
+test("HTTP 控制器: 环境表只认项目根那一份，深层目录里的请求文件也不例外", async () => {
+  // 旧版本曾按请求文件所在目录放环境表，在 docs/ 下面写出过第二份 .snow/.snow-file-explorer/env.json。
+  // 这条钉住两头：写只写根那一份，读也不把子目录里那份当环境表认回来。
+  const nested = `${pluginConfigDirectory("D:/proj/docs/api")}/${ENVIRONMENT_FILE_NAME}`;
+  const scene = writeHarness({
+    files: {
+      "D:/proj/docs/api/test.http": "GET https://a.test/{{host}}",
+      [nested]: JSON.stringify({ ghost: { host: "from-nested" } }),
+    },
+  });
+  try {
+    scene.state.httpSelected = "D:/proj/docs/api/test.http";
+    const saved = await scene.controller.saveEnvironmentTables([
+      { name: "local", variables: [{ key: "host", value: "l.test" }] },
+    ]);
+    assert.equal(saved, true);
+    assert.deepEqual(
+      scene.writes.map((write) => write.filePath),
+      [ENV_TARGET],
+      "一次写盘都不该落在文件旁边或那个子目录里"
+    );
+    const summary = scene.controller.environmentSummary();
+    assert.equal(summary.directory, pluginConfigDirectory("D:/proj"), "界面报的位置就是根那一份");
+    assert.deepEqual(summary.files, [ENV_TARGET], "读回来的也只有根那一份");
+    assert.equal(summary.names.includes("ghost"), false, "子目录那份里的环境不该被认成可用的环境");
+  } finally {
+    scene.restore();
+  }
+});
+
+test("HTTP 控制器: 宿主写失败时照它的原话报，不许报成功也不重画", async () => {
+  const scene = writeHarness({ writeResult: { ok: false, action: "filesystem.writeFile", error: "只读目录" } });
+  try {
+    const saved = await scene.controller.saveEnvironmentTables([
+      { name: "local", variables: [{ key: "host", value: "x" }] },
+    ]);
+    assert.equal(saved, false);
+    assert.equal(scene.statuses[scene.statuses.length - 1], "只读目录", "宿主的错误文案直接给用户看");
+    assert.equal(scene.controller.environmentSummary().names.length, 0, "没写成就不能说环境表好了");
+    assert.equal(scene.renders.length, 0, "没写成就不重画，否则界面像在报成功");
+  } finally {
+    scene.restore();
+  }
+});
+
+test("HTTP 控制器: 新建请求文件补 .http 并落在所选目录，越界、脏名字与别的扩展名都拒绝", async () => {
+  const scene = writeHarness();
+  try {
+    const built = await scene.controller.createRequestFile("D:/proj/api", "users");
+    assert.equal(built, true);
+    assert.equal(scene.writes[0].filePath, "D:/proj/api/users.http", "缺的扩展名补 .http，位置就用选中的目录");
+    assert.equal(scene.writes[0].content, "### 请求 1\nGET https://\n", "建出来就该是一条能直接发的骨架");
+    assert.deepEqual(scene.via, ["raw"], "新建走原始写通道：门控动作不许空正文，这条路建不出文件");
+    assert.deepEqual(scene.previews, ["D:/proj/api/users.http"], "建完就把新文件打开，别只躺在清单里");
+
+    const rest = await scene.controller.createRequestFile("D:/proj/api", "legacy.rest");
+    assert.equal(rest, true, "另一种写法照样收");
+    assert.equal(scene.writes[1].filePath, "D:/proj/api/legacy.rest", "写了 .rest 就不许补成 .rest.http");
+
+    const escaped = await scene.controller.createRequestFile("D:/elsewhere", "x.rest");
+    assert.equal(escaped, false, "项目根以外不建");
+    const badName = await scene.controller.createRequestFile("D:/proj", "a/b.rest");
+    assert.equal(badName, false, "名字里带分隔符等于把落点带出目录");
+    const notRequest = await scene.controller.createRequestFile("D:/proj", "notes.txt");
+    assert.equal(notRequest, false, "这一类入口只建请求文件");
+    assert.equal(
+      scene.statuses.some((line) => String(line).includes(".http / .rest")),
+      true,
+      "拦下来要说清这里收哪几类"
+    );
+    assert.equal(scene.writes.length, 2, "三次拒绝都不该真的写盘");
+  } finally {
+    scene.restore();
+  }
+});
+
+test("HTTP 控制器: 新建撞上已有文件就不覆盖，空名字不建垃圾文件", async () => {
+  const scene = writeHarness({ files: { "D:/proj/api.http": "GET https://a.test/one" } });
+  try {
+    const duplicate = await scene.controller.createRequestFile("D:/proj", "api.http");
+    assert.equal(duplicate, false);
+    assert.equal(scene.writes.length, 0, "已有文件一个字都不动");
+    const empty = await scene.controller.createRequestFile("D:/proj", "   ");
+    assert.equal(empty, false, "没给名字就建不了，不留 untitled 空文件");
+  } finally {
+    scene.restore();
+  }
+});
+
+test("HTTP 控制器: 列不出目录时不新建请求文件，只在状态条说清", async () => {
+  // 读盘通道整体坏掉时，新建请求文件必须停手——那里可能已经有同名文件。
+  const scene = writeHarness({ readFails: true });
+  try {
+    const built = await scene.controller.createRequestFile("D:/proj", "users.rest");
+    assert.equal(built, false);
+    assert.equal(scene.writes.length, 0, "说不清那里有没有文件，就不能覆掉用户可能已有的内容");
+    assert.equal(scene.statuses.some((line) => line.includes("目录读不出")), true, "要说清是目录列不出来，不是写失败");
+  } finally {
+    scene.restore();
+  }
+});
+
+test("HTTP 控制器: 开合文件变量只翻折叠态并重画面板，一个字都不写盘", () => {
+  const scene = writeHarness();
+  try {
+    assert.equal(scene.state.httpVariablesCollapsed, true, "默认收起");
+    scene.controller.toggleVariablesCollapsed();
+    assert.equal(scene.state.httpVariablesCollapsed, false);
+    assert.equal(scene.renders.length, 1, "面板要跟着换，否则点了就是没反应");
+    scene.controller.toggleVariablesCollapsed();
+    assert.equal(scene.state.httpVariablesCollapsed, true);
+    assert.deepEqual(scene.writes, [], "开合不碰磁盘");
+  } finally {
+    scene.restore();
+  }
+});
+
+test("HTTP 控制器: 环境表缺失时概况是空的，界面据此才给创建入口", async () => {
+  // 宿主读一个不存在的文件是抛错，文案长得就像失败：概况只报「读到几份表」，不猜为什么读不到。
+  const scene = writeHarness();
+  try {
+    await scene.controller.reloadEnvironment();
+    const summary = scene.controller.environmentSummary();
+    assert.deepEqual(summary.files, [], "空项目里一份表都没有");
+    assert.equal(summary.names.length, 0);
+    assert.equal(scene.writes.length, 0, "光是读一遍不该写盘");
+    assert.equal(scene.statuses.some((line) => line.includes("读不出")), false, "缺文件不是失败，别报给用户");
+  } finally {
+    scene.restore();
   }
 });

@@ -287,8 +287,8 @@ test('Git 变更列表: 文件右键菜单复刻宿主顺序并排除终端入�
   assert.ok(menu, '右键文件行应显示 Git 菜单');
   assert.deepEqual(
     [...menu.querySelectorAll<HTMLButtonElement>('button')].map((item) => item.dataset.menuId),
-    ['open', 'reveal', 'stage-toggle', 'discard', 'copy-relative', 'copy-absolute', 'refresh'],
-    '菜单项顺序必须与宿主文件菜单一致（去除终端项，末尾追加刷新）',
+    ['open', 'reveal', 'stage-toggle', 'discard', 'refresh', 'copy-relative', 'copy-absolute'],
+    '菜单项顺序：危险操作单独隔离，刷新位于复制路径之前',
   );
   assert.equal(menu.querySelectorAll('.sfe-context-menu-separator').length, 3, '应保留宿主两条分隔线并新增刷新前的分隔线');
   assert.doesNotMatch(menu.textContent, /终端|Terminal/i, '菜单不得包含在终端打开');

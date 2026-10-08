@@ -52,22 +52,40 @@ function flushClipboardRead() {
 }
 
 /**
- * 把只读态的 `window.getSelection()` 换成「选中固定文本」的桩，返回还原函数。
- * 被测组件的 getViewerSelection 只消费 `Selection.toString()`；jsdom 的 Selection 构造器禁止直接
- * new（Illegal constructor），自建 { toString } 字面量又不满足 DOM 的 Selection 接口，
- * 故复用 window 自带的 Selection 单例、仅覆写 toString，还原时一并撤销覆写，
- * 免得污染后续用例（空态右键只应出现「刷新」）。
+ * 在只读态虚拟行上构造真实 DOM Range 选区（选中第 fromLine 行到 toLine 行的正文），返回还原函数。
+ * @description 只读态取选区走 Range 克隆（剔除行号节点），不再是 Selection.toString()；
+ *   桩必须建真实 Range，才能同时覆盖「行号不入正文」这一契约。
+ * @param host 已渲染代码查看器的容器
+ * @param fromLine 起始行下标（0 基）
+ * @param toLine 结束行下标（0 基，含）
  */
-function mockSelectionText(text: string): () => void {
+function mockSelectionRange(host: HTMLElement, fromLine: number, toLine: number): () => void {
+  // jsdom 的 Range 只对已接入文档的节点生效：游离 host 上 addRange 会静默失败（rangeCount 归 0）。
+  const attached = host.isConnected;
+  if (!attached) document.body.appendChild(host);
+  const rows = [...host.querySelectorAll<HTMLElement>('.sfe-file-viewer-line')];
+  if (!rows.length) throw new Error('未渲染只读行，选区桩无法生效');
+  const textEl = (i: number): HTMLElement => {
+    const el = rows[i].querySelector<HTMLElement>('.sfe-file-viewer-line-text');
+    if (!el) throw new Error(`第 ${i} 行无正文元素`);
+    return el;
+  };
+  // 正文可能是单个 Text，也可能是高亮后的多个元素子节点：按元素边界取整段，不依赖子节点类型。
+  const range = document.createRange();
+  const startEl = textEl(fromLine);
+  const endEl = textEl(toLine);
+  range.setStart(startEl, 0);
+  range.setEnd(endEl, endEl.childNodes.length);
   const selection = window.getSelection();
   if (!selection) throw new Error('jsdom 未提供 Selection 实例，选区桩无法生效');
   const originalGetSelection = window.getSelection;
-  const originalToString = selection.toString;
-  selection.toString = () => text;
+  selection.removeAllRanges();
+  selection.addRange(range);
   window.getSelection = () => selection;
   return () => {
-    selection.toString = originalToString;
+    selection.removeAllRanges();
     window.getSelection = originalGetSelection;
+    if (!attached) host.remove();
   };
 }
 
@@ -75,9 +93,9 @@ const { renderMarkdownHtml } = await import('../../../src/components/markdown-re
 const { renderCodeViewer } = await import('../../../src/components/code-viewer.ts');
 const { parseUnifiedDiff } = await import('../../../src/services/diff.ts');
 const { resolveProxiedImageSrc } = await import('../../../src/services/markdown-asset.ts');
-const { highlightCodeHtml, shouldHighlight } = await import('../../../src/components/highlighter.ts');
-const { installHighlighter } = await import('../../../src/components/highlight-client.ts');
-installHighlighter({ highlightCodeHtml, shouldHighlight });
+const { highlightCodeHtml } = await import('../../../src/components/highlighter.ts');
+const { ensureHighlighter, highlighterReady, installHighlighter } = await import('../../../src/components/highlight-client.ts');
+installHighlighter({ highlightCodeHtml });
 
 /** 翻译桩：只用到 key + 兜底文案，签名复用组件消费的 TranslateFn。 */
 const t: TranslateFn = (_key, fallback) => fallback || _key;
@@ -148,7 +166,6 @@ test('预览组件: Markdown 代码模式渲染语法高亮视图', () => {
       name: 'a.md',
       path: 'D:/repo/a.md',
       text: '# T',
-      highlightedHtml: '<span class="token title"># T</span>',
       isMarkdown: true,
       mode: 'code',
     },
@@ -158,8 +175,9 @@ test('预览组件: Markdown 代码模式渲染语法高亮视图', () => {
     t,
   });
 
-  assert.ok(host.querySelector('.sfe-file-viewer-code'), '代码模式应渲染代码视图');
+  assert.ok(host.querySelector('.sfe-file-viewer-code-scroll-virtual'), '代码模式应渲染代码视图（统一虚拟列表）');
   assert.equal(host.querySelector('.sfe-markdown-body'), null, '代码模式不应渲染 Markdown 正文');
+  assert.equal(q<HTMLElement>(host, '.sfe-file-viewer-line-text').textContent, '# T', '代码模式按行渲染源码');
   const activeBtn = q<HTMLElement>(host, '.sfe-md-mode-btn.active');
   assert.equal(activeBtn.getAttribute('aria-pressed'), 'true', '代码按钮应处于激活态');
 });
@@ -174,7 +192,6 @@ test('预览组件: 普通文本默认只读，笔/眼睛按钮切换真实编�
     name: 'a.js',
     path: 'D:/repo/a.js',
     text: 'const value = 1;',
-    highlightedHtml: highlightCodeHtml('const value = 1;', '.js'),
     isMarkdown: false,
     mode: 'preview',
   };
@@ -226,7 +243,6 @@ test('预览组件: Markdown 预览不显示编辑按钮，代码模式才显示
     path: 'D:/repo/README.md',
     text: '# title',
     html: '<h1>title</h1>',
-    highlightedHtml: '<span># title</span>',
     isMarkdown: true,
     mode: 'preview',
   };
@@ -314,7 +330,7 @@ test('Git 差异视图: 超大全文仍展开整份文件，可视行保留语�
   assert.ok(spacer && parseFloat(spacer.style.height) > 4000 * 18, '占位高度应按整份文件撑开');
 });
 
-test('预览组件: 大文件只读态走虚拟滚动，小文件保持整块高亮', () => {
+test('预览组件: 大小文件只读态统一走虚拟滚动，逐行高亮且正文完整', () => {
   // 大文件（超过熔断阈值）：走窗口化虚拟列表，DOM 行数远小于总行数，内容不截断
   const bigHost = document.createElement('div');
   const bigText = Array.from({ length: 4200 }, (_, i) => `line ${i}`).join('\n');
@@ -324,7 +340,6 @@ test('预览组件: 大文件只读态走虚拟滚动，小文件保持整块高
       name: 'big.txt',
       path: 'D:/repo/big.txt',
       text: bigText,
-      highlightedHtml: '',
       isMarkdown: false,
       mode: 'preview',
     },
@@ -351,7 +366,6 @@ test('预览组件: 大文件只读态走虚拟滚动，小文件保持整块高
       name: 'big.js',
       path: 'D:/repo/big.js',
       text: codeText,
-      highlightedHtml: '',
       isMarkdown: false,
       mode: 'preview',
     },
@@ -367,7 +381,7 @@ test('预览组件: 大文件只读态走虚拟滚动，小文件保持整块高
   assert.ok(spacer, '应存在撑起总高度的占位元素');
   assert.ok(parseFloat(spacer.style.height) > 0, '占位高度应大于 0');
 
-  // 小文件：保持整块高亮（避免把跨行注释/字符串 token 按行切碎）
+  // 小文件：同样走窗口化虚拟列表（统一懒加载管线，不再有整块 <pre> 分支）
   const smallHost = document.createElement('div');
   renderCodeViewer(smallHost, {
     preview: {
@@ -375,7 +389,6 @@ test('预览组件: 大文件只读态走虚拟滚动，小文件保持整块高
       name: 'a.js',
       path: 'D:/repo/a.js',
       text: 'const value = 1;',
-      highlightedHtml: '<span class="token keyword">const</span> value = 1;',
       isMarkdown: false,
       mode: 'preview',
     },
@@ -384,9 +397,10 @@ test('预览组件: 大文件只读态走虚拟滚动，小文件保持整块高
     t,
   });
   const smallScroll = q<HTMLElement>(smallHost, '.sfe-file-viewer-code-scroll');
-  assert.ok(!smallScroll.classList.contains('sfe-file-viewer-code-scroll-virtual'), '小文件不启用虚拟滚动');
-  assert.ok(smallScroll.querySelector('.sfe-file-viewer-code-content'), '小文件保留整块高亮容器');
-  assert.equal(smallScroll.querySelector('.sfe-file-viewer-line'), null, '小文件不按行渲染');
+  assert.ok(smallScroll.classList.contains('sfe-file-viewer-code-scroll-virtual'), '小文件与 大文件同走虚拟滚动');
+  const smallRow = q<HTMLElement>(smallScroll, '.sfe-file-viewer-line-text');
+  assert.ok(smallRow.querySelector('.token.keyword'), '小文件的单行也必须着色');
+  assert.equal(smallRow.textContent, 'const value = 1;', '高亮后正文必须完整保留');
 });
 
 test('Git 差异视图: 多个 hunk 显示上下箭头并可跳到下一个差异', () => {
@@ -490,7 +504,6 @@ test('预览组件: Markdown 代码模式的模式切换与复制/编辑按钮�
       name: 'README.md',
       path: 'D:/repo/README.md',
       text: '# title',
-      highlightedHtml: '<span># title</span>',
       isMarkdown: true,
       mode: 'code',
     },
@@ -538,14 +551,95 @@ test('Git 差异视图: 固定显示完整文件且统一/分栏切换生效', (
   assert.equal(host.textContent.includes('完整文件'), false, '不应显示完整文件/仅差异切换');
   assert.equal(host.textContent.includes('仅差异'), false, '不应显示完整文件/仅差异切换');
   assert.equal(host.querySelectorAll('.sfe-diff-mode-switch').length, 1, '只保留统一/分栏切换');
-  assert.equal(host.querySelector('.sfe-diff-scroll.split'), null, '默认应为统一视图');
+  assert.equal(host.querySelector('.sfe-diff-split-body'), null, '默认应为统一视图');
 
   const splitButton = Array.from(host.querySelectorAll<HTMLButtonElement>('.sfe-md-mode-btn')).find(
     (button) => button.title === '分栏视图'
   );
   assert.ok(splitButton, '应存在分栏视图按钮');
   splitButton.click();
-  assert.ok(host.querySelector('.sfe-diff-scroll.split'), '点击分栏视图后应切换布局');
+  // 分栏是左右两个独立滚动容器（各自横向拖动，纵向互锁同步）
+  const sides = host.querySelectorAll<HTMLElement>('.sfe-diff-scroll.side');
+  assert.equal(sides.length, 2, '点击分栏视图后应出现左右两个独立滚动栏');
+  assert.ok(host.querySelector('.sfe-diff-split-body'), '分栏容器应存在');
+});
+
+test('Git 差异视图: .vue 差异按 SFC 区块逐行高亮（与代码查看器同一条管线）', () => {
+  const host = document.createElement('div');
+  const fullContent = [
+    '<template>',
+    '  <div class="a">{{ msg }}</div>',
+    '</template>',
+    '<script setup lang="ts">',
+    'const msg = 1;',
+    '</script>',
+  ].join('\n');
+  const patch = [
+    '@@ -1,6 +1,6 @@',
+    ' <template>',
+    '   <div class="a">{{ msg }}</div>',
+    ' </template>',
+    ' <script setup lang="ts">',
+    '-const msg = 0;',
+    '+const msg = 1;',
+    ' </script>',
+  ].join('\n');
+  renderCodeViewer(host, {
+    preview: {
+      kind: 'text',
+      name: 'a.vue',
+      path: 'D:/repo/a.vue',
+      text: fullContent,
+      diff: { result: parseUnifiedDiff(patch), fullContent },
+      gitView: 'diff',
+      diffMode: 'unified',
+    },
+    copied: false,
+    t,
+  });
+  const rows = [...host.querySelectorAll<HTMLElement>('.sfe-diff-line')];
+  const added = rows.find((row) => row.classList.contains('add'));
+  assert.ok(added, '应渲染出新增行');
+  assert.ok(added!.querySelector('.token.keyword'), '新增行在 script 区块内，应按 TypeScript 着色（const → keyword）');
+  const template = rows.find((row) => row.textContent!.includes('<div class="a">'));
+  assert.ok(template, '应渲染出模板上下文行');
+  assert.ok(template!.querySelector('.token.tag'), '模板行应按 HTML 着色（tag）');
+});
+
+test('Git 差异视图: 分栏是左右两个独立滚动栏，左旧行号/右新行号、两侧行数一致', () => {
+  const host = document.createElement('div');
+  const fullContent = 'new one\nboth';
+  renderCodeViewer(host, {
+    preview: {
+      kind: 'text',
+      name: 'a.js',
+      path: 'D:/repo/a.js',
+      text: fullContent,
+      diff: { result: parseUnifiedDiff('@@ -1,2 +1,2 @@\n-old one\n+new one\n both'), fullContent },
+      gitView: 'diff',
+      diffMode: 'split',
+    },
+    copied: false,
+    t,
+  });
+  const sides = host.querySelectorAll<HTMLElement>('.sfe-diff-scroll.side');
+  assert.equal(sides.length, 2, '左右两个独立滚动容器（各自横向拖动）');
+  const left = sides[0];
+  const right = sides[1];
+  assert.ok(right.classList.contains('right'), '右栏带 right 标记');
+  const leftFirst = q<HTMLElement>(left, '.sfe-diff-split-cell');
+  assert.ok(leftFirst.classList.contains('del'), '左栏首行是删除行');
+  assert.equal(leftFirst.querySelector('.sfe-diff-no')!.textContent, '1', '左栏显示旧行号');
+  const rightFirst = q<HTMLElement>(right, '.sfe-diff-split-cell');
+  assert.ok(rightFirst.classList.contains('add'), '右栏首行是新增行');
+  assert.equal(rightFirst.querySelector('.sfe-diff-no')!.textContent, '1', '右栏显示新行号');
+  assert.equal(
+    left.querySelectorAll('.sfe-diff-split-cell').length,
+    right.querySelectorAll('.sfe-diff-split-cell').length,
+    '两侧行数一致（无配对的一侧留占位格，行高对齐）'
+  );
+  assert.ok(left.querySelector('.sfe-vlist-content'), '左栏有自己的虚拟列表内容层');
+  assert.ok(right.querySelector('.sfe-vlist-content'), '右栏有自己的虚拟列表内容层');
 });
 
 test('预览区右键菜单: 普通文件显示资源管理器、绝对路径和相对路径操作', () => {
@@ -557,7 +651,6 @@ test('预览区右键菜单: 普通文件显示资源管理器、绝对路径和
       name: 'example.js',
       path: 'D:/repo/example.js',
       text: 'const value = 1;',
-      highlightedHtml: '<span>const value = 1;</span>',
       isMarkdown: false,
     },
     copied: false,
@@ -568,7 +661,7 @@ test('预览区右键菜单: 普通文件显示资源管理器、绝对路径和
     t,
   });
 
-  dispatchContextMenu(q<HTMLElement>(host, '.sfe-file-viewer-code-content'));
+  dispatchContextMenu(q<HTMLElement>(host, '.sfe-file-viewer-line'));
   const menu = document.querySelector<HTMLElement>('.sfe-viewer-context-menu');
   assert.ok(menu, '右键打开文件内容区应显示菜单');
   assert.deepEqual(
@@ -577,7 +670,7 @@ test('预览区右键菜单: 普通文件显示资源管理器、绝对路径和
   );
 
   for (const id of ['reveal', 'copy-path', 'copy-relative-path']) {
-    dispatchContextMenu(q<HTMLElement>(host, '.sfe-file-viewer-code-content'));
+    dispatchContextMenu(q<HTMLElement>(host, '.sfe-file-viewer-line'));
     q<HTMLButtonElement>(document, `[data-menu-id="${id}"]`).click();
   }
   assert.deepEqual(calls, ['reveal', 'copy-path', 'copy-relative-path']);
@@ -592,7 +685,6 @@ test('预览区右键菜单: 只读态提供刷新，编辑态不提供', async 
       name: 'example.js',
       path: 'D:/repo/example.js',
       text: 'const value = 1;',
-      highlightedHtml: '<span>const value = 1;</span>',
       isMarkdown: false,
     },
     copied: false,
@@ -602,7 +694,7 @@ test('预览区右键菜单: 只读态提供刷新，编辑态不提供', async 
   });
 
   // 只读态：右键菜单含刷新项，点击触发 onRefresh
-  dispatchContextMenu(q<HTMLElement>(host, '.sfe-file-viewer-code-content'));
+  dispatchContextMenu(q<HTMLElement>(host, '.sfe-file-viewer-line'));
   const menu = q<HTMLElement>(document, '.sfe-viewer-context-menu');
   const refreshItem = q<HTMLButtonElement>(menu, '[data-menu-id="refresh"]');
   assert.ok(refreshItem, '只读态应提供刷新菜单项');
@@ -617,7 +709,6 @@ test('预览区右键菜单: 只读态提供刷新，编辑态不提供', async 
       name: 'example.js',
       path: 'D:/repo/example.js',
       text: 'const value = 1;',
-      highlightedHtml: '<span>const value = 1;</span>',
       isMarkdown: false,
     },
     copied: false,
@@ -644,7 +735,6 @@ test('预览区右键菜单: 只读选中文本只能复制，不能剪切或粘
       name: 'example.js',
       path: 'D:/repo/example.js',
       text: 'const value = 1;',
-      highlightedHtml: '<span>const value = 1;</span>',
       isMarkdown: false,
     },
     copied: false,
@@ -652,8 +742,8 @@ test('预览区右键菜单: 只读选中文本只能复制，不能剪切或粘
     t,
   });
 
-  const content = q<HTMLElement>(host, '.sfe-file-viewer-code-content');
-  const restoreSelection = mockSelectionText('const value = 1;');
+  const content = q<HTMLElement>(host, '.sfe-file-viewer-line');
+  const restoreSelection = mockSelectionRange(host, 0, 0);
   dispatchContextMenu(content);
 
   const menu = q<HTMLElement>(document, '.sfe-viewer-context-menu');
@@ -664,6 +754,86 @@ test('预览区右键菜单: 只读选中文本只能复制，不能剪切或粘
   await flushClipboardRead();
   assert.equal(copiedText, 'const value = 1;');
   restoreSelection();
+});
+
+test('预览区右键菜单: 发送到当前会话带工作区路径、行范围和原文，不带代码围栏', async () => {
+  const sent: string[] = [];
+
+  const codeHost = document.createElement('div');
+  renderCodeViewer(codeHost, {
+    preview: {
+      kind: 'text',
+      name: 'a.js',
+      path: 'D:/repo/sub/a.js',
+      text: 'const value = 1;',
+      isMarkdown: false,
+      mode: 'preview',
+    },
+    rootPath: 'D:/repo',
+    copied: false,
+    onSendToChat: (message) => sent.push(message),
+    t,
+  });
+  const restoreCode = mockSelectionRange(codeHost, 0, 0);
+  dispatchContextMenu(q<HTMLElement>(codeHost, '.sfe-file-viewer-line'));
+  q<HTMLButtonElement>(q<HTMLElement>(document, '.sfe-viewer-context-menu'), '[data-menu-id="send-to-chat"]').click();
+  restoreCode();
+  assert.deepEqual(sent, ['repo\\sub\\a.js L1-L1\nconst value = 1;']);
+  assert.equal(sent[0].includes('```'), false);
+  assert.equal(sent[0].includes('1 const'), false);
+  assert.equal(sent[0].includes('D:/repo'), false);
+
+  const mdHost = document.createElement('div');
+  renderCodeViewer(mdHost, {
+    preview: {
+      kind: 'text',
+      name: 'a.md',
+      path: 'D:/repo/a.md',
+      text: '# 标题\n正文',
+      isMarkdown: true,
+      mode: 'code',
+    },
+    rootPath: 'D:/repo',
+    copied: false,
+    onSendToChat: (message) => sent.push(message),
+    t,
+  });
+  const restoreMd = mockSelectionRange(mdHost, 0, 0);
+  dispatchContextMenu(q<HTMLElement>(mdHost, '.sfe-file-viewer-line'));
+  q<HTMLButtonElement>(q<HTMLElement>(document, '.sfe-viewer-context-menu'), '[data-menu-id="send-to-chat"]').click();
+  restoreMd();
+  assert.deepEqual(sent, ['repo\\sub\\a.js L1-L1\nconst value = 1;', 'repo\\a.md L1-L1\n# 标题']);
+});
+
+test('预览区右键菜单: 只读态跨行选区不得把行号混进正文（发送到会话必须可定位）', () => {
+  const sent: string[] = [];
+  const host = document.createElement('div');
+  renderCodeViewer(host, {
+    preview: {
+      kind: 'text',
+      name: 'a.js',
+      path: 'D:/repo/a.js',
+      text: 'import fs from "fs";\nimport path from "path";\nimport os from "os";',
+      isMarkdown: false,
+      mode: 'preview',
+    },
+    rootPath: 'D:/repo',
+    copied: false,
+    onSendToChat: (message) => sent.push(message),
+    t,
+  });
+
+  // 选中第 1-3 行正文；只读虚拟行的行号节点位于同一行内，必须被剔除。
+  const restore = mockSelectionRange(host, 0, 2);
+  dispatchContextMenu(q<HTMLElement>(host, '.sfe-file-viewer-line'));
+  q<HTMLButtonElement>(q<HTMLElement>(document, '.sfe-viewer-context-menu'), '[data-menu-id="send-to-chat"]').click();
+  restore();
+
+  assert.equal(sent.length, 1, '跨行选区必须能生成消息，不得静默丢弃');
+  const body = sent[0].slice(sent[0].indexOf('\n') + 1);
+  assert.equal(body, 'import fs from "fs";\nimport path from "path";\nimport os from "os";');
+  assert.ok(!/^\d+$/m.test(body), `正文不得含行号行：${JSON.stringify(body)}`);
+  assert.equal(sent[0].includes(' L1-L3'), true);
 });
 
 test('预览区右键菜单: 编辑态剪切先写剪贴板，再删除选区并触发输入', async () => {
@@ -682,7 +852,6 @@ test('预览区右键菜单: 编辑态剪切先写剪贴板，再删除选区并
       name: 'example.js',
       path: 'D:/repo/example.js',
       text: 'const value = 1;',
-      highlightedHtml: '<span>const value = 1;</span>',
       isMarkdown: false,
     },
     copied: false,
@@ -719,7 +888,6 @@ test('预览区右键菜单: 编辑态只在剪贴板有文本时启用粘贴，
       name: 'example.txt',
       path: 'D:/repo/example.txt',
       text: 'abc',
-      highlightedHtml: 'abc',
       isMarkdown: false,
     },
     copied: false,
@@ -753,7 +921,6 @@ test('预览区右键菜单: 剪贴板为空或读取失败时粘贴保持禁用
       name: 'example.txt',
       path: 'D:/repo/example.txt',
       text: 'abc',
-      highlightedHtml: 'abc',
       isMarkdown: false,
     },
     copied: false,
@@ -806,7 +973,6 @@ test('预览区右键菜单: 剪切写入剪贴板失败时保留原文', async 
       name: 'example.txt',
       path: 'D:/repo/example.txt',
       text: 'abc',
-      highlightedHtml: 'abc',
       isMarkdown: false,
     },
     copied: false,
@@ -885,7 +1051,7 @@ test('Git 右侧查看器: 差异视图右键弹出文件操作菜单（只读�
   assert.ok(menu, '差异视图右键应显示菜单');
   assert.deepEqual(
     [...menu.querySelectorAll<HTMLButtonElement>('[data-menu-id]')].map((item) => item.dataset.menuId),
-    ['reveal', 'copy-path', 'copy-relative-path', 'refresh']
+    ['reveal', 'refresh', 'copy-path', 'copy-relative-path']
   );
   q<HTMLButtonElement>(menu, '[data-menu-id="refresh"]').click();
   assert.deepEqual(calls, ['refresh']);
@@ -913,7 +1079,6 @@ test('代码预览: 根目录 package.json 的 scripts 行显示运行按钮并�
       name: 'package.json',
       path: 'D:/repo/package.json',
       text: '{\n  "scripts": {\n    "dev": "vite"\n  }\n}',
-      highlightedHtml: '{}',
       isMarkdown: false,
     },
     copied: false,
@@ -958,7 +1123,6 @@ test('代码预览: 二级 package.json 按所属包目录显示 pnpm 脚本运�
       name: 'package.json',
       path: 'D:/repo/apps/web/package.json',
       text: '{\n  "scripts": {\n    "dev": "vite"\n  }\n}',
-      highlightedHtml: '{}',
       isMarkdown: false,
     },
     copied: false,
@@ -997,7 +1161,6 @@ test('代码预览: Go 源文件 func main() 行显示运行按钮（module 根 
       name: 'main.go',
       path: 'D:/go/demo/main.go',
       text: 'package main\n\nimport "fmt"\n\nfunc main() {\n\tfmt.Println("hi")\n}\n',
-      highlightedHtml: '<span>...</span>',
       isMarkdown: false,
     },
     copied: false,
@@ -1047,7 +1210,6 @@ test('代码预览: Go 的 cmd/<name>/main.go 匹配 go run ./cmd/<name>（非 g
       name: 'main.go',
       path: 'D:/go/liyong/server/cmd/server/main.go',
       text: 'package main\n\nfunc main() {}\n',
-      highlightedHtml: '',
       isMarkdown: false,
     },
     copied: false,
@@ -1074,7 +1236,6 @@ test('代码预览: Go 文件无 func main() 不显示运行按钮', () => {
       name: 'util.go',
       path: 'D:/go/demo/util.go',
       text: 'package main\n\nfunc helper() {}\n',
-      highlightedHtml: '',
       isMarkdown: false,
     },
     copied: false,
@@ -1106,7 +1267,6 @@ test('预览区右键菜单: package.json 只列本包命令，不列其他包�
       name: 'package.json',
       path: 'D:/repo/package.json',
       text: '{}',
-      highlightedHtml: '{}',
       isMarkdown: false,
     },
     rootPath: 'D:/repo',
@@ -1138,7 +1298,7 @@ test('预览区右键菜单: package.json 只列本包命令，不列其他包�
     t,
   });
 
-  dispatchContextMenu(q<HTMLElement>(host, '.sfe-file-viewer-code-content'));
+  dispatchContextMenu(q<HTMLElement>(host, '.sfe-file-viewer-line'));
   const menu = q<HTMLElement>(document, '.sfe-viewer-context-menu');
   assert.deepEqual(
     [...menu.querySelectorAll<HTMLButtonElement>('[data-menu-id]')].map((item) => item.dataset.menuId),
@@ -1218,7 +1378,6 @@ const textPreview = (name: string, text: string): CodeTextPreview => ({
   name,
   path: `D:/repo/${name}`,
   text,
-  highlightedHtml: text,
   isMarkdown: false,
 });
 
@@ -1307,7 +1466,6 @@ test('代码预览: Java/Kotlin main sourcePath + mainLine 显示 14x14 运行�
       name: 'App.java',
       path: 'd:\\repo\\app\\src\\main\\java\\demo\\App.java',
       text: ['package demo;', 'public class App {', '  public static void main(String[] args) {}', '}'].join('\n'),
-      highlightedHtml: '<span>code</span>',
       isMarkdown: false,
       mode: 'preview',
     },
@@ -1326,21 +1484,20 @@ test('代码预览: Java/Kotlin main sourcePath + mainLine 显示 14x14 运行�
   assert.deepEqual(calls, [command]);
 });
 
-// 编辑态高亮的上限等于只读熔断上限，这条是有意为之的不变量（见 highlight-policy 顶部注释）。
-// 曾经存在过更紧的编辑态专用阈值（60K 字符 / 2000 行），后果是「只读彩色、进编辑变纯文本底色」。
-test('预览组件: 越过编辑态旧专用阈值的文件，进编辑态仍保留语法高亮', () => {
+// 编辑态与只读态走同一条逐行切片管线，体量不再是高亮的门槛：
+// 再大的文件进编辑态也必须保有 token 配色，不得退化为纯文本底色。
+// （旧的「编辑态专用阈值」已随统一管线废除，这里越过当年那条 60K 字符线作回归钉。）
+test('预览组件: 越过旧的整篇熔断阈值的大文件，进编辑态仍保留语法高亮', () => {
   const host = document.createElement('div');
   const line = 'const value = 1; // padding padding';
   const text = Array.from({ length: 2000 }, () => line).join('\n');
   assert.ok(text.length > 60000, '用例须越过旧的编辑态专用字符上限');
-  assert.ok(shouldHighlight(text), '用例不得越过只读熔断上限');
 
   const preview: CodeTextPreview = {
     kind: 'text',
     name: 'big.js',
     path: 'D:/repo/big.js',
     text,
-    highlightedHtml: '',
     isMarkdown: false,
     mode: 'preview',
   };
@@ -1362,34 +1519,6 @@ test('预览组件: 越过编辑态旧专用阈值的文件，进编辑态仍保
   );
 });
 
-test('预览组件: 编辑态复用只读态整篇 HTML，进入编辑不再重新分词', () => {
-  const host = document.createElement('div');
-  const source = 'const value = 1;';
-  const seeded = highlightCodeHtml(source, '.js');
-  assert.ok(seeded.includes('token'), '前置条件：只读态应已产出 token HTML');
-  const preview: CodeTextPreview = {
-    kind: 'text',
-    name: 'reuse.js',
-    path: 'D:/repo/reuse.js',
-    text: source,
-    highlightedHtml: seeded,
-    isMarkdown: false,
-    mode: 'preview',
-  };
-  renderCodeViewer(host, {
-    preview,
-    copied: false,
-    onCopy: () => {},
-    onEditInput: () => {},
-    onSave: () => {},
-    editable: true,
-    t,
-  });
-  const editHighlight = host.querySelector('.sfe-file-viewer-edit-highlight');
-  assert.ok(editHighlight, '编辑模式应渲染高亮层');
-  assert.equal(editHighlight!.innerHTML, seeded, '高亮层应直接复用只读态算好的 HTML');
-});
-
 test('预览组件: 编辑态行号槽按差额增删，已有行号节点原地复用', () => {
   const host = document.createElement('div');
   const preview: CodeTextPreview = {
@@ -1397,7 +1526,6 @@ test('预览组件: 编辑态行号槽按差额增删，已有行号节点原地
     name: 'gutter.js',
     path: 'D:/repo/gutter.js',
     text: 'const a = 1;\nconst b = 2;',
-    highlightedHtml: '<span>code</span>',
     isMarkdown: false,
   };
   renderCodeViewer(host, {
@@ -1439,7 +1567,6 @@ test('预览组件: 编辑态切片高亮在文本变化后重绘，行号与显
     name: 'slice.js',
     path: 'D:/repo/slice.js',
     text,
-    highlightedHtml: '',
     isMarkdown: false,
   };
 
@@ -1487,7 +1614,6 @@ test('预览组件: 编辑态 textarea 的贴合高度必须在元素入文档�
     name: 'height.js',
     path: 'D:/repo/height.js',
     text: Array.from({ length: 200 }, (_, i) => `const v${i} = ${i};`).join('\n'),
-    highlightedHtml: '',
     isMarkdown: false,
   };
 
@@ -1572,7 +1698,6 @@ test('预览组件: 虚拟列表视口尺寸变化后按新高度重算窗口，
         name: 'big.txt',
         path: 'D:/repo/big.txt',
         text,
-        highlightedHtml: '',
         isMarkdown: false,
       },
       copied: false,
@@ -1612,13 +1737,12 @@ test('预览组件: 虚拟列表视口尺寸变化后按新高度重算窗口，
   }
 });
 
-test('预览组件: 组件内体量判定与 highlight-policy 逐条件等价（熔断 / 虚拟化边界）', async () => {
-  const { shouldVirtualize } = await import('../../../src/components/highlight-policy.ts');
+test('预览组件: 文本预览一律走窗口化虚拟列表（小文件不再整块渲染，双管线已统一）', () => {
   const jsLine = (length: number) => `const v = "${'x'.repeat(Math.max(0, length - 12))}";`;
   const cases = [
     { name: '空文本', text: '' },
+    { name: '小文件', text: 'const a = 1;' },
     { name: '400 行', text: Array.from({ length: 400 }, (_, i) => `const v${i} = 1;`).join('\n') },
-    { name: '401 行', text: Array.from({ length: 401 }, (_, i) => `const v${i} = 1;`).join('\n') },
     { name: '单行 20000 字符', text: jsLine(20000) },
     { name: '单行 20001 字符', text: jsLine(20001) },
     { name: '400 行共 28 万字符', text: Array.from({ length: 400 }, () => jsLine(700)).join('\n') },
@@ -1626,8 +1750,6 @@ test('预览组件: 组件内体量判定与 highlight-policy 逐条件等价（
 
   for (const { name, text } of cases) {
     const host = document.createElement('div');
-    // 整篇高亮的回填要等 ensureHighlighter，且被 content.isConnected 把关：
-    // 挂进 document 才走得到真实链路（与线上面板一致）。
     document.body.appendChild(host);
     try {
       renderCodeViewer(host, {
@@ -1636,19 +1758,17 @@ test('预览组件: 组件内体量判定与 highlight-policy 逐条件等价（
           name: 'a.js',
           path: 'D:/repo/a.js',
           text,
-          highlightedHtml: '',
           isMarkdown: false,
         },
         copied: false,
         onCopy: () => {},
         t,
       });
-      const virtualized = !!host.querySelector('.sfe-file-viewer-code-scroll-virtual');
-      assert.equal(virtualized, shouldVirtualize(text), `${name}：虚拟化判定应与 policy 一致`);
-      // 整篇熔断判定只在整块 <pre> 分支起作用（虚拟分支按单行上色）
-      if (virtualized) continue;
-      await flushClipboardRead();
-      assert.equal(!!host.querySelector('.token'), shouldHighlight(text), `${name}：整篇高亮熔断判定应与 policy 一致`);
+      assert.ok(
+        !!host.querySelector('.sfe-file-viewer-code-scroll-virtual'),
+        `${name}：只读态应统一走窗口化虚拟列表`
+      );
+      assert.ok(!host.querySelector('.sfe-file-viewer-code-content'), `${name}：整块 <pre> 渲染分支应已移除`);
     } finally {
       host.remove();
     }
@@ -1664,7 +1784,6 @@ test('预览组件: 行号槽标记只钉在指定行，点击交回它自己的
     name: 'a.http',
     path: 'D:/repo/a.http',
     text: '@host = a.test\n\n### 登录\nGET https://{{host}}/users',
-    highlightedHtml: '',
     isMarkdown: false,
     mode: 'preview',
   };
@@ -1675,8 +1794,8 @@ test('预览组件: 行号槽标记只钉在指定行，点击交回它自己的
     gutterMarkers: () => [{ line: 3, title: '发送此请求: 登录', onRun: () => runs.push('登录') }],
     t,
   });
-  const rows = host.querySelectorAll('.sfe-file-viewer-gutter-row');
-  assert.equal(rows.length, 4, '行号槽按行数铺满');
+  const rows = host.querySelectorAll('.sfe-file-viewer-line');
+  assert.equal(rows.length, 4, '虚拟行按行数渲染出可视窗口');
   assert.equal(rows[0].querySelector('.sfe-file-viewer-gutter-run'), null, '没标记的行不该有箭头');
   const button = q<HTMLButtonElement>(rows[2], '.sfe-file-viewer-gutter-run');
   assert.equal(button.title, '发送此请求: 登录');
@@ -1693,7 +1812,6 @@ test('预览组件: 编辑态行号槽同样带标记，失焦只通报一次', 
     name: 'a.http',
     path: 'D:/repo/a.http',
     text: '### 登录\nGET https://a.test/users',
-    highlightedHtml: '',
     isMarkdown: false,
     mode: 'preview',
   };
@@ -1714,6 +1832,63 @@ test('预览组件: 编辑态行号槽同样带标记，失焦只通报一次', 
   assert.equal(blurred, 1, '失焦通报与发送是两件事');
 });
 
+test('代码查看器: .vue 文件预览按 SFC 区块逐行着色（模板 HTML / 脚本 TS）', () => {
+  const host = document.createElement('div');
+  const text = [
+    '<template>',
+    '  <b class="a">{{ n }}</b>',
+    '</template>',
+    '<script lang="ts">',
+    'const n = 1;',
+    '</script>',
+  ].join('\n');
+  renderCodeViewer(host, {
+    preview: { kind: 'text', name: 'a.vue', path: 'D:/repo/a.vue', text, isMarkdown: false, mode: 'preview' },
+    copied: false,
+    t,
+  });
+  const rows = [...host.querySelectorAll<HTMLElement>('.sfe-file-viewer-line-text')];
+  assert.ok(rows.some((row) => row.querySelector('.token.tag')), '模板行要有 HTML tag 着色');
+  assert.ok(rows.some((row) => row.querySelector('.token.keyword')), '脚本体行要有 keyword 着色');
+});
+
+test('代码查看器: 首帧未加载高亮块时，懒块完成后刷新可视行', async () => {
+  // 回归：首帧允许先显示纯文本，但高亮块完成后必须刷新仍挂载的虚拟列表；
+  // 只检查最终公开行为，不把“是否调用 refresh”这种内部实现当成契约。
+  installHighlighter(null);
+  const host = document.createElement('div');
+  document.body.appendChild(host);
+  try {
+    renderCodeViewer(host, {
+      preview: {
+        kind: 'text',
+        name: 'a.js',
+        path: 'D:/repo/a.js',
+        text: 'const value = 1;',
+        isMarkdown: false,
+        mode: 'preview',
+      },
+      copied: false,
+      t,
+    });
+
+    // 懒块完成前允许退回纯文本，但查看器必须已经挂出首屏行。
+    const row = q<HTMLElement>(host, '.sfe-file-viewer-line-text');
+    assert.equal(row.querySelector('.token.keyword'), null, '高亮块未完成前应先显示纯文本');
+
+    // loadChunk 的源码兜底是异步 import；给生产 blob import 留出有限窗口，
+    // 不能用固定的单个 setTimeout 伪造“已加载”，否则测不到真正的异步结果。
+    const loaded = await ensureHighlighter();
+    assert.ok(loaded && highlighterReady(), '高亮懒块必须能够完成加载');
+    // refresh 会按虚拟列表契约重建当前窗口，不能拿刷新前已脱离 DOM 的行节点判定。
+    const refreshedRow = q<HTMLElement>(host, '.sfe-file-viewer-line-text');
+    assert.ok(refreshedRow.querySelector('.token.keyword'), '高亮块完成后已挂载的行必须刷新为 token HTML');
+  } finally {
+    host.remove();
+    installHighlighter({ highlightCodeHtml });
+  }
+});
+
 test('代码查看器: http 文件在未注入高亮块时仍上色（只读 + 编辑态）', () => {
   // 回归：着色逻辑曾只住在懒加载高亮块里，块没就绪就整篇无色——用户看到的正是「http 里的 JSON 一片白」。
   // 这里清空注入（等价于块从未到达），渲染 http 文件必须仍产出 token。
@@ -1725,19 +1900,18 @@ test('代码查看器: http 文件在未注入高亮块时仍上色（只读 + �
       name: 'a.http',
       path: 'D:/repo/a.http',
       text,
-      highlightedHtml: '',
       isMarkdown: false,
       mode: 'preview',
     };
 
-    // 只读态：小文件整块高亮
+    // 只读态：逐行高亮（统一虚拟列表），http 由首屏着色器同步上色
     const ro = document.createElement('div');
     renderCodeViewer(ro, { preview: base, copied: false, onCopy: () => {}, onSetMode: () => {}, t });
-    const content = q<HTMLElement>(ro, '.sfe-file-viewer-code-content');
-    assert.ok(content.querySelector('.token.property'), '只读态：方法 / JSON 键要着色');
-    assert.ok(content.querySelector('.token.string'), '只读态：字符串要着色');
-    assert.ok(content.querySelector('.token.boolean'), '只读态：布尔要着色');
-    assert.ok(content.querySelector('.token.number'), '只读态：数字要着色');
+    const rowTexts = [...ro.querySelectorAll<HTMLElement>('.sfe-file-viewer-line-text')];
+    assert.ok(rowTexts.some((row) => row.querySelector('.token.property')), '只读态：方法 / JSON 键要着色');
+    assert.ok(rowTexts.some((row) => row.querySelector('.token.string')), '只读态：字符串要着色');
+    assert.ok(rowTexts.some((row) => row.querySelector('.token.boolean')), '只读态：布尔要着色');
+    assert.ok(rowTexts.some((row) => row.querySelector('.token.number')), '只读态：数字要着色');
 
     // 编辑态：高亮层（textarea 文字透明，颜色全出自这一层）
     const ed = document.createElement('div');
@@ -1753,7 +1927,7 @@ test('代码查看器: http 文件在未注入高亮块时仍上色（只读 + �
     assert.ok(hl.querySelector('.token.property'), '编辑态：方法 / JSON 键要着色');
     assert.ok(hl.querySelector('.token.boolean'), '编辑态：布尔要着色');
   } finally {
-    installHighlighter({ highlightCodeHtml, shouldHighlight });
+    installHighlighter({ highlightCodeHtml });
   }
 });
 
@@ -1777,18 +1951,21 @@ test('代码查看器: http 文件含超长单行时，只读与编辑态仍整�
       name: 'a.http',
       path: 'D:/repo/a.http',
       text,
-      highlightedHtml: '',
       isMarkdown: false,
       mode: 'preview',
     };
 
-    // 只读态：不得因超长单行被判成大文件走纯文本，仍要整篇着色
+    // 只读态：统一虚拟列表；超长行只该让那一行退纯文本，其余行照常着色
     const ro = document.createElement('div');
     renderCodeViewer(ro, { preview: base, copied: false, onCopy: () => {}, t });
-    assert.equal(!!ro.querySelector('.sfe-file-viewer-code-scroll-virtual'), false, '超长单行不该把整篇拖进虚拟列表');
-    const content = q<HTMLElement>(ro, '.sfe-file-viewer-code-content');
-    assert.ok(content.querySelector('.token.property'), '只读态：方法 / JSON 键要着色');
-    assert.ok(content.querySelector('.token.boolean'), '只读态：布尔要着色');
+    const rowTexts = [...ro.querySelectorAll<HTMLElement>('.sfe-file-viewer-line-text')];
+    assert.ok(rowTexts.some((row) => row.querySelector('.token.property')), '只读态：方法 / JSON 键要着色');
+    assert.ok(rowTexts.some((row) => row.querySelector('.token.boolean')), '只读态：布尔要着色');
+    // 超长行自身不着色，但正文必须完整保留（不得被裁掉）
+    const longRow = rowTexts.find((row) => row.textContent && row.textContent.includes('"long"'));
+    assert.ok(longRow, '超长行的正文仍要渲染');
+    assert.ok(longRow!.textContent!.includes('a'.repeat(100)), '超长行内容完整');
+    assert.equal(longRow!.querySelector('.token'), null, '超长行自身退化为纯文本');
 
     // 编辑态：高亮层同样不能被超长单行熔断成纯文本
     const ed = document.createElement('div');
@@ -1804,7 +1981,7 @@ test('代码查看器: http 文件含超长单行时，只读与编辑态仍整�
     assert.ok(hl.querySelector('.token.property'), '编辑态：方法 / JSON 键要着色');
     assert.ok(hl.querySelector('.token.boolean'), '编辑态：布尔要着色');
   } finally {
-    installHighlighter({ highlightCodeHtml, shouldHighlight });
+    installHighlighter({ highlightCodeHtml });
   }
 });
 
@@ -1837,7 +2014,6 @@ test('代码查看器: http 文件字符数超整篇上限但不足 400 行时�
       name: 'a.http',
       path: 'D:/repo/a.http',
       text,
-      highlightedHtml: '',
       isMarkdown: false,
       mode: 'preview',
     };
@@ -1855,6 +2031,6 @@ test('代码查看器: http 文件字符数超整篇上限但不足 400 行时�
     assert.ok(hl.querySelector('.token.boolean'), '编辑态：布尔要着色');
   } finally {
     dom.window.getComputedStyle = originalComputedStyle;
-    installHighlighter({ highlightCodeHtml, shouldHighlight });
+    installHighlighter({ highlightCodeHtml });
   }
 });

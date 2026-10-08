@@ -8,6 +8,7 @@
  */
 
 import type { DirectoryEntry } from "../types/host/host-workspace.ts";
+import type { TranslateFn } from "../types/panel-state.ts";
 import type { GitignoreRule } from "./file-filter.ts";
 import { extname, readDirectoryEntries, readFileContent, relativePath } from "./file-service.ts";
 import { getRelativeGitPath } from "./git-service.ts";
@@ -15,11 +16,17 @@ import { isExcludedMeta, isIgnoredByRules, parseGitignore } from "./file-filter.
 import { mapPool } from "../utils/async.ts";
 
 /**
- * rest-client 生态认定的请求文件扩展名（不含点、小写）。
- * @description `.http` 与 `.rest` 在上游属同一语言（VS Code REST Client 的 fileAssociations
- *   把两者都映射到 http 语法），故这里一并收录。
+ * 算作请求文件的扩展名（不含点、小写）。
+ * @description `.http` 与 `.rest` 是同一类文件的两种写法，一并收录；名单外的扩展名不进结果。
+ *   判定只看扩展名，不看文件内容。
  */
 export const HTTP_REST_EXTENSIONS: ReadonlySet<string> = Object.freeze(new Set(["http", "rest"]));
+
+/** 收哪几类扩展名（名单本身，不含点）。 */
+export const REQUEST_FILE_EXTENSIONS: readonly string[] = Object.freeze([...HTTP_REST_EXTENSIONS]);
+
+/** 同一份名单写给用户看的那一串：`.http / .rest`。界面提示与拦截文案都取它，别处不再抄一遍。 */
+export const REQUEST_FILE_EXTENSION_HINT: string = REQUEST_FILE_EXTENSIONS.map((name) => `.${name}`).join(" / ");
 
 /** 单层目录子项的并发读取度，与整仓 .gitignore 收集（tree-controller）同一档。 */
 const SCAN_CONCURRENCY = 8;
@@ -94,6 +101,18 @@ export function isHttpRestFileName(name: string): boolean {
   return HTTP_REST_EXTENSIONS.has(extname(String(name || "")));
 }
 
+/**
+ * 新建请求文件的初始内容（**唯一模板源**）。
+ * @param t 翻译函数（标题行用）
+ * @returns `### 请求 1` + 一个空 GET 请求的正文
+ * @description 文件管理（文件树新建 `.http` / `.rest`）与 HTTP 管理（新建请求文件）
+ *   两个入口共用这一份，此前两边各写各的——文件树建出来是空文件、HTTP 面板有模板，
+ *   用户看到的是同一类文件两种出生。要改初始文本只改这里。
+ */
+export function newRequestFileTemplate(t: TranslateFn): string {
+  return `### ${t("http.newRequestTitle", "请求 1")}\nGET https://\n`;
+}
+
 /** 逐层扫描的共享上下文（一次调用一份，递归过程中只改不改形）。 */
 type ScanContext = {
   /** 工作区根绝对路径，算相对路径与规则 base 都用它。 */
@@ -160,8 +179,8 @@ function releaseReadSlot(ctx: ScanContext): void {
  * @returns 该层自身的规则（base 已填），无规则时为空数组
  * @description 根目录自身的 base 是空串，不能用「相对路径为假值」判越界：
  *   那样最该读的根上 .gitignore 会被跳过。越界一律由 relativePath 回 null 表示。
- *   先查列目录结果再决定读不读，与文件树的补读逻辑同一手法：无脑读每个目录的
- *   .gitignore 会让整仓扫描多付出一倍 IPC。
+ *   先查本层列目录结果、确认真有 `.gitignore` 再去读：每个目录都盲读一次的话，
+ *   整仓扫描要多付出一倍 IPC。
  */
 async function readLayerRules(
   dir: string,
@@ -245,7 +264,7 @@ async function scanDirectory(dir: string, inherited: GitignoreRule[], ctx: ScanC
     if (!entry || !entry.path) continue;
     if (!entry.isDirectory) {
       if (!isHttpRestFileName(entry.name)) continue;
-      // 忽略开关关闭时命中项照样列出，与文件树「浅色显示而非隐藏」同一语义。
+      // 忽略开关关闭时命中项照样列进结果：这一层不再按规则丢弃，但仍只收名单内的扩展名。
       if (ctx.respect && isEntryIgnored(entry, getRelativeGitPath(entry.path, ctx.rootPath), rules)) continue;
       ctx.files.push({
         name: String(entry.name || ""),
@@ -264,7 +283,7 @@ async function scanDirectory(dir: string, inherited: GitignoreRule[], ctx: ScanC
   await mapPool(dirs, SCAN_CONCURRENCY, (child) => scanDirectory(child.path, rules, ctx));
 }
 
-/** 目录层级路径比较用的 Collator：数字感知 + 忽略大小写差异，与文件树排序同一档规则。 */
+/** 目录层级路径比较用的 Collator：数字感知（`2` 排在 `10` 前面）、大小写差异不影响先后。 */
 const REL_PATH_COLLATOR = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 
 /**

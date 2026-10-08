@@ -133,6 +133,7 @@
 }
 
 .sfe-confirm-dialog {
+  position: relative;
   width: min(360px, calc(100vw - 32px));
   box-sizing: border-box;
   padding: 18px;
@@ -142,6 +143,29 @@
   box-shadow: 0 16px 48px rgba(0, 0, 0, 0.36);
   color: var(--text-primary);
   outline: none;
+}
+
+/* 右上角那颗 ❌：与标题同一条基线，只有悬停才起底——它是逃生口，不是主操作。 */
+.sfe-confirm-close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm, 4px);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.sfe-confirm-close:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
 }
 
 .sfe-confirm-title {
@@ -156,6 +180,343 @@
   color: var(--text-secondary);
   font-size: 12px;
   line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+/* 文本输入弹窗（新建请求文件）：标题下面那一行换成「标签 + 输入框」，取代正文那段。 */
+.sfe-confirm-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 12px 0 0;
+}
+
+.sfe-confirm-field-label {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+/* 输入框按本文件既有那档来：圆角 radius-sm、内边距 6px 8px、字号 12px，与右键菜单里的重命名输入框同尺寸。 */
+.sfe-confirm-field-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 8px;
+  border: 1px solid var(--border-color, var(--border-light));
+  border-radius: var(--radius-sm, 4px);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 12px;
+}
+
+.sfe-confirm-field-input:focus {
+  border-color: var(--accent-color);
+  outline: none;
+}
+
+.sfe-confirm-field-input::placeholder {
+  color: var(--text-tertiary, var(--text-muted));
+}
+
+/* 弹窗里的当场校验失败：只出现在带正文替换且给了错误位的弹窗，
+   没有错误时那一个节点是 hidden 的，一行空位都不留。 */
+.sfe-confirm-error {
+  margin: 10px 0 0;
+  padding: 6px 8px;
+  border: 1px solid var(--accent-red, #d9534f);
+  border-radius: var(--radius-sm, 4px);
+  background: var(--bg-primary);
+  color: var(--accent-red-text, var(--accent-red, #d9534f));
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+/* 整张环境表比一句话宽：两段并排看、变量名与值两栏都要读得清，弹窗放宽到这一档（窄窗口下再收）。 */
+.sfe-confirm-dialog:has(.sfe-env-form) {
+  width: min(720px, calc(100vw - 64px));
+}
+
+/* 环境弹窗的正文：页签条在上，两页在下面轮着露；环境页里是导航条 + 眼前那一段。 */
+.sfe-env-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 12px 0 0;
+}
+
+/* 一次只编辑一个环境，正文里同时只有眼前那一段。两页钉死同一个高度：
+   文件变量那页内容再少、环境变量那页内容再多，切过去弹窗一像素都不跳——
+   高度是壳的属性，不该跟着内容抖。 */
+.sfe-env-form-tables,
+.sfe-env-form-files {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  height: 60vh;
+  overflow-y: auto;
+}
+
+/* 上面那条 display:flex 会盖掉 UA 的 [hidden]{display:none}，切页靠的就是 hidden，必须显式让位。 */
+.sfe-env-form-tables[hidden],
+.sfe-env-form-files[hidden] {
+  display: none;
+}
+
+/* 环境导航条：环境名就是切换器。环境多了就换行，别横向滚——横向滚的是天梯的近亲。
+   两页都占着这一行：文件变量页它置灰让位但不消失，弹窗高度才不会跟着切页上蹿下跳。 */
+.sfe-env-form-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+
+/* display:flex 会盖掉 UA 的 [hidden]{display:none}，留着这条给以后可能的收起用。 */
+.sfe-env-form-chips[hidden] {
+  display: none;
+}
+
+/* 文件变量那一页：导航条让位——点不动、退一档灰，但高度照占。 */
+.sfe-env-form-chips.dimmed {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+/* 一颗 chip 一个环境：名字长了截断加省略号，十条环境也要摆得下——
+   哪段在眼前由实底选中态说话，不靠读全名。 */
+.sfe-env-form-chip {
+  max-width: 12em;
+  overflow: hidden;
+  padding: 2px 10px;
+  border: 1px solid var(--border-color, var(--border-light));
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.6;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sfe-env-form-chip:hover {
+  border-color: var(--text-muted);
+  color: var(--text-primary);
+}
+
+/* 眼前那段用实底 pill：它是这一屏唯一在编辑的东西，比页签的下划线再重一档。 */
+.sfe-env-form-chip.active {
+  border-color: var(--accent-color);
+  background: var(--accent-color);
+  color: var(--text-on-accent, #fff);
+}
+
+/* 只有一页可切的标签条是颗死控件，所以文件变量为空时整条都不摆（见组件里的门）。 */
+.sfe-env-form-tabs {
+  display: flex;
+  gap: 2px;
+  border-bottom: 1px solid var(--border-light);
+}
+
+.sfe-env-form-tab {
+  padding: 6px 10px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: var(--radius-sm, 4px) var(--radius-sm, 4px) 0 0;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+
+.sfe-env-form-tab:hover {
+  color: var(--text-primary);
+}
+
+/* 选中那一页压一道重墨：与工具窗口的 tab 同一档（下划线用强调色，字重加粗）。 */
+.sfe-env-form-tab.active {
+  border-bottom-color: var(--accent-color);
+  color: var(--text-primary);
+  font-weight: 700;
+}
+
+/* 一段：段头（段名 + 删掉这一段）与其下的变量行。段与段之间描一道边，
+   一眼看得清哪几行属于同一个环境——这是这张表唯一分组线索。 */
+.sfe-env-form-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--border-color, var(--border-light));
+  border-radius: var(--radius-sm, 4px);
+  background: var(--bg-secondary, transparent);
+}
+
+/* display:flex 同样会盖掉 UA 的 [hidden]{display:none}：一次只露一段靠的就是 hidden，必须显式让位。 */
+.sfe-env-form-section[hidden] {
+  display: none;
+}
+
+.sfe-env-form-section-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* 新段的段名要能填，所以它是输入框；已有段的名字读就好（见下面那条只读样式）。 */
+.sfe-env-form-section-name {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono, monospace);
+}
+
+/* 已有段的名字只念，不给输入框：改不动的东西摆个能敲的框，等于骗用户敲一遍。
+   尺寸跟同一屏的输入框对齐（6px 8px / 12px），靠不加边框与正文字重区分「这一栏读就好」。 */
+.sfe-env-form-section-name-static {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm, 4px);
+  background: var(--bg-active, transparent);
+  color: var(--text-primary);
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+/* 「删掉这一段」只给图标：与行内删除同一档，段头右侧那一个位置。 */
+.sfe-env-form-section-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 26px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm, 4px);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.sfe-env-form-section-remove:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.sfe-env-form-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* 「私密表里也有这一项，改这里不生效」：它是解释而不是拦下来，所以不描红框、只用正文灰，
+   由所在那一段的 6px 间距贴着它那一行变量。 */
+.sfe-env-form-private {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+/* 变量名窄、值宽：值才常被拉长（地址、令牌），键通常是短名字。 */
+.sfe-env-form-key {
+  flex: 0 0 40%;
+  min-width: 0;
+  font-family: var(--font-mono, monospace);
+}
+
+.sfe-env-form-value {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono, monospace);
+}
+
+/* 行内删除只给图标：无边框、22px 高、悬停才起底，与弹窗里那颗按钮同一档。 */
+.sfe-env-form-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 26px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm, 4px);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.sfe-env-form-remove:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+/* 导航条末尾的「添加环境」：带字的虚线 pill，与 chip 同高同形——一眼知道这是再加一个环境，
+   不是什么装饰性的小圆点。 */
+.sfe-env-form-add-section {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 10px;
+  border: 1px dashed var(--border-color, var(--border-light));
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.sfe-env-form-add-section:hover {
+  border-color: var(--text-muted);
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+/* 文件变量那一页只念不改：列宽与上面可编辑的变量行同一档（键 40% / 值占满），
+   两页对得上，用户才读得出「同一个名字在这两页里是一回事」。 */
+.sfe-env-form-file-hint {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.sfe-env-form-file-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.sfe-env-form-file-name {
+  flex: 0 0 40%;
+  min-width: 0;
+  color: var(--text-primary);
+  font-family: var(--font-mono, monospace);
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.sfe-env-form-file-value {
+  flex: 1;
+  min-width: 0;
+  padding: 3px 8px;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm, 4px);
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  font-family: var(--font-mono, monospace);
   overflow-wrap: anywhere;
 }
 
@@ -178,9 +539,20 @@
   cursor: pointer;
 }
 
-.sfe-confirm-button:hover {
+/* 悬停起底只给按得动的那一颗：禁用态还跟着 hover，就等于暗着也勾人点。 */
+.sfe-confirm-button:hover:not(:disabled) {
   background: var(--bg-hover);
   color: var(--text-primary);
+}
+
+/* 当场判下来时「创建」就是暗的：不改外观的话，一颗按不动的按钮和一颗能按的长得一模一样，
+   等于禁了个寂寞。档位与右键菜单的禁用项同一档。 */
+.sfe-confirm-button:disabled {
+  color: var(--text-tertiary, var(--text-muted));
+  background: transparent;
+  border-color: var(--border-light);
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .sfe-confirm-button:focus-visible {

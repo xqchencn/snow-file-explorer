@@ -4,6 +4,7 @@ import {
   parseGitignore,
   isIgnoredByRules,
   isExcludedMeta,
+  isExcludedToolItem,
   filterExcludedEntries,
 } from '../../../src/services/file-filter.ts';
 
@@ -168,4 +169,43 @@ test('文件过滤: 单一 .gitignore 开关同时控制元数据和忽略项', 
   assert.equal(visible[0].isSoftHidden, true);
   assert.equal(visible[1].isSoftHidden, true);
   assert.equal(visible[2].isSoftHidden, false);
+});
+
+test('文件过滤: 工具目录按名字命中任意层级，开关开启时强制屏蔽', () => {
+  const entries = [
+    { name: '.claude', path: 'D:/repo/.claude', isDirectory: true },
+    { name: 'node_modules', path: 'D:/repo/packages/app/node_modules', isDirectory: true },
+    { name: 'src', path: 'D:/repo/src', isDirectory: true },
+  ];
+  const filtered = filterExcludedEntries(entries, 'D:/repo', { excludeMeta: false, useGitignore: true });
+  assert.deepEqual(
+    filtered.map((entry) => entry.name),
+    ['src'],
+    '工具目录（含嵌套包内）即使不在 .gitignore 也强制隐藏'
+  );
+
+  // 开关关闭：保留显示，但带工具命中与浅色标记（与 gitignored 同一套浅色逻辑）
+  const kept = filterExcludedEntries(entries, 'D:/repo', { excludeMeta: false, useGitignore: false });
+  assert.equal(kept.length, entries.length);
+  assert.equal(kept[0].isToolExcluded, true);
+  assert.equal(kept[0].isSoftHidden, true);
+  assert.equal(kept[2].isToolExcluded, false);
+  assert.equal(kept[2].isSoftHidden, false);
+});
+
+test('文件过滤: 工具文件清单与 *.tsbuildinfo 后缀命中，通用目录名不误伤', () => {
+  // 工具生成的文件
+  assert.equal(isExcludedToolItem('.eslintcache', false), true);
+  assert.equal(isExcludedToolItem('.aider.chat.history.md', false), true);
+  assert.equal(isExcludedToolItem('.classpath', false), true);
+  assert.equal(isExcludedToolItem('tsconfig.tsbuildinfo', false), true);
+  // 后缀匹配不吃同名前缀文件
+  assert.equal(isExcludedToolItem('tsbuildinfo', false), false);
+  assert.equal(isExcludedToolItem('.tsbuildinfoX', false), false);
+  // 用户拍板保留的通用名：build / out / bin / vendor / .yarn 不进强制清单
+  for (const n of ['build', 'out', 'bin', 'vendor', '.yarn']) {
+    assert.equal(isExcludedToolItem(n, true), false, n + ' 不参与工具屏蔽');
+  }
+  assert.equal(isExcludedToolItem('src', true), false);
+  assert.equal(isExcludedToolItem('CLAUDE.md', false), false, 'AI 规则文件要保留可见');
 });

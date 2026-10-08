@@ -42,6 +42,7 @@ import {
   PanelRight,
   PanelBottom,
   Search,
+  Send,
 } from 'lucide';
 import type { IconNode } from 'lucide';
 import { fileIconMarkup } from "./file-icons.ts";
@@ -95,6 +96,8 @@ const ICON_MAP: Record<string, IconNode> = {
   panelBottom: PanelBottom,
   // 文件搜索栏
   search: Search,
+  // 右键「发送到当前会话」：纸飞机（lucide Send）
+  send: Send,
 };
 
 /**

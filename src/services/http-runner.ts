@@ -4,23 +4,26 @@
  *   发送通道只有一个：宿主 `api.net.fetch`（宿主侧 `plugins:http-request`，
  *   由 Electron 的 net.fetch 代发，绕开渲染进程的 CORS 与混合内容限制）。
  * @description 宿主通道的边界必须在发之前讲清楚，不能假装成功：
- *   只收 http/https 绝对地址；方法表是 GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS
- *   （上游方法表里的 CONNECT/TRACE 与 WebDAV 一族宿主不收）；正文是字符串，
+ *   只收 http/https 绝对地址；方法表就是 GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS，
+ *   CONNECT/TRACE 与 WebDAV 一族宿主不收；正文是字符串，
  *   二进制文件正文发不出去；响应体上限 5MB；超时钳在 1s..120s；
  *   重定向恒跟随（故 `# @no-redirect` 只能报「做不到」）；不带也不存 cookie。
- * @description 表单正文按上游 `formParamEncodingStrategy: "never"` 的口径原样发出，
- *   不做 automatic 那层再编码——那是 encodeurl 的字符集细节，此处不凭印象复刻。
+ *   做不到的那些要么前置拒绝、要么点名提示，不能让用户以为照自己写的发出去了。
+ * @description 表单正文按原文发出，不做第二次编码：值里已经写成 `%20` 的转义再编一次
+ *   就变成 `%2520`，服务端解出来的值就错了。要不要预编码由用户写文件时定，本插件不替他猜，
+ *   也不自己发明一套按字符集的自动编码规则——吃不准服务端要什么时，宁可不编码。
  *   所有面向用户的文案都经 t() 出，三语词条见 locales/*.json 的 http.* 组。
  */
 
 import type { PluginNetRequestOptions, PluginNetResponse } from "../types/plugin-runtime.ts";
 import type { TranslateFn } from "../types/panel-state.ts";
 import type { HttpBodyFileRef, HttpParsedFile, HttpParsedRequest } from "./http-request-parser.ts";
-import { resolveHttpVariables } from "./http-variables.ts";
+import { resolveHttpVariables, mimeTypeOf } from "./http-variables.ts";
 import type { HttpVariableScope, HttpVariableWarning, HttpResponseRecord } from "./http-variables.ts";
 import { errorMessage, readFileContent } from "./file-service.ts";
+import { encodeBase64Utf8 } from "../utils/encoding.ts";
 
-/** 宿主代发通道（`api.net.fetch` 的同形接口，测试注入手替身）。 */
+/** 宿主代发通道：签名就是 `api.net.fetch`，测试里注入替身顶掉它。 */
 export type HttpFetch = (url: string, options?: PluginNetRequestOptions) => Promise<PluginNetResponse>;
 
 /** 一次真实响应。 */
@@ -75,7 +78,7 @@ export type HttpRunOptions = {
   t: TranslateFn;
   /** 当前 .http 文件的绝对路径，用于解析相对正文文件引用。 */
   filePath: string;
-  /** 工作区根绝对路径；引用路径先按它试（上游解析顺序：绝对 → 工作区根 → 当前文件目录）。 */
+  /** 工作区根绝对路径；正文里的相对文件引用先按它拼、再按当前文件所在目录拼。 */
   rootPath?: string;
   /** 超时毫秒；缺省交给宿主默认（宿主夹在 1s..120s）。 */
   timeoutMs?: number;
@@ -151,9 +154,79 @@ function dropHeader(headers: Record<string, string>, name: string): void {
 }
 
 /**
+ * 按 Content-Type 组正文的行结束符。
+ * @param body 已做完变量替换与 `< 文件` 内联的正文
+ * @param contentType 最终请求头里的 Content-Type（没写时空串）
+ * @returns 该发的正文
+ * @description 服务端就靠这些分隔符解正文，错一个字节整段都解不出来，所以框架必须在发送前定死：
+ *   - `application/x-www-form-urlencoded`：`&` 起头的行并进上一行，其余行之间留一个换行，
+ *     于是文件里分行写的表单字段发出去是**一行** `name=foo&password=bar`——换行不是表单
+ *     语法的一部分，留着它上一个字段的值里就多出个换行。
+ *   - `multipart/form-data`：行结束符强制 `\r\n`，并整体补一个尾 CRLF。
+ *     boundary 的收尾行本来就要求前面是 CRLF，少这一字节服务端就解析不出结束标记；
+ *     所以不管正文是不是从文件内联来的都补——内联与否只是来源不同，线上格式是同一种。
+ *   - `application/x-ndjson`：补一个行结束符。一行一条记录，末行缺换行时读的一方常把它丢掉。
+ *   先按 `\r?\n` 归一再按目标结束符拼：内联进来的文件本身带 CRLF 时，
+ *   不归一就会拼出 `\r\r\n`，multipart 直接坏掉。
+ */
+export function frameHttpBody(body: string, contentType: string): string {
+  const mime = mimeTypeOf(contentType);
+  const lines = String(body ?? "").split(/\r?\n/);
+  if (mime === "application/x-www-form-urlencoded") {
+    return lines.reduce((acc, line, at) => `${acc}${at === 0 || line.startsWith("&") ? "" : "\n"}${line}`, "");
+  }
+  const ending = mime === "multipart/form-data" ? "\r\n" : "\n";
+  let result = lines.join(ending);
+  if (mime === "application/x-ndjson") result += ending;
+  else if (mime === "multipart/form-data") result += "\r\n";
+  return result;
+}
+
+/**
+ * 把 `Authorization` 里的用户名密码补成真正的认证头。
+ * @param headers 最终请求头（就地改）
+ * @param warn 过程信息回报
+ * @param t 翻译函数
+ * @description `Authorization: Basic` 允许三种写法，但线上只有一种：`Basic <base64>`，
+ *   所以在本插件里归一：
+ *   `Basic 用户 密码`（三个及以上词，用户名之后的全是密码）与 `Basic 用户:密码`（一个词且含冒号）
+ *   都就地重写为 `Basic base64(用户:密码)`；只有一个词又不含冒号时视为已经是 base64，原样发。
+ *   `Digest` 要先收 401 挑战再重试、`AWS` 要按最终正文与主机签 SigV4、`COGNITO` 要先拿凭据换
+ *   Bearer 令牌——宿主给的是一次性代发通道，一发一收，没有重试也没有额外签名的位置，这三样给不了。
+ *   于是这三类带凭据的写法逐条点名说明，不把 `Digest 用户 密码` 这种半截值当认证头发出去。
+ */
+function normalizeAuthorizationHeader(
+  headers: Record<string, string>,
+  warn: (text: string) => void,
+  t: TranslateFn
+): void {
+  const raw = pickHeader(headers, "Authorization");
+  if (!raw) return;
+  const key = Object.keys(headers).find((header) => header.toLowerCase() === "authorization") || "Authorization";
+  const [scheme, first, ...rest] = String(raw).split(/\s+/);
+  const normalized = String(scheme || "").toLowerCase();
+  if (normalized === "basic") {
+    // 密码里带空格是常事：`Basic x y z` 第一个词是用户名，之后拼回去才不把后半截密码丢掉。
+    const credential = rest.length ? `${first}:${rest.join(" ")}` : first && first.includes(":") ? first : "";
+    if (credential) headers[key] = `Basic ${encodeBase64Utf8(credential)}`;
+    return;
+  }
+  if (rest.length && (normalized === "digest" || normalized === "aws" || normalized === "cognito")) {
+    warn(
+      normalized === "digest"
+        ? t("http.warn.authDigest", "暂不支持 Digest 认证（要靠 401 挑战重试），这条 Authorization 已按原文发出")
+        : normalized === "aws"
+          ? t("http.warn.authAws", "暂不支持自动计算 AWS Signature v4，这条 Authorization 已按原文发出")
+          : t("http.warn.authCognito", "暂不支持用 COGNITO 凭据换取 Bearer 令牌，这条 Authorization 已按原文发出")
+    );
+  }
+}
+
+/**
  * 拼出一个正文文件引用的候选绝对路径。
- * @description 顺序照上游 requestParserUtil.resolveRequestBodyPath：绝对路径原样用；
- *   否则先按工作区根、再按当前 .http 文件所在目录拼。
+ * @description 绝对路径原样用。相对写法在本插件里有两个都说得通的落点——相对工作区根、
+ *   相对当前 .http 文件所在目录——光看字符串分不出用户指哪个，于是按
+ *   「工作区根 → 当前文件目录」依次拼候选，谁先读到算谁，两个都读不到才报缺文件。
  * @param ref 引用原文（可能带 `./`）
  * @param options 执行选项（filePath / rootPath）
  * @returns 候选路径清单，按尝试顺序
@@ -190,9 +263,16 @@ function variableWarningText(warning: HttpVariableWarning, t: TranslateFn): stri
   if (warning.code === "varTooDeep") {
     return t("http.warn.varTooDeep", "变量「{{name}}」的引用嵌套太深，已按原文发出", { name: warning.name });
   }
-  return warning.code === "varRequestSide"
-    ? t("http.warn.varRequestSide", "请求变量「{{name}}」只有响应快照，取不到请求内容", { name: warning.name })
-    : t("http.warn.varNoResponse", "请求变量「{{name}}」还没有可取的响应，请先发送那条请求", { name: warning.name });
+  if (warning.code === "varNoDotenv") {
+    return t("http.warn.varNoDotenv", "项目里没读到 .env 文件，变量「{{name}}」没有值", { name: warning.name });
+  }
+  if (warning.code === "varNoDotenvKey") {
+    return t("http.warn.varNoDotenvKey", ".env 里没有「{{name}}」这一项", { name: warning.name });
+  }
+  if (warning.code === "varUnsupported") {
+    return t("http.warn.varUnsupported", "变量「{{name}}」要读的东西本宿主拿不到，已按原文发出", { name: warning.name });
+  }
+  return t("http.warn.varNoResponse", "请求变量「{{name}}」还没有可取的内容，请先发送那条请求", { name: warning.name });
 }
 
 /**
@@ -275,7 +355,8 @@ async function assembleBody(
     if (loaded.isBinary) {
       return { text: "", error: t("http.err.binaryBody", "暂不支持发送二进制文件正文（{{path}}）", { path: refPath }), warnings, unresolved };
     }
-    // `<@` 才做变量替换，普通 `<` 原样并入（上游 inputFileSyntax 的 processVariables 分支）。
+    // 只有 `<@` 对并入的内容再做一遍变量替换，普通 `<` 原样并入：
+    // 外部文件里的 `{{ }}` 多半是它自己的语法，不默认替用户吃掉。
     if (ref.processVariables) {
       const injected = resolveHttpVariables(loaded.text, scope);
       unresolved.push(...injected.unresolved);
@@ -347,7 +428,8 @@ export async function runHttpRequest(
     warnings.push(...assembled.warnings);
   }
 
-  // GraphQL：上游按 X-Request-Type 判定后换成 { query, operationName, variables } 的 JSON 正文。
+  // GraphQL：`X-Request-Type: GraphQL` 只是本文件里的开关，服务端收的是 `{ query, operationName,
+  // variables }` 这一份 JSON，所以发送前要把查询段和变量段并成它，标记头本身不发出去。
   if (request.graphQl && body !== null && bodyError === null) {
     dropHeader(headers, "X-Request-Type");
     const operationName = /^\s*query\s+([^@{(\s]+)/i.exec(body)?.[1];
@@ -373,11 +455,21 @@ export async function runHttpRequest(
     body = JSON.stringify({ query: body, operationName: operationName || null, variables });
   }
 
+  // 正文的框架（行结束符、表单并成一行、ndjson 补尾换行）在变量与 `< 文件` 都落定之后再按
+  // Content-Type 过一遍。顺序不能颠倒：变量的值和内联进来的文件都自带换行，先定框架就会让
+  // 这些换行绕过归一——multipart 拼出 `\r\r\n`，正文直接坏掉。
+  if (body !== null && bodyError === null) {
+    body = frameHttpBody(body, pickHeader(headers, "Content-Type"));
+  }
+  normalizeAuthorizationHeader(headers, (text) => warnings.push(text), t);
+
   const sent: HttpSentRequest = { method: request.method.toUpperCase(), url: urlResult.value, headers, body };
   const blockers: string[] = [];
 
   if (!/^https?:\/\//i.test(sent.url)) {
-    // 上游允许 `Host` 头 + 根路径写法，宿主只收绝对地址，能就地拼就拼一个。
+    // 只写 `/path` 再配一个 `Host` 头也是合法请求，但宿主只收绝对地址：能就地拼出完整 URL 就拼，
+    // 协议段没得读就按端口猜（443/8443 走 https）。拼完把 `Host` 头摘掉，主机名已在 URL 里，
+    // 两处各说一份迟早对不上。
     const host = pickHeader(headers, "Host");
     if (host && sent.url.startsWith("/")) {
       const port = host.split(":")[1];
@@ -393,11 +485,25 @@ export async function runHttpRequest(
   if (!HOST_METHODS.has(sent.method)) {
     blockers.push(t("http.err.method", "暂不支持用 {{method}} 发送", { method: sent.method }));
   }
+  // 这两条都是发送方的能力开关，宿主通道没有：重定向恒跟随，cookie 一律不带也不存
+  // （本来也没有一份 cookie 表可关）。做不到的只报提示、不拦发送——请求本身照用户写的发出。
   if (request.noRedirect) {
     warnings.push(t("http.warn.noRedirect", "无法禁止自动跟随重定向"));
   }
   if (request.noCookieJar) {
     warnings.push(t("http.warn.noCookieJar", "请求不带也不保存 cookie"));
+  }
+  // 响应脚本（`> {% %}`）与响应落盘（`> ./file`）不在本插件的执行范围：既不跑也不写文件。
+  // 解析时这两段已从正文里拆走，不点名就是静默吞掉用户写在这一节里的内容，所以逐条说清哪段被忽略。
+  if (request.responseHandler) {
+    warnings.push(t("http.warn.responseHandler", "这段响应脚本（> {% %}）不会被执行"));
+  }
+  if (request.outputRedirect) {
+    warnings.push(
+      t("http.warn.outputRedirect", "响应不会写进 {{path}}，这一行原样留在请求里", {
+        path: request.outputRedirect,
+      })
+    );
   }
   if (unresolved.length) {
     // 只报「有几处」等于没说：用户找不出是哪个变量，把名字列出来才叫说明白。

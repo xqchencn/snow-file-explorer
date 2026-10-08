@@ -82,12 +82,33 @@ test("HTTP 变量: 系统变量按注入的时钟与随机源取值", () => {
 
 test("HTTP 变量: 系统变量写法不对就报未解析，不猜用户想干什么", () => {
   const scope = scopeOf({}, { randomizers: { now: () => FIXED } });
-  // min >= max 不是上游接受的写法（要求 min < max）。
+  // 区间要求 min < max：反过来写不猜用户想取哪一段，按未解析报名。
   assert.deepEqual(resolveHttpVariables("{{$randomInt 10 1}}", scope).unresolved, ["$randomInt 10 1"]);
-  // 自定义格式串依赖 dayjs token 语义，本实现不支持。
-  assert.deepEqual(resolveHttpVariables("{{$datetime 'yyyy-MM'}}", scope).unresolved, ["$datetime 'yyyy-MM'"]);
-  // $processEnv / $dotenv 在插件渲染进程里没有对应来源，一律不解析。
-  assert.deepEqual(resolveHttpVariables("{{$processEnv USERNAME}}", scope).unresolved, ["$processEnv USERNAME"]);
+  // 格式位必须是 rfc1123 / iso8601 / 引号里的自定义串，光一个单词不算。
+  assert.deepEqual(resolveHttpVariables("{{$datetime rfc1602}}", scope).unresolved, ["$datetime rfc1602"]);
+  // 格式位必写：正则要求 `$datetime` 之后跟空白与格式，裸一个 `$datetime` 是写法错。
+  assert.deepEqual(resolveHttpVariables("{{$datetime}}", scope).unresolved, ["$datetime"]);
+  // $processEnv 在插件渲染进程里没有对应来源：不解析，并且要说「宿主拿不到」，不是「你写错了」。
+  const processEnv = resolveHttpVariables("{{$processEnv USERNAME}}", scope);
+  assert.deepEqual(processEnv.unresolved, ["$processEnv USERNAME"]);
+  assert.deepEqual(
+    processEnv.warnings.map((warning) => warning.code),
+    ["varUnsupported"]
+  );
+});
+
+test("HTTP 变量: $dotenv 从注入的 .env 表取值，% 是两级跳转", () => {
+  const scope = scopeOf({}, { dotenv: new Map([["USERNAME", "alice"], ["db.user", "root"]]), environment: new Map([["dbUserKey", "db.user"]]) });
+  assert.equal(resolveHttpVariables("{{$dotenv USERNAME}}", scope).value, "alice");
+  // 键名收点与连字符：`db.user` 这类写法在 .env 里很常见，不该因为字符集太窄查不到。
+  assert.equal(resolveHttpVariables("{{$dotenv db.user}}", scope).value, "root");
+  // `%` 先把键名当环境变量的名字查值，再用查到的名字去 .env 里取。
+  assert.equal(resolveHttpVariables("{{$dotenv %dbUserKey}}", scope).value, "root");
+  const missingKey = resolveHttpVariables("{{$dotenv NOPE}}", scope);
+  assert.deepEqual(missingKey.unresolved, ["$dotenv NOPE"]);
+  assert.deepEqual(missingKey.warnings.map((warning) => warning.code), ["varNoDotenvKey"]);
+  const noFile = resolveHttpVariables("{{$dotenv USERNAME}}", scopeOf({}));
+  assert.deepEqual(noFile.warnings.map((warning) => warning.code), ["varNoDotenv"]);
 });
 
 test("HTTP 变量: 偏移量按月加时钳到月末，与 dayjs 的历法加法一致", () => {
@@ -109,7 +130,7 @@ test("HTTP 变量: 请求变量从最近响应里取正文与头部", () => {
   assert.equal(resolveHttpVariables("{{login.response.body.$.id}}", scope).value, "mock");
   assert.equal(resolveHttpVariables("{{login.response.body.$.nested.items[0].name}}", scope).value, "first");
   assert.equal(resolveHttpVariables("{{login.response.headers.X-Token}}", scope).value, "abc123");
-  // 头部名大小写不敏感（上游同规则）。
+  // 头部名按 HTTP 的规则大小写不敏感，两种拼法都要取到同一个值。
   assert.equal(resolveHttpVariables("{{login.response.headers.x-token}}", scope).value, "abc123");
   // 不写选择器即整份正文。
   assert.equal(resolveHttpVariables("{{login.response.body}}", scope).value, record.body);
@@ -184,4 +205,74 @@ test("HTTP 变量: JSONPath 子集只覆盖请求变量需要的形态", () => {
   assert.equal(pickJsonValue(json, "$.missing"), null);
   assert.equal(pickJsonValue(json, "$.e"), null, "null 值按取不到处理");
   assert.equal(pickJsonValue("not json", "$.a"), null);
+});
+
+test("HTTP 变量: $datetime 与 $localDatetime 支持引号里的自定义格式", () => {
+  const scope = scopeOf({}, { randomizers: { now: () => FIXED } });
+  // `$datetime` 恒按 UTC 排，格式串单双引号都收。
+  assert.equal(resolveHttpVariables("{{$datetime 'YYYY-MM-DD'}}", scope).value, "2026-10-06");
+  assert.equal(resolveHttpVariables('{{$datetime "DD-MM-YYYY" 1 y}}', scope).value, "06-10-2027");
+  assert.equal(resolveHttpVariables("{{$datetime 'HH:mm:ss.SSS'}}", scope).value, "12:34:56.789");
+  // token 表只收大写年份：小写 `yyyy` 认不出就不动它，更不能把它拆成两个 `yy` 各换一次。
+  assert.equal(resolveHttpVariables("{{$datetime 'yyyy-MM'}}", scope).value, "yyyy-10");
+  // `[...]` 是原样输出。
+  assert.equal(resolveHttpVariables("{{$datetime '[at] HH:mm'}}", scope).value, "at 12:34");
+  const local = resolveHttpVariables("{{$localDatetime rfc1123}}", scope).value;
+  // 本地档 rfc1123 排的是 `ddd, DD MMM YYYY HH:mm:ss ZZ`：尾缀带实际偏移，不是 UTC 那档的 GMT。
+  assert.equal(/^\w{3}, \d{2} \w{3} \d{4} \d{2}:\d{2}:\d{2} [+-]\d{4}$/.test(local), true, local);
+});
+
+test("HTTP 变量: 请求变量的 .request. 侧从请求快照取值", () => {
+  const scope = scopeOf(
+    {},
+    {
+      requests: new Map([
+        [
+          "login",
+          {
+            method: "POST",
+            url: "https://a.test/login",
+            headers: { "Content-Type": "application/json" },
+            body: '{"name":"foo"}',
+          },
+        ],
+      ]),
+    }
+  );
+  assert.equal(resolveHttpVariables("{{login.request.body.$.name}}", scope).value, "foo");
+  assert.equal(resolveHttpVariables("{{login.request.headers.Content-Type}}", scope).value, "application/json");
+  // 请求快照这一侧的头部名同样大小写不敏感。
+  assert.equal(resolveHttpVariables("{{login.request.headers.CONTENT-type}}", scope).value, "application/json");
+  const noSnapshot = resolveHttpVariables("{{login.request.body.$.name}}", scopeOf({}));
+  assert.deepEqual(noSnapshot.warnings.map((warning) => warning.code), ["varNoResponse"]);
+});
+
+test("HTTP 变量: XML 响应走 XPath，asJson. / asXml. 强制格式", () => {
+  const xml = '<replies><reply id="a1">第一</reply><reply id="b2">第二</reply></replies>';
+  const scope = scopeOf(
+    {},
+    {
+      responses: new Map([
+        ["getReplies", { status: 200, statusText: "OK", headers: { "Content-Type": "application/xml" }, body: xml }],
+        ["login", { status: 200, statusText: "OK", headers: {}, body: '{"token":"t-1"}' }],
+      ]),
+    }
+  );
+  assert.equal(resolveHttpVariables("{{getReplies.response.body.//reply[1]/@id}}", scope).value, "a1");
+  assert.equal(resolveHttpVariables("{{getReplies.response.body.//reply[2]}}", scope).value, "第二");
+  // 响应没带 Content-Type 也要取到值：asJson. 直接按 JSON 解，不依赖头部说什么格式。
+  assert.equal(resolveHttpVariables("{{login.response.body.asJson.$.token}}", scope).value, "t-1");
+  // asXml. 是相反的强制档：跳过按头部判格式那一步，直接走 XPath。
+  assert.equal(resolveHttpVariables("{{getReplies.response.body.asXml.//reply[1]/@id}}", scope).value, "a1");
+  assert.equal(resolveHttpVariables("{{getReplies.response.body.*}}", scope).value, xml, "* 取整份正文");
+});
+
+test("HTTP 变量: 没注入 uuid 时用平台随机源，绝不因调用方式崩掉", () => {
+  // 把 randomUUID 从 crypto 上摘下来单独调用，Node 抛 ERR_INVALID_THIS、浏览器抛 Illegal invocation。
+  // 这里不注入替身，走的正是那条真通道：一份写了 {{$guid}} 的文件不该把整张面板炸了。
+  assert.doesNotThrow(() => resolveHttpVariables("{{$guid}}", { fileVariables: new Map() }));
+  const value = resolveHttpVariables("x={{$guid}}", { fileVariables: new Map() }).value;
+  if (value !== "x={{$guid}}") {
+    assert.equal(/^x=[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value), true, value);
+  }
 });

@@ -6,21 +6,14 @@
  */
 
 import { el, escapeHtml, copyToClipboard } from "../utils/dom.ts";
-import {
-  MAX_HIGHLIGHT_LEN,
-  MAX_HIGHLIGHT_LINE_LEN,
-  MAX_HIGHLIGHT_LINES,
-  VIRTUAL_LINE_THRESHOLD,
-  measureText,
-  shouldHighlight,
-} from "./highlight-policy.ts";
-import type { MeasuredText } from "./highlight-policy.ts";
+import { MAX_HIGHLIGHT_LINE_LEN } from "./highlight-policy.ts";
 import { ensureHighlighter, highlighterReady, highlightCodeHtml } from "./highlight-client.ts";
 import { isBasicHighlightExt } from "./syntax-basic.ts";
+import { isSfcExt, sfcLineLangs } from "./sfc-highlight.ts";
 import { createVirtualList } from "./virtual-list.ts";
 import { createActionIcon } from "../icons/action-icons.ts";
 import { resolveMarkdownAssetPath, resolveProxiedImageSrc } from "../services/markdown-asset.ts";
-import { extname, relativePath } from "../services/file-service.ts";
+import { extname, relativePath, buildFileSelectionChatMessage } from "../services/file-service.ts";
 import { renderDiffView } from "./diff-view.ts";
 import type { DiffViewMode, TranslateFn } from "../types/panel-state.ts";
 import type { UnifiedDiffResult } from "../services/diff.ts";
@@ -96,60 +89,6 @@ export function disposeViewerViewport(bodyEl: HTMLElement | null | undefined): v
     bodyEl.__sfeVList = null;
   }
   releaseViewerViewportObserver(bodyEl);
-}
-
-/**
- * 虚拟化判定，消费已测体量而非重新扫描文本。
- * @description 与 highlight-policy 的 shouldVirtualize 逐条件等价（同阈值、同比较符），
- *   只是把 measureText 的全文扫描留给调用方做一次。
- * @param measured 文本体量事实
- * @param ext 扩展名；http/rest 时豁免单行熔断（见下）
- * @returns 是否改用虚拟列表渲染
- */
-function shouldVirtualizeMeasured(measured: MeasuredText, ext: string): boolean {
-  if (!measured.length) return false;
-  if (measured.length > MAX_HIGHLIGHT_LEN) return true;
-  if (measured.lines > VIRTUAL_LINE_THRESHOLD) return true;
-  // 单行熔断是为 Prism 防正则回溯而设，对 http/rest 完全不适用：
-  // 它们是行级自足的纯正则着色，超长行只该跳过那一行（basicHighlightCodeHtml 内部已按
-  // MAX_BASIC_LINE_LEN 单独跳过），一行压缩 JSON 不该把整篇拖成虚拟列表 / 纯文本。
-  if (isBasicHighlightExt(ext)) return false;
-  return measured.maxLineLen > MAX_HIGHLIGHT_LINE_LEN;
-}
-
-/**
- * 整篇高亮熔断判定，消费已测体量。
- * @description 与 highlight-policy 的 shouldHighlight 逐条件等价；上限即只读熔断上限，
- *   编辑态不另设更紧的阈值（见 highlight-policy 顶部不变量说明）。
- * @param measured 文本体量事实
- * @param ext 扩展名；http/rest 时豁免单行熔断（见 shouldVirtualizeMeasured 说明）
- * @returns 是否应当做整篇高亮
- */
-function shouldHighlightMeasured(measured: MeasuredText, ext: string): boolean {
-  if (!measured.length) return false;
-  if (measured.length > MAX_HIGHLIGHT_LEN) return false;
-  if (measured.lines > MAX_HIGHLIGHT_LINES) return false;
-  if (isBasicHighlightExt(ext)) return true;
-  return measured.maxLineLen <= MAX_HIGHLIGHT_LINE_LEN;
-}
-
-/**
- * 按「长度 + 行数」判断整篇高亮是否可用，只在两值都判不出结论时才实测最长行。
- * @description 编辑态每次按键都要判一次；行数已由 countLines 的单遍循环免费拿到，
- *   整篇长度不超过单行上限时最长行必然也不超，无需再逐字符重扫全文。
- * @param source 当前文本
- * @param lineCount source 的行数（按 \n 计，与 measureText 同口径）
- * @param ext 扩展名；http/rest 时豁免单行熔断（同 shouldHighlightMeasured）
- * @returns 是否应当做整篇高亮
- */
-function canHighlightByParts(source: string, lineCount: number, ext: string): boolean {
-  if (!source.length) return false;
-  if (lineCount > MAX_HIGHLIGHT_LINES) return false;
-  if (source.length > MAX_HIGHLIGHT_LEN) return false;
-  // http/rest 行级自足：总长 / 行数没超就整篇上色，不再为最长行多扫一遍全文。
-  if (isBasicHighlightExt(ext)) return true;
-  if (source.length <= MAX_HIGHLIGHT_LINE_LEN) return true;
-  return shouldHighlight(source);
 }
 
 /**
@@ -232,8 +171,6 @@ type CodePreviewCommon = {
 type CodePreviewTextBody = {
   /** 文件全文；buildFilePreview 写宿主内容，空态写 ""。 */
   text: string;
-  /** 调用方预计算（或单测注入）的高亮 HTML；为空串时由本组件现算，可缺。 */
-  highlightedHtml?: string;
   /** 是否 Markdown 路径；出处 services/markdown-asset.ts 的 isMarkdownPath，可缺按 false。 */
   isMarkdown?: boolean;
   /** Markdown 的预览/代码模式；非 Markdown 不参与渲染，可缺。 */
@@ -331,6 +268,12 @@ export type ViewerContextMenuOptions = {
   onCopyPath?: () => void;
   /** 复制当前文件相对路径回调；缺省不渲染该项。 */
   onCopyRelativePath?: () => void;
+  /**
+   * 把一段文本作为用户消息发送到宿主当前会话；缺省不渲染「发送到当前会话」菜单项。
+   * @description 消息由查看器组装（代码选区带文件与行号区间，见 buildSendPayload），
+   *   确认弹窗与真正的宿主写动作（chatInput.sendMessage）由装配层完成。
+   */
+  onSendToChat?: (message: string) => void;
   /** 读取扁平运行命令列表；与 onRunCommand 同时具备才出现「运行」分组。 */
   runCommands?: () => FlatRunCommand[];
   /** 顶栏运行下拉的同源列表（可见命令 + 手动运行过的脚本）；右键运行项不得超过它。缺省时退回 runCommands。 */
@@ -367,6 +310,8 @@ export type CodeViewerOptions = {
   onCopyPath?: () => void;
   /** 复制当前文件相对路径回调。 */
   onCopyRelativePath?: () => void;
+  /** 把一段文本作为用户消息发送到宿主当前会话（右键菜单项「发送到当前会话」）。 */
+  onSendToChat?: (message: string) => void;
   /** 重新读取当前文件回调（仅只读态显示，编辑态不显示）。 */
   onRefresh?: () => void;
   /** 读取扁平运行命令列表（含隐藏命令），供行内 ▶ 与右键「运行」分组匹配。 */
@@ -767,6 +712,45 @@ function readViewerClipboardText() {
   return navigator.clipboard.readText().then((text) => String(text || "")).catch(() => "");
 }
 
+/**
+ * 从只读态 DOM 选区提取纯正文。
+ * @description 只读虚拟行是「行号 span + 正文 span」的 flex 行，行号虽设了 user-select:none，
+ *   Chromium 的拖选仍会把它纳入 Selection.toString()（真实观测：正文里混进 "14\n"、"15\n"），
+ *   导致按原文 indexOf 定位失败、发送到对话框静默无反应。这里改为遍历 Range 克隆，
+ *   跳过行号节点，只拼正文，行间用 \n 连接。
+ * @param selection 当前 Selection
+ * @returns 选区正文；无有效范围时为空串
+ */
+function readDomSelectionText(selection: Selection | null): string {
+  if (!selection || selection.rangeCount === 0) return "";
+  const parts: string[] = [];
+  for (let r = 0; r < selection.rangeCount; r += 1) {
+    const range = selection.getRangeAt(r);
+    const frag = range.cloneContents();
+    const holder = document.createElement("div");
+    holder.appendChild(frag);
+    for (const no of Array.from(holder.querySelectorAll(".sfe-file-viewer-line-no"))) {
+      no.remove();
+    }
+    // 逐行读取：每个 .sfe-file-viewer-line 的正文即该行内容，行号已剔除。
+    const rows = Array.from(holder.querySelectorAll(".sfe-file-viewer-line"));
+    if (rows.length) {
+      parts.push(
+        rows
+          .map((row) => {
+            const textEl = row.querySelector(".sfe-file-viewer-line-text");
+            return textEl ? textEl.textContent || "" : row.textContent || "";
+          })
+          .join("\n"),
+      );
+      continue;
+    }
+    // 非虚拟行结构（整块 <pre> 等）：行号节点已剔除，直接取文本。
+    parts.push(holder.textContent || "");
+  }
+  return parts.join("\n");
+}
+
 function getViewerSelection(target?: HTMLTextAreaElement | null): ViewerSelection {
   if (target && target.tagName === "TEXTAREA") {
     const start = Math.min(target.selectionStart, target.selectionEnd);
@@ -782,7 +766,7 @@ function getViewerSelection(target?: HTMLTextAreaElement | null): ViewerSelectio
     ? window.getSelection()
     : null;
   return {
-    text: selection ? selection.toString() : "",
+    text: readDomSelectionText(selection),
     target: null,
     start: 0,
     end: 0,
@@ -813,7 +797,7 @@ function openViewerContextMenu(
   opts: ViewerContextMenuOptions,
 ): void {
   clearViewerContextMenu(bodyEl);
-  const { preview, rootPath, editable, onRefresh, onRevealFile, onCopyPath, onCopyRelativePath, runCommands, runMenuCommands, onRunCommand, t } = opts;
+  const { preview, rootPath, editable, onRefresh, onRevealFile, onCopyPath, onCopyRelativePath, onSendToChat, runCommands, runMenuCommands, onRunCommand, t } = opts;
   // 原 JS 用 tagName 判定是否编辑框，类型系统无法据此收窄，故此处按 getViewerSelection 实际读取的形态断言。
   const selection = getViewerSelection(target as HTMLTextAreaElement | null);
   const hasFileActions =
@@ -878,6 +862,19 @@ function openViewerContextMenu(
 
   if (selection.text) {
     addItem("copy", t("action.copySelection", "复制"), "copy", () => copyToClipboard(selection.text));
+    // 发送统一使用「工作区相对路径 + 行范围 + 原文」，不再拼接语言代码围栏或伪造行号。
+    if (typeof onSendToChat === "function" && preview && preview.kind === "text") {
+      addItem("send-to-chat", t("action.sendToChat", "发送到当前会话"), "send", () => {
+        const message = buildFileSelectionChatMessage(
+          rootPath || "",
+          preview.path,
+          preview.text,
+          selection.text,
+          isEditableText ? selection.start : undefined,
+        );
+        if (message) onSendToChat(message);
+      });
+    }
     if (isEditableText) {
       addItem("cut", t("action.cut", "剪切"), "scissors", async () => {
         if (await copyToClipboard(selection.text)) replaceViewerSelection(selection, "");
@@ -904,16 +901,16 @@ function openViewerContextMenu(
   if (typeof onRevealFile === "function") {
     addItem("reveal", t("action.revealInExplorer", "在资源管理器中打开"), "folderOpen", onRevealFile);
   }
+  // 刷新放在复制路径之前：只读态重新读取磁盘内容（编辑态 canRefresh 为 false，不显示）
+  if (canRefresh) {
+    addSeparator();
+    addItem("refresh", t("action.refresh", "刷新"), "refresh", onRefresh);
+  }
   if (typeof onCopyPath === "function") {
     addItem("copy-path", t("action.copyPath", "复制路径"), "copy", onCopyPath);
   }
   if (typeof onCopyRelativePath === "function") {
     addItem("copy-relative-path", t("action.copyRelativePath", "复制相对路径"), "copy", onCopyRelativePath);
-  }
-  // 刷新置于文件操作之后：只读态重新读取磁盘内容（编辑态 canRefresh 为 false，不显示）
-  if (canRefresh) {
-    addSeparator();
-    addItem("refresh", t("action.refresh", "刷新"), "refresh", onRefresh);
   }
   // 运行分组：命中几条渲染几条（对齐 IDEA 右键 Run），候选项已限定为当前文件或其所属包。
   // 多包仓库里同组只剩本包命令，组标题用于标明是哪个包。
@@ -981,6 +978,7 @@ export function renderCodeViewer(
     onRevealFile,
     onCopyPath,
     onCopyRelativePath,
+    onSendToChat,
     onRefresh,
     runCommands,
     runMenuCommands,
@@ -1017,6 +1015,7 @@ export function renderCodeViewer(
     onRevealFile,
     onCopyPath,
     onCopyRelativePath,
+    onSendToChat,
     runCommands,
     runMenuCommands,
     onRunCommand,
@@ -1058,13 +1057,8 @@ export function renderCodeViewer(
 
   // 1. 文本与代码模式
   if (preview.kind === "text") {
-    // 全文体量本次渲染只测一次：虚拟化与高亮熔断都消费这份事实，不再各自逐字符重扫。
-    // 惰性求值，Markdown 预览分支用不到就不扫。
-    let measuredPreview: MeasuredText | null = null;
-    const measurePreview = (): MeasuredText => {
-      if (!measuredPreview) measuredPreview = measureText(preview.text);
-      return measuredPreview;
-    };
+    // 文件扩展名（不含点）：逐行高亮统一按行取语言；SFC（.vue/.svelte）的区块语言由 sfcLineLangs 解析。
+    const ext = extname(preview.name);
     // Markdown 默认进入预览模式；预览/代码双模式可切换
     const mode = preview.isMarkdown && preview.mode === "code" ? "code" : "preview";
     // 模式切换与复制/编辑/保存按钮共用一个工具栏，避免多个绝对定位层相互覆盖。
@@ -1240,58 +1234,23 @@ export function renderCodeViewer(
       const editHighlight = el("pre", "sfe-file-viewer-edit-highlight sfe-file-viewer-code");
       editHighlight.setAttribute("aria-hidden", "true");
       let editHighlightTimer: ReturnType<typeof setTimeout> | 0 = 0;
-      // 进入编辑态时 textarea.value 与 preview.text 同源，熔断判定取本次渲染已测的体量。
+      // 进入编辑态：统一走「可视区切片高亮」——与只读虚拟行同一条懒加载管线，
+      // 任何体量都只对可视区 ± OVERSCAN 的行分词。没有整篇高亮路径，也就没有
+      // 「小文件整篇、大文件切片」两套标准；文本一改即作废切片缓存的约定由 hlLinesDirty 承担。
       const initialEditText = String(preview.text ?? "");
-      const canHighlightInitial = (): boolean => shouldHighlightMeasured(measurePreview(), extname(preview.name));
-      const paintEditHighlight = (source: string, canHighlight: boolean): void => {
-        // 编辑态高亮上限就是只读熔断上限（highlight-policy 里写死了这条不变量）：
-        // 只读能上色的文件在编辑态必须同样上色，手感靠下面的停顿合并与进入时复用换来。
-        // 注意：http/rest 的着色不依赖高亮块（highlightCodeHtml 内部分流到首屏着色器），
-        // 所以这里的 canHighlight 只按体量熔断判，不再被 !highlighterReady() 拦下。
-        if (!canHighlight) {
-          editHighlight.textContent = source;
-        } else {
-          const html = highlightCodeHtml(source, extname(preview.name));
-          editHighlight.innerHTML = html || escapeHtml(source);
+      const paintEditHighlight = (source: string): void => {
+        // 无行高可量（无布局环境 / 异常样式）时的兜底：整篇按行高亮拼接，与切片同一口径。
+        const lines = source.split("\n");
+        const langs = isSfcExt(ext) ? sfcLineLangs(lines) : null;
+        const parts: string[] = [];
+        for (let i = 0; i < lines.length; i += 1) {
+          const line = lines[i] ?? "";
+          const lang = langs ? langs[i] || ext : ext;
+          parts.push(line.length <= MAX_HIGHLIGHT_LINE_LEN ? highlightCodeHtml(line, lang) : escapeHtml(line));
         }
+        editHighlight.innerHTML = parts.join("\n");
         if (source.endsWith("\n")) editHighlight.appendChild(document.createTextNode(" "));
       };
-      const updateEditHighlight = (source: string, canHighlight: boolean, immediate?: boolean): void => {
-        if (editHighlightTimer) clearTimeout(editHighlightTimer);
-        if (immediate || !canHighlight) {
-          paintEditHighlight(source, canHighlight);
-          return;
-        }
-        editHighlightTimer = setTimeout(() => {
-          editHighlightTimer = 0;
-          paintEditHighlight(source, canHighlight);
-        }, 80);
-      };
-      // 进入编辑态：只读态算过、且仍与当前文本同源的整篇 HTML 直接复用，点铅笔不再把全文重分词一遍。
-      // 前提由约定保证：highlightedHtml 非空即逐字符对应 preview.text（文本一改即清空，见 index.ts handlePreviewInput）。
-      const seededHtml = preview.highlightedHtml || "";
-      // 编辑态改走「可视区切片高亮」的条件与只读态虚拟化**同一判定**（shouldVirtualizeMeasured）：
-      // 只对可视区 ± OVERSCAN 的行分词，滚动 / 停顿输入时重算。
-      // 判定必须逐条件对齐只读态，不能只看行数：只读态对「字符数超 25 万但不足 400 行」的
-      // .http 文件（docs/test2.http 这类）走虚拟列表逐行着色，编辑态若只按行数判就会退回整篇、
-      // 再被整篇熔断写成纯文本——表现即「其他场景都有色、只有代码模式一片白」。
-      // 阈值内的小文件仍整篇高亮（跨行 token 不被切片拆开），成本有界且进入时可复用只读 HTML。
-      const useWindowedHl = !seededHtml && shouldVirtualizeMeasured(measurePreview(), extname(preview.name));
-      if (!useWindowedHl) {
-        if (seededHtml) {
-          editHighlight.innerHTML = seededHtml;
-          if (initialEditText.endsWith("\n")) editHighlight.appendChild(document.createTextNode(" "));
-        } else {
-          updateEditHighlight(initialEditText, canHighlightInitial(), true);
-        }
-        if (!seededHtml && !highlighterReady() && canHighlightInitial() && !isBasicHighlightExt(extname(preview.name))) {
-          void ensureHighlighter().then(() => {
-            if (!editHighlight.isConnected) return;
-            // 上面的守卫已判定可整篇高亮且文本未变，直接给结论，不再判一次。
-            paintEditHighlight(initialEditText, true);
-          });
-        }
-      }
 
       const textarea = document.createElement("textarea");
       textarea.className = "sfe-file-viewer-textarea";
@@ -1306,7 +1265,7 @@ export function renderCodeViewer(
         textarea.style.height = `${textarea.scrollHeight}px`;
       };
 
-      // —— 编辑态切片高亮机器（仅 useWindowedHl 时使用）——
+      // —— 编辑态切片高亮机器（唯一路径：与只读虚拟行同一条懒加载管线）——
       // 切片偏移用 pre 内的 spacer 垫高：不写 inline padding，避免与 viewer.css 的 12px 基础内边距耦合。
       const EDIT_HL_OVERSCAN = 8;
       const editLineHeightPx = (): number => {
@@ -1319,6 +1278,8 @@ export function renderCodeViewer(
         return 0;
       };
       let hlLines: string[] | null = null;
+      // SFC（.vue/.svelte）的逐行语言映射：与 hlLines 同批失效、同批重算，下标严格对齐。
+      let hlLineLangs: string[] | null = null;
       let hlLinesDirty = true;
       let hlStart = -1;
       let hlEnd = -1;
@@ -1327,7 +1288,7 @@ export function renderCodeViewer(
       /** 按当前滚动位置重算并重绘可视切片；文本已变（dirty）时即使区间未变也重绘。 */
       const syncEditHighlightSlice = (): void => {
         // 块未就绪：http/rest 仍可由首屏着色器同步上色；其余语言保持纯文本底色，等就绪回调再切片。
-        if (!highlighterReady() && !isBasicHighlightExt(extname(preview.name))) return;
+        if (!highlighterReady() && !isBasicHighlightExt(ext)) return;
         const lh = editLineHeightPx();
         if (!(lh > 0)) {
           // 量不出行高（无布局环境 / 异常样式）：切片无法与 textarea 对齐，
@@ -1336,11 +1297,14 @@ export function renderCodeViewer(
             hlStart = -2;
             hlEnd = -1;
             hlLinesDirty = false;
-            paintEditHighlight(textarea.value, canHighlightByParts(textarea.value, countLines(textarea.value), extname(preview.name)));
+            paintEditHighlight(textarea.value);
           }
           return;
         }
-        if (hlLinesDirty || !hlLines) hlLines = textarea.value.split("\n");
+        if (hlLinesDirty || !hlLines) {
+          hlLines = textarea.value.split("\n");
+          hlLineLangs = isSfcExt(ext) ? sfcLineLangs(hlLines) : null;
+        }
         const lines = hlLines;
         const total = lines.length;
         const viewportH = editScroll.clientHeight || 0;
@@ -1352,12 +1316,12 @@ export function renderCodeViewer(
         hlLinesDirty = false;
         hlStart = first;
         hlEnd = last;
-        const ext = extname(preview.name);
         const parts: string[] = [];
         for (let i = first; i < last; i += 1) {
           const line = lines[i] ?? "";
           // 单行超限（压缩成一行的 JSON 等）退化为纯文本，与只读虚拟行同一熔断。
-          parts.push(line.length <= MAX_HIGHLIGHT_LINE_LEN ? highlightCodeHtml(line, ext) : escapeHtml(line));
+          const lang = hlLineLangs ? hlLineLangs[i] || ext : ext;
+          parts.push(line.length <= MAX_HIGHLIGHT_LINE_LEN ? highlightCodeHtml(line, lang) : escapeHtml(line));
         }
         editHighlight.innerHTML = parts.join("\n");
         if (first > 0) {
@@ -1409,13 +1373,9 @@ export function renderCodeViewer(
             syncEditHeight();
             buildGutter(lineCount);
           }
-          if (useWindowedHl) {
-            // 切片模式：标记文本已变，停顿后（或下次滚动）重算可视切片，不做全文分词。
-            hlLinesDirty = true;
-            scheduleEditHighlightSync();
-          } else {
-            updateEditHighlight(value, canHighlightByParts(value, lineCount, extname(preview.name)));
-          }
+          // 切片模式：标记文本已变，停顿后（或下次滚动）重算可视切片，不做全文分词。
+          hlLinesDirty = true;
+          scheduleEditHighlightSync();
           onEditInput(value);
         });
       }
@@ -1434,120 +1394,66 @@ export function renderCodeViewer(
       // 与外层 editScroll 的滚动、行号槽、高亮层三者全都对不上。
       bodyEl.appendChild(editScroll);
       syncEditHeight();
-      if (useWindowedHl) {
-        // 挂载后再做首切片：行高与可视高度都要真实布局（见 editLineHeightPx）。
-        if (!highlighterReady() && !isBasicHighlightExt(extname(preview.name))) {
-          // 块未到且非 http/rest：先整篇纯文本底色（一次 textContent），到齐后由回调切出可视区。
-          editHighlight.textContent = initialEditText;
-          if (initialEditText.endsWith("\n")) editHighlight.appendChild(document.createTextNode(" "));
-          void ensureHighlighter().then(() => {
-            if (!editHighlight.isConnected) return;
-            syncEditHighlightSlice();
-          });
-        } else {
-          // http/rest 无需等高亮块，直接切出可视区。
+      // 挂载后再做首切片：行高与可视高度都要真实布局（见 editLineHeightPx）。
+      if (!highlighterReady() && !isBasicHighlightExt(ext)) {
+        // 块未到且非 http/rest：先整篇纯文本底色（一次 textContent），到齐后由回调切出可视区。
+        editHighlight.textContent = initialEditText;
+        if (initialEditText.endsWith("\n")) editHighlight.appendChild(document.createTextNode(" "));
+        void ensureHighlighter().then(() => {
+          if (!editHighlight.isConnected) return;
           syncEditHighlightSlice();
-        }
-        editScroll.addEventListener("scroll", onEditHighlightScroll, { passive: true });
+        });
+      } else {
+        // http/rest 无需等高亮块，直接切出可视区。
+        syncEditHighlightSlice();
       }
+      editScroll.addEventListener("scroll", onEditHighlightScroll, { passive: true });
     } else {
-      // 只读态：小文件整块高亮；大文件用窗口化虚拟列表，只渲染可视行。
+      // 只读态：统一窗口化虚拟列表——无论文件多大都只创建可视行、都逐行高亮（懒加载管线唯一路径）。
+      // 不再有「小文件整块 <pre>」分支：跨行 token 按行着色是与 diff / 编辑切片一致的既定取舍。
       const scroll = el("div", "sfe-file-viewer-code-scroll");
+      scroll.classList.add("sfe-file-viewer-code-scroll-virtual");
       const rawText = String(preview.text || "");
       const linesArray = rawText.split(/\r\n|\r|\n/);
-      // 运行入口 ▶ 的行号映射（行号槽 / 虚拟行内渲染，两分支共用）：
+      // 运行入口 ▶ 的行号映射（虚拟行内渲染）：
       //   - package.json：scripts 各行 → 对应 npm/pnpm… 命令；
       //   - Go 源文件：`func main()` 行 → 该 module 的 go run 入口。
       // Java/Kotlin 源文件：扫描器已提供 sourcePath/mainLine，按绝对路径映射到 main 行。
       const runLineMap = buildRunLineMap(preview, runCommands, rootPath);
-
-      // 约 400 行以上只渲染可视行。小文件仍整块高亮，避免把跨行 token 按行切碎。
-      // 大文件同样给可视行上色；只有超长单行跳过，避免压缩文件把分词拖死。
-      if (shouldVirtualizeMeasured(measurePreview(), extname(preview.name))) {
-        scroll.classList.add("sfe-file-viewer-code-scroll-virtual");
-        bodyEl.appendChild(scroll);
-        const ext = extname(preview.name);
-        const list = createVirtualList<string>({
-          viewport: scroll,
-          renderRow: (lineText, index) => {
-            const row = el("div", "sfe-file-viewer-line");
-            row.appendChild(el("span", "sfe-file-viewer-line-no", String(index + 1)));
-            const command = runLineMap.get(index + 1);
-            if (command) row.appendChild(createGutterRunButton(command, onRunCommand, t));
-            const marker = markerByLine.get(index + 1);
-            if (marker) row.appendChild(createGutterMarkerButton(marker));
-            const text = el("span", "sfe-file-viewer-line-text");
-            const source = String(lineText ?? "");
-            // http/rest 由首屏着色器同步上色（不依赖高亮块）；其余语言需块就绪。
-            const canHl = source.length > 0 && source.length <= MAX_HIGHLIGHT_LINE_LEN && (highlighterReady() || isBasicHighlightExt(ext));
-            const html = canHl ? highlightCodeHtml(source, ext) : "";
-            if (html) text.innerHTML = html;
-            else text.textContent = source;
-            row.appendChild(text);
-            return row;
-          },
-        });
-        bodyEl.__sfeVList = list;
-        list.setItems(linesArray);
-        // 面板改宽度/高度不会派发 scroll，窗口行数会停在旧 clientHeight 上、底部留白；
-        // 观察者句柄挂容器上，重绘时先断开，避免同一容器逐次叠加。
-        bodyEl[VIEWER_VIEWPORT_OBSERVER] = observeViewportHeight(scroll, () => list.refresh());
-        if (!highlighterReady()) {
-          void ensureHighlighter().then(() => {
-            if (!scroll.isConnected || !highlighterReady()) return;
-            list.refresh();
-          });
-        }
-      } else {
-        const pre = el("pre", "sfe-file-viewer-code");
-        const total = linesArray.length;
-
-        // 行号槽（整列 sticky 于横向滚动时为代码让位）。
-        // 命中运行入口的行（package.json scripts / Go func main）在行号后追加 ▶（对标 IDEA editor gutter）；
-        //   行号槽由整块文本改为逐行元素，代码正文仍整块高亮（不切碎跨行 Prism token）。
-        const gutter = el("div", "sfe-file-viewer-line-numbers");
-        for (let i = 1; i <= total; i++) {
-          const row = el("div", "sfe-file-viewer-gutter-row");
-          row.appendChild(el("span", "sfe-file-viewer-gutter-no", String(i)));
-          const command = runLineMap.get(i);
+      // SFC（.vue/.svelte）按区块逐行取语言（下标与 linesArray 严格对齐）；其余文件恒用扩展名。
+      const lineLangs = isSfcExt(ext) ? sfcLineLangs(linesArray) : null;
+      bodyEl.appendChild(scroll);
+      const list = createVirtualList<string>({
+        viewport: scroll,
+        renderRow: (lineText, index) => {
+          const row = el("div", "sfe-file-viewer-line");
+          row.appendChild(el("span", "sfe-file-viewer-line-no", String(index + 1)));
+          const command = runLineMap.get(index + 1);
           if (command) row.appendChild(createGutterRunButton(command, onRunCommand, t));
-          const marker = markerByLine.get(i);
+          const marker = markerByLine.get(index + 1);
           if (marker) row.appendChild(createGutterMarkerButton(marker));
-          gutter.appendChild(row);
-        }
-        pre.appendChild(gutter);
-
-        // 已有高亮 HTML（调用方预计算或单测注入）直接用。否则先出纯文本，高亮块到达后再替换。
-        const content = el("div", "sfe-file-viewer-code-content");
-        if (preview.highlightedHtml) {
-          content.innerHTML = preview.highlightedHtml;
-        } else {
-          content.innerHTML = escapeHtml(rawText);
-          if (shouldHighlightMeasured(measurePreview(), extname(preview.name))) {
-            const ext = extname(preview.name);
-            // http/rest 由首屏着色器同步上色，无需等高亮块到达。
-            if (isBasicHighlightExt(ext)) {
-              const html = highlightCodeHtml(rawText, ext);
-              if (html) {
-                content.innerHTML = html;
-                preview.highlightedHtml = html;
-              }
-            } else {
-              void ensureHighlighter().then(() => {
-                if (!content.isConnected || !highlighterReady()) return;
-                const html = highlightCodeHtml(rawText, ext);
-                if (!html) return;
-                content.innerHTML = html;
-                // 回写供编辑态复用：这份 HTML 与 rawText 同源，文本被改动时会被清空。
-                preview.highlightedHtml = html;
-              });
-            }
-          }
-        }
-        pre.appendChild(content);
-
-        scroll.appendChild(pre);
-        bodyEl.appendChild(scroll);
+          const text = el("span", "sfe-file-viewer-line-text");
+          const source = String(lineText ?? "");
+          // http/rest 由首屏着色器同步上色（不依赖高亮块）；其余语言需块就绪。
+          const lang = lineLangs ? lineLangs[index] || ext : ext;
+          const canHl = source.length > 0 && source.length <= MAX_HIGHLIGHT_LINE_LEN && (highlighterReady() || isBasicHighlightExt(lang));
+          const html = canHl ? highlightCodeHtml(source, lang) : "";
+          if (html) text.innerHTML = html;
+          else text.textContent = source;
+          row.appendChild(text);
+          return row;
+        },
+      });
+      bodyEl.__sfeVList = list;
+      list.setItems(linesArray);
+      // 面板改宽度/高度不会派发 scroll，窗口行数会停在旧 clientHeight 上、底部留白；
+      // 观察者句柄挂容器上，重绘时先断开，避免同一容器逐次叠加。
+      bodyEl[VIEWER_VIEWPORT_OBSERVER] = observeViewportHeight(scroll, () => list.refresh());
+      if (!highlighterReady()) {
+        void ensureHighlighter().then(() => {
+          if (!scroll.isConnected || !highlighterReady()) return;
+          list.refresh();
+        });
       }
     }
 

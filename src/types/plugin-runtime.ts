@@ -276,13 +276,22 @@ export type SystemWriteActionId =
   | "system.writeClipboardText"
   | "system.showItemInFolder";
 
+/**
+ * `chatInput` 域本插件实际调用的动作全名（宿主 `src/renderer/plugins/writes/domains/system.ts:113-128`）。
+ * @description `chatInput.sendMessage` 把文本作为用户消息发到**当前活动会话**（替换输入框后触发发送），
+ *   需要 plugin.json 声明 `conversations` scope（宿主 writes/index.ts 按动作 scope 门控）；
+ *   `chatInput.insertText` 是**追加**语义（无需 scope），本插件只用它做输入框在位探针。
+ *   无「新建会话并发送」的插件 API——宿主的 buildFromContent 未跨出 ChatConversationProvider。
+ */
+export type ChatInputWriteActionId = "chatInput.sendMessage" | "chatInput.insertText";
+
 /** `system` 域动作名，去掉 `system.` 前缀（与 `FilesystemWriteActionName` 同一手法，从联合反推）。 */
 export type SystemWriteActionName = SystemWriteActionId extends `system.${infer TName}`
   ? TName
   : never;
 
-/** `api.write.run` 能接受的全名：filesystem 表反推 + system 两个动作。插件不声明 `terminal` 域动作。 */
-export type WriteActionId = FilesystemWriteActionId | SystemWriteActionId;
+/** `api.write.run` 能接受的全名：filesystem 表反推 + system / chatInput 动作。插件不声明 `terminal` 域动作。 */
+export type WriteActionId = FilesystemWriteActionId | SystemWriteActionId | ChatInputWriteActionId;
 
 export type PluginWriteApi = {
   /**

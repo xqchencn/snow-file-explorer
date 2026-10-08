@@ -3,7 +3,12 @@
  * 渲染 parseUnifiedDiff 的解析结果：hunk 头 + 双行号 + 增删着色；
  * 支持两种展示模式（对齐宿主 DiffViewer 的 unified / split 切换）：
  *   - unified：单列，删除行在上、新增行在下（经典 unified 视图）；
- *   - split：左右两栏，删除行占左栏、新增行占右栏，一一配对。
+ *   - split：左右两栏（左=旧、右=新），**每栏独立横向滚动**（对标 VS Code），
+ *     纵向滚动互锁同步。两个虚拟列表共享同一份行下标空间，配对关系由
+ *     createFullDiffAccess(split) 保证：下标 i 的左右两行一一对应。
+ * 语法高亮与代码查看器走**同一条管线**：逐行 highlightCodeHtml；
+ * SFC（.vue/.svelte）按新版本全文解析区块语言（sfc-highlight.ts），
+ * context/新增行按新行号精确取语言，删除行用所在 hunk 的 old→new 偏移近似。
  * 不依赖任何第三方 diff 视图库（宿主用的 @git-diff-view 是打包进宿主渲染进程的
  * React 组件，既不在 window.snow 上，插件也无法 import，故只能自写轻量实现）。
  */
@@ -20,7 +25,9 @@ import type {
 import type { DiffViewMode, TranslateFn } from "../types/panel-state.ts";
 import { MAX_HIGHLIGHT_LINE_LEN } from "./highlight-policy.ts";
 import { ensureHighlighter, highlighterReady, highlightCodeHtml } from "./highlight-client.ts";
+import { isSfcExt, sfcLineLangs } from "./sfc-highlight.ts";
 import { createVirtualList } from "./virtual-list.ts";
+import type { VirtualListHandle } from "./virtual-list.ts";
 
 /**
  * 渲染层看到的差异行：unified 的 DiffLine 与 split 的 DiffSplitRow 两种形态的并集视图。
@@ -70,11 +77,14 @@ const diffViewportObservers = new WeakMap<HTMLElement, ResizeObserver>();
  * @description 此前只有高亮块到达时才 refresh()，面板由窄变宽/由隐藏转可见后仍按旧的
  *   clientHeight 出行数，底部留白要等下一次滚动才修好。回调只读 contentRect（不回读元素），
  *   同高度与零高度通知去重，重算合到一帧里跑。
+ * @param parentEl 渲染容器（观察器句柄挂它上面，重渲染前统一断开）
+ * @param scrollers 滚动容器列表（split 模式为左右两个）
+ * @param refresh 任一视口尺寸变化后要执行的重算（split 时刷新两个列表）
  */
 function observeDiffViewport(
   parentEl: HTMLElement,
-  scroll: HTMLElement,
-  vlist: { refresh: () => void },
+  scrollers: HTMLElement[],
+  refresh: () => void,
 ): void {
   const previous = diffViewportObservers.get(parentEl);
   if (previous) {
@@ -82,23 +92,30 @@ function observeDiffViewport(
     diffViewportObservers.delete(parentEl);
   }
   if (typeof ResizeObserver !== "function") return;
-  let lastHeight = 0;
+  const lastHeights = new Map<HTMLElement, number>();
   let scheduled = false;
   let observer: ResizeObserver | null = null;
+  const schedule = () => {
+    if (scheduled || !scrollers.some((s) => s.isConnected)) return;
+    scheduled = true;
+    const run = () => {
+      scheduled = false;
+      if (scrollers.some((s) => s.isConnected)) refresh();
+    };
+    if (typeof requestAnimationFrame === "function") requestAnimationFrame(run);
+    else setTimeout(run, 16);
+  };
   try {
     observer = new ResizeObserver((entries) => {
-      const height = entries.length ? Math.round(entries[entries.length - 1].contentRect.height) : 0;
-      if (!height || height === lastHeight || scheduled || !scroll.isConnected) return;
-      scheduled = true;
-      const run = () => {
-        scheduled = false;
-        lastHeight = height;
-        if (scroll.isConnected) vlist.refresh();
-      };
-      if (typeof requestAnimationFrame === "function") requestAnimationFrame(run);
-      else setTimeout(run, 16);
+      for (const entry of entries) {
+        const target = entry.target as HTMLElement;
+        const height = entry.contentRect ? Math.round(entry.contentRect.height) : 0;
+        if (!height || height === lastHeights.get(target)) continue;
+        lastHeights.set(target, height);
+        schedule();
+      }
     });
-    observer.observe(scroll);
+    for (const scroller of scrollers) observer.observe(scroller);
   } catch {
     // 无布局/无观察能力的测试环境：静默降级，滚动时仍会自然重算。
     if (observer) observer.disconnect();
@@ -156,8 +173,8 @@ export function renderDiffView(parentEl: HTMLElement, {
   }
 
   const viewMode = mode === "split" ? "split" : "unified";
+  const ext = String(extension || "").toLowerCase().replace(/^\./, "");
   const wrap = el("div", "sfe-diff-view");
-  const scroll = el("div", "sfe-diff-scroll" + (viewMode === "split" ? " split" : ""));
 
   // 1. 把差异序列化为统一的「行项」数组：unified 直接是行对象，split 是 {left,right} 配对。
   //    虚拟列表只渲染可视区的行项，DOM 数量与差异总行数解耦，因此无需再截断内容。
@@ -170,41 +187,128 @@ export function renderDiffView(parentEl: HTMLElement, {
   );
   const hunkStartRow = items.hunkStartRow;
 
-  // 2. 只对当前可视行做语法高亮。超长单行仍跳过，避免压缩成一行的文件卡住分词。
+  // 2. SFC（.vue/.svelte）的逐行语言：与新文件同一套 sfc-highlight 解析。
+  //    context / 新增 / 补齐行按新行号精确取语言；删除行（只有旧行号）用所在 hunk 的
+  //    old→new 偏移（newStart - oldStart）近似映射到新文件位置——SFC 区块动辄几百行，
+  //    hunk 头几行的偏差不会跨区块。非 SFC 文件恒用文件扩展名。
+  let sfcLangs: string[] | null = null;
+  const hunkDeltaRanges: Array<{ from: number; to: number; delta: number }> = [];
+  if (isSfcExt(ext) && typeof fullContent === "string" && fullContent.length > 0) {
+    sfcLangs = sfcLineLangs(fullContent.split(/\r\n|\r|\n/));
+    for (const hunk of result.hunks) {
+      hunkDeltaRanges.push({
+        from: hunk.oldStart,
+        to: hunk.oldStart + hunk.oldLines - 1,
+        delta: hunk.newStart - hunk.oldStart,
+      });
+    }
+  }
+  const deltaForOld = (oldNo: number): number => {
+    for (const range of hunkDeltaRanges) {
+      if (oldNo >= range.from && oldNo <= range.to) return range.delta;
+    }
+    return 0;
+  };
+  const langForLine = (line: RenderDiffRow): string => {
+    if (!sfcLangs) return ext;
+    const newNo = line.newNo ?? (line.oldNo != null ? line.oldNo + deltaForOld(line.oldNo) : null);
+    const lang = newNo != null ? sfcLangs[newNo - 1] : undefined;
+    return lang || ext;
+  };
 
-  // 3. 虚拟列表（此时 scroll 尚未挂载，setItems 延后到挂载后调用，clientHeight 才可用）
-  const vlist = createVirtualList<DiffRowItem>({
-    viewport: scroll,
-    renderRow: (item) =>
-      viewMode === "split"
-        ? renderSplitRow(item.row!, extension)
-        : renderDiffLine(item.row!, extension),
-  });
+  // 3. 虚拟列表。split 模式用左右两个列表共享同一行下标空间：每栏独立横向滚动
+  //    （拖左边只动旧版本、拖右边只动新版本，对标 VS Code），纵向滚动互锁同步。
+  //    此时 scroll 尚未挂载，setItems 延后到挂载后调用，clientHeight 才可用。
+  const makeRowRenderer = (side: "unified" | "left" | "right") =>
+    (item: DiffRowItem): HTMLElement => {
+      const row = item.row;
+      if (side === "unified") return renderDiffLine(row ?? {}, langForLine(row ?? {}));
+      const cell = side === "left" ? row?.left ?? null : row?.right ?? null;
+      return renderSplitCell(cell, side, cell ? langForLine(cell) : ext);
+    };
 
-  // 4. 顶部条：增删统计 + hunk 导航 + 展示模式切换
+  let listLeft: VirtualListHandle<DiffRowItem> | null = null;
+  let listRight: VirtualListHandle<DiffRowItem> | null = null;
+  const scrollers: HTMLElement[] = [];
+
+  // 4. 顶部条：增删统计 + hunk 导航 + 展示模式切换（先入 wrap，滚动区排它后面）
   const bar = el("div", "sfe-diff-bar");
   const stat = el("div", "sfe-diff-stat");
   stat.appendChild(el("span", "sfe-diff-stat-add", "+" + result.additions));
   stat.appendChild(el("span", "sfe-diff-stat-del", "-" + result.deletions));
   bar.appendChild(stat);
 
+  const jumpToHunk = (index: number) => {
+    if (listLeft) listLeft.scrollToIndex(index);
+    if (listRight) listRight.scrollToIndex(index);
+  };
+  const refreshAll = () => {
+    if (listLeft) listLeft.refresh();
+    if (listRight) listRight.refresh();
+  };
+
   const controls = el("div", "sfe-diff-controls");
-  const hunkNavigator = renderHunkNavigator(hunkStartRow, (index) => vlist.scrollToIndex(index), t);
+  const hunkNavigator = renderHunkNavigator(hunkStartRow, jumpToHunk, t);
   controls.appendChild(hunkNavigator);
   controls.appendChild(renderModeSwitch(viewMode, t, onSetMode));
   bar.appendChild(controls);
   wrap.appendChild(bar);
-  wrap.appendChild(scroll);
   parentEl.appendChild(wrap);
 
-  parentEl.__sfeVList = vlist;
-  vlist.setItems(items);
-  observeDiffViewport(parentEl, scroll, vlist);
+  if (viewMode === "split") {
+    const splitBody = el("div", "sfe-diff-split-body");
+    const scrollLeft = el("div", "sfe-diff-scroll side left");
+    const scrollRight = el("div", "sfe-diff-scroll side right");
+    listLeft = createVirtualList<DiffRowItem>({ viewport: scrollLeft, renderRow: makeRowRenderer("left") });
+    listRight = createVirtualList<DiffRowItem>({ viewport: scrollRight, renderRow: makeRowRenderer("right") });
+    // 纵向互锁：把 scrollTop 镜像给另一栏即可。同值赋值不会再触发 scroll 事件，
+    // 镜像链条自然收敛，不会来回抖；各栏自己的虚拟列表监听各自的滚动补渲染窗口。
+    const mirror = (source: HTMLElement, target: HTMLElement) => {
+      if (target.scrollTop !== source.scrollTop) target.scrollTop = source.scrollTop;
+    };
+    scrollLeft.addEventListener("scroll", () => mirror(scrollLeft, scrollRight), { passive: true });
+    scrollRight.addEventListener("scroll", () => mirror(scrollRight, scrollLeft), { passive: true });
+    splitBody.appendChild(scrollLeft);
+    splitBody.appendChild(scrollRight);
+    wrap.appendChild(splitBody);
+    scrollers.push(scrollLeft, scrollRight);
+  } else {
+    const scroll = el("div", "sfe-diff-scroll");
+    listLeft = createVirtualList<DiffRowItem>({ viewport: scroll, renderRow: makeRowRenderer("unified") });
+    wrap.appendChild(scroll);
+    scrollers.push(scroll);
+  }
+
+  // 挂载后灌数据（clientHeight 才可用）。挂容器上的句柄统一暴露 scrollToIndex 与
+  // destroy，code-viewer 的 disposeViewerViewport 只认这一份协议；分栏是两个列表的合体。
+  if (listLeft && listRight) {
+    const left = listLeft;
+    const right = listRight;
+    left.setItems(items);
+    right.setItems(items);
+    parentEl.__sfeVList = {
+      scrollToIndex: (index: number) => {
+        left.scrollToIndex(index);
+        right.scrollToIndex(index);
+      },
+      destroy: () => {
+        left.destroy();
+        right.destroy();
+        listLeft = null;
+        listRight = null;
+      },
+    };
+  } else if (listLeft) {
+    listLeft.setItems(items);
+    parentEl.__sfeVList = listLeft;
+  }
+
+  observeDiffViewport(parentEl, scrollers, refreshAll);
   // 高亮块未就绪时先出纯文本，加载完成只重绘当前可视行。
   if (!highlighterReady()) {
     void ensureHighlighter().then(() => {
-      if (!scroll.isConnected || !highlighterReady()) return;
-      vlist.refresh();
+      if (!scrollers.some((s) => s.isConnected) || !highlighterReady()) return;
+      refreshAll();
     });
   }
 }
@@ -291,44 +395,36 @@ function renderModeSwitch(current: DiffViewMode, t: TranslateFn, onSetMode?: (mo
 }
 
 /**
- * 渲染单行 unified 差异（旧行号 / 新行号 / 标记 / 正文）
+ * 渲染单行 unified 差异（单列行号 + 标记 + 正文）
  * @param line 解析出的行
- * @param [extension] 文件扩展名（不含点）
+ * @param lang 该行的 Prism 语言（SFC 已按行解析出区块语言）
  * @returns 差异行节点
+ * @description 行号只有一列：上下文 / 新增行显示新文件行号，删除行显示旧文件行号
+ *   （对标 JetBrains 统一视图的合并行号槽）。曾渲染新旧两列，视觉上既挤又无用——
+ *   要对照两侧行号该用分栏视图。
  */
-function renderDiffLine(line: RenderDiffRow, extension?: string): HTMLDivElement {
+function renderDiffLine(line: RenderDiffRow, lang: string): HTMLDivElement {
   const row = el("div", "sfe-diff-line " + line.type);
-  row.appendChild(el("span", "sfe-diff-no", line.oldNo == null ? "" : String(line.oldNo)));
-  row.appendChild(el("span", "sfe-diff-no", line.newNo == null ? "" : String(line.newNo)));
+  const no = line.type === "del" ? line.oldNo : line.newNo;
+  row.appendChild(el("span", "sfe-diff-no", no == null ? "" : String(no)));
   row.appendChild(el("span", "sfe-diff-sign", diffSign(line.type)));
   // 标记列与代码正文分离，Prism 只处理源码，避免把 +/- 当成语法内容。
   const text = el("span", "sfe-diff-text");
-  applyDiffText(text, line.text, extension, line.type);
+  applyDiffText(text, line.text, lang, line.type);
   row.appendChild(text);
   return row;
 }
 
 /**
- * 渲染单行 split 差异（左栏删除 / 右栏新增，一一配对）
- * @param row buildSplitRows 产出的分栏行
- * @param [extension] 文件扩展名（不含点）
- * @returns 分栏行节点
- */
-function renderSplitRow(row: RenderDiffRow, extension?: string): HTMLDivElement {
-  const line = el("div", "sfe-diff-split-row");
-  line.appendChild(renderSplitCell(row.left, "left", extension));
-  line.appendChild(renderSplitCell(row.right, "right", extension));
-  return line;
-}
-
-/**
- * 渲染 split 的单个单元格（行号 + 标记 + 正文；空行留白占位）
+ * 渲染 split 单栏的一个单元格（行号 + 标记 + 正文；对侧无配对行时留白占位）。
+ * @description 分栏模式下单元格就是所在侧的一整行：每栏独立横向滚动，
+ *   行号钉在左侧（拖动时保持可见）。
  * @param cell 解析出的行或 null（对侧无配对行）
  * @param side 所在栏
- * @param [extension] 文件扩展名（不含点）
+ * @param lang 该行的 Prism 语言（cell 为 null 时被忽略）
  * @returns 单元格节点
  */
-function renderSplitCell(cell: DiffLine | null | undefined, side: "left" | "right", extension?: string): HTMLDivElement {
+function renderSplitCell(cell: DiffLine | null | undefined, side: "left" | "right", lang: string): HTMLDivElement {
   if (!cell) return el("div", "sfe-diff-split-cell empty " + side);
   const type = cell.type === "meta" ? "meta" : cell.type;
   const box = el("div", "sfe-diff-split-cell " + type + " " + side);
@@ -340,7 +436,7 @@ function renderSplitCell(cell: DiffLine | null | undefined, side: "left" | "righ
   box.appendChild(el("span", "sfe-diff-sign", diffSign(cell.type)));
   // 与 unified 视图共用同一写入入口，保证两种布局的颜色和安全策略一致。
   const text = el("span", "sfe-diff-text");
-  applyDiffText(text, cell.text, extension, cell.type);
+  applyDiffText(text, cell.text, lang, cell.type);
   box.appendChild(text);
   return box;
 }
@@ -349,13 +445,13 @@ function renderSplitCell(cell: DiffLine | null | undefined, side: "left" | "righ
  * 把差异行正文写入文本节点。可视行走 Prism；超长单行和元信息行保持纯文本。
  * @param textEl 差异正文节点（.sfe-diff-text）
  * @param text 差异行正文
- * @param [extension] 文件扩展名（不含点）
+ * @param lang Prism 语言名（含 SFC 按行解析出的区块语言）
  * @param type 差异行类型
  */
 function applyDiffText(
   textEl: HTMLSpanElement,
   text: string | undefined,
-  extension: string | undefined,
+  lang: string | undefined,
   type: string | undefined,
 ): void {
   const source = String(text ?? "");
@@ -363,8 +459,8 @@ function applyDiffText(
     textEl.textContent = source;
     return;
   }
-  // extension 由调用方按文件扩展名传入；缺失时高亮块按「无语言」处理，与原运行时行为一致。
-  const html = highlightCodeHtml(source, type === "meta" ? "" : extension!);
+  // lang 缺失时高亮块按「无语言」处理，与原运行时行为一致。
+  const html = highlightCodeHtml(source, lang || "");
   if (!html) {
     textEl.textContent = source;
     return;

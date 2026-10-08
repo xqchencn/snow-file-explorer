@@ -276,3 +276,117 @@ test("HTTP 执行: 通道抛错也算发过，错误文案取自异常本身", a
   assert.equal(result.response, null);
   assert.equal(result.error, "net::ERR_NAME_NOT_RESOLVED");
 });
+
+test("HTTP 执行: urlencoded 多行正文并成一行发出", async () => {
+  const { file, request } = firstRequest(
+    ["POST https://a.test/form", "Content-Type: application/x-www-form-urlencoded", "", "name=foo", "&password=bar"].join("\n")
+  );
+  const { fetch, calls } = fakeFetch({});
+  await runHttpRequest(request, file, runOptions({ fetch, scope: { fileVariables: new Map() } }));
+  assert.equal(calls[0].options?.body, "name=foo&password=bar", "& 起头的行并进上一行，合成一条查询串");
+});
+
+test("HTTP 执行: multipart 正文按 CRLF 组并补尾 CRLF", async () => {
+  const { file, request } = firstRequest(
+    [
+      "POST https://a.test/upload",
+      "Content-Type: multipart/form-data; boundary=WB",
+      "",
+      "--WB",
+      'Content-Disposition: form-data; name="f"',
+      "",
+      "v",
+      "--WB--",
+    ].join("\n")
+  );
+  const { fetch, calls } = fakeFetch({});
+  await runHttpRequest(request, file, runOptions({ fetch, scope: { fileVariables: new Map() } }));
+  const body = String(calls[0].options?.body);
+  assert.equal(body.includes("\r\n"), true, "boundary 之间必须是 CRLF");
+  assert.equal(body.endsWith("\r\n"), true, "少一个尾 CRLF 服务端解析不出结束标记");
+  assert.equal(body.includes("\r\r\n"), false, "换行不能叠两层");
+});
+
+test("HTTP 执行: ndjson 补尾换行，JSON 正文一个字节不动", async () => {
+  const ndjson = firstRequest(["POST https://a.test/n", "Content-Type: application/x-ndjson", "", '{"a":1}', '{"a":2}'].join("\n"));
+  const { fetch, calls } = fakeFetch({});
+  await runHttpRequest(ndjson.request, ndjson.file, runOptions({ fetch, scope: { fileVariables: new Map() } }));
+  assert.equal(calls[0].options?.body, '{"a":1}\n{"a":2}\n');
+
+  const json = firstRequest(["POST https://a.test/j", "Content-Type: application/json", "", '{ "a" : 1 }'].join("\n"));
+  const second = fakeFetch({});
+  await runHttpRequest(json.request, json.file, runOptions({ fetch: second.fetch, scope: { fileVariables: new Map() } }));
+  assert.equal(second.calls[0].options?.body, '{ "a" : 1 }', "普通 JSON 正文原样发出");
+});
+
+test("HTTP 执行: Basic 的三种写法都补成 base64，已经是 base64 的原样发", async () => {
+  const cases: Array<[string, string]> = [
+    ["Basic user passwd", `Basic ${Buffer.from("user:passwd", "utf8").toString("base64")}`],
+    ["Basic user:passwd", `Basic ${Buffer.from("user:passwd", "utf8").toString("base64")}`],
+    ["Basic dXNlcjpwYXNzd2Q=", "Basic dXNlcjpwYXNzd2Q="],
+    ["Basic 用户 密码", `Basic ${Buffer.from("用户:密码", "utf8").toString("base64")}`],
+  ];
+  for (const [written, expected] of cases) {
+    const { file, request } = firstRequest(["GET https://a.test/a", `Authorization: ${written}`].join("\n"));
+    const { fetch, calls } = fakeFetch({});
+    await runHttpRequest(request, file, runOptions({ fetch, scope: { fileVariables: new Map() } }));
+    assert.equal(calls[0].options?.headers?.Authorization, expected, written);
+  }
+});
+
+test("HTTP 执行: Basic 值来自变量时也是先替换再补 base64", async () => {
+  const { file, request } = firstRequest(
+    ["@u = user", "@p = passwd", "GET https://a.test/a", "Authorization: Basic {{u}} {{p}}"].join("\n")
+  );
+  const { fetch, calls } = fakeFetch({});
+  await runHttpRequest(request, file, runOptions({ fetch, scope: { fileVariables: new Map() } }));
+  assert.equal(calls[0].options?.headers?.Authorization, `Basic ${Buffer.from("user:passwd", "utf8").toString("base64")}`);
+});
+
+test("HTTP 执行: Digest / AWS / COGNITO 逐条点名，不发半截认证值", async () => {
+  for (const [scheme, key] of [
+    ["Digest user pass", "Digest"],
+    ["AWS id key region:cn-north-1", "AWS"],
+    ["COGNITO u p region pool client", "COGNITO"],
+  ] as Array<[string, string]>) {
+    const { file, request } = firstRequest(["GET https://a.test/a", `Authorization: ${scheme}`].join("\n"));
+    const { fetch } = fakeFetch({});
+    const result = await runHttpRequest(request, file, runOptions({ fetch, scope: { fileVariables: new Map() } }));
+    assert.equal(result.warnings.some((text) => text.includes(key) || text.includes("认证")), true, scheme);
+  }
+});
+
+test("HTTP 执行: 环境变量与 .env 表都参与替换", async () => {
+  const { file, request } = firstRequest(
+    ["GET https://{{host}}/{{version}}?u={{$dotenv USERNAME}}&k={{$dotenv %dbUserKey}}", "Authorization: Bearer {{token}}"].join("\n")
+  );
+  const { fetch, calls } = fakeFetch({});
+  await runHttpRequest(request, file, runOptions({
+    fetch,
+    scope: {
+      fileVariables: new Map(),
+      environment: new Map([["host", "api.test"], ["version", "v2"], ["token", "tk"], ["dbUserKey", "db.user"]]),
+      dotenv: new Map([["USERNAME", "alice"], ["db.user", "root"]]),
+    },
+  }));
+  assert.equal(calls[0].url, "https://api.test/v2?u=alice&k=root");
+  assert.equal(calls[0].options?.headers?.Authorization, "Bearer tk");
+});
+
+test("HTTP 执行: 响应脚本与落盘行不进正文，并各带一条点名提示", async () => {
+  const { file, request } = firstRequest(
+    ["POST https://a.test/h", "Content-Type: application/json", "", '{"a":1}', "> {%", "  client.global.set('t', 1);", "%}"].join("\n")
+  );
+  const { fetch, calls } = fakeFetch({});
+  const result = await runHttpRequest(request, file, runOptions({ fetch, scope: { fileVariables: new Map() } }));
+  assert.equal(calls[0].options?.body, '{"a":1}', "脚本不能被当正文发出去");
+  assert.equal(result.warnings.some((text) => text.includes("响应脚本")), true);
+});
+
+test("HTTP 执行: 只支持引号里的自定义时间格式，$randomInt 之类的照旧", async () => {
+  const { file, request } = firstRequest("GET https://a.test/t?d={{$datetime 'YYYY-MM'}}");
+  const { fetch, calls } = fakeFetch({});
+  const result = await runHttpRequest(request, file, runOptions({ fetch, scope: { fileVariables: new Map() } }));
+  assert.deepEqual(result.unresolved, []);
+  assert.equal(/^\?d=\d{4}-\d{2}$/.test(String(calls[0].url).slice("https://a.test/t".length)), true, calls[0].url);
+});

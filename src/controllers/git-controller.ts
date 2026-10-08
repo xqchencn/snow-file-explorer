@@ -48,9 +48,9 @@ import {
 } from "../services/git-actions.ts";
 import { parseUnifiedDiff } from "../services/diff.ts";
 import { loadChunk } from "../services/lazy-chunk.ts";
-import { basename, readFileContent } from "../services/file-service.ts";
+import { basename, workspaceRelativePath, readFileContent } from "../services/file-service.ts";
 import { joinPath } from "../services/file-filter.ts";
-import { shouldVirtualize } from "../components/highlight-policy.ts";
+import { isOversizeMarkdown } from "../services/markdown-asset.ts";
 import { paintTreeGitStatus } from "../components/tree-view.ts";
 
 /** Git 控制器的注入依赖：渲染回调与跨控制器回调由 mount 装配阶段回填。 */
@@ -97,6 +97,8 @@ export function createGitController(deps: GitControllerDeps) {
   let gitInflight: Promise<GitStatusResult | null> | null = null;
   let gitInflightRoot = "";
   let gitDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  // 进入 Git 主视图后，下一次状态回填必须重新建立默认折叠，不能复用用户上一次的展开态。
+  let stagedCollapseResetPending = false;
 
   function isSameGitMap(a: GitStatusMap, b: GitStatusMap): boolean {
     const keysA = Object.keys(a);
@@ -110,6 +112,17 @@ export function createGitController(deps: GitControllerDeps) {
 
   async function refreshGitViewStatus() {
     await refreshGitAll();
+  }
+
+  /**
+   * 重置本次 Git 视图的已暂存目录折叠状态。
+   * @description 进入 Git 主视图时调用；先用已有状态提供即时默认值，再让下一次状态回填按最新文件集合重建。
+   *   没有仓库状态或没有 staged 文件时使用空集合，避免 null 参与组件渲染。
+   */
+  function resetStagedCollapse(): void {
+    const { staged } = partitionGitFiles(state.gitStatus?.files);
+    state.collapsedStaged = state.gitStatus?.isRepo ? collectGitFolderPaths(staged) : new Set();
+    stagedCollapseResetPending = true;
   }
 
   function gitStatusToMap(status: GitStatusResult | null): GitStatusMap {
@@ -129,9 +142,10 @@ export function createGitController(deps: GitControllerDeps) {
     const prevFiles = gitFilesSignature(prev);
     const nextFiles = gitFilesSignature(status);
     state.gitStatus = status;
-    if (state.collapsedStaged === null && status && status.isRepo) {
-      const { staged } = partitionGitFiles(status.files);
-      state.collapsedStaged = collectGitFolderPaths(staged);
+    if (stagedCollapseResetPending || state.collapsedStaged === null) {
+      const { staged } = partitionGitFiles(status?.files);
+      state.collapsedStaged = status?.isRepo ? collectGitFolderPaths(staged) : new Set();
+      stagedCollapseResetPending = false;
     }
     const mapChanged = !isSameGitMap(state.gitStatusMap, map);
     if (mapChanged) {
@@ -536,7 +550,7 @@ export function createGitController(deps: GitControllerDeps) {
     const gp = state.gitPreview;
     const file = gp?.file;
     if (!gp || !file || gp.key !== key || !file.isMarkdown || file.mode !== "preview") return;
-    if (shouldVirtualize(file.text)) {
+    if (isOversizeMarkdown(file.text)) {
       state.gitPreview = { ...gp, file: { ...file, mode: "code" } };
       deps.renderGitPreview();
       return;
@@ -662,8 +676,9 @@ export function createGitController(deps: GitControllerDeps) {
   }
 
   function handleGitCopyRelativePath(file: GitFileStatus | null) {
-    if (!file) return;
-    void deps.copyPathText(file.path);
+    if (!file || !state.rootPath) return;
+    const value = workspaceRelativePath(state.rootPath, joinPath(state.rootPath, file.path));
+    if (value) void deps.copyPathText(value);
   }
 
   // Git 右侧查看器右键：按当前打开的差异文件（state.gitPreview.relPath/absPath）。
@@ -681,8 +696,9 @@ export function createGitController(deps: GitControllerDeps) {
 
   function handleGitPreviewCopyRelativePath() {
     const gp = state.gitPreview;
-    if (!gp || !gp.relPath) return;
-    void deps.copyPathText(gp.relPath);
+    if (!gp || !gp.absPath || !state.rootPath) return;
+    const value = workspaceRelativePath(state.rootPath, gp.absPath);
+    if (value) void deps.copyPathText(value);
   }
 
   function handleGitCopyAbsolutePath(file: GitFileStatus | null) {
@@ -702,6 +718,7 @@ export function createGitController(deps: GitControllerDeps) {
   return {
     refreshGitAll,
     refreshGitViewStatus,
+    resetStagedCollapse,
     scheduleGitRefresh,
     requestGitRefresh,
     handleStageToggle,

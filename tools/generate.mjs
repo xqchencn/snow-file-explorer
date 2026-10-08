@@ -57,13 +57,15 @@ extMap.html = "markup";
 extMap.xml = "markup";
 extMap.svg = "markup";
 extMap.js = "javascript";
-// 真实文件名习惯补充
+// 真实文件名习惯补充。注意 .vue / .svelte 不映射到 markup：Prism 没有 SFC 语言组件，
+//   整篇按 HTML 着色会漏掉 <script>/<style> 区块——由 components/sfc-highlight.ts
+//   按行解析区块语言（markup / javascript / css…）后逐行着色，见 code-viewer。
 Object.assign(extMap, {
   h: "c", hpp: "cpp", cc: "cpp", cxx: "cpp", "c++": "cpp", hxx: "cpp", "h++": "cpp",
   mjs: "javascript", cjs: "javascript", mts: "typescript", cts: "typescript",
   jsonc: "json", json5: "json", jsonl: "json", webmanifest: "json",
   scss: "css", sass: "css", less: "less", styl: "css", pcss: "css", postcss: "css",
-  htm: "markup", xhtml: "markup", vue: "markup", astro: "markup", svelte: "markup",
+  htm: "markup", xhtml: "markup", astro: "markup",
   yml: "yaml", pyw: "python", pyi: "python", ipynb: "json",
   rb: "ruby", erb: "erb", rs: "rust", kt: "kotlin", kts: "kotlin",
   md: "markdown", mdx: "markdown", mkd: "markdown",

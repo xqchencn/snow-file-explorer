@@ -3,6 +3,8 @@
  * 负责 Markdown 文档识别、相对图片引用到本地绝对路径的解析，以及本地图片读取为 data URL。
  */
 
+import { measureText } from "../components/highlight-policy.ts";
+
 /**
  * 判断文件是否为 Markdown 文档
  * @param filePath 文件路径或文件名
@@ -16,6 +18,20 @@ export function isMarkdownPath(filePath: string | null): boolean {
     name.endsWith(".mdx") ||
     name.endsWith(".mkd")
   );
+}
+
+/**
+ * Markdown 正文是否大到不该渲染成 HTML（应直接展示源码）。
+ * @param text 正文
+ * @returns 超过任一体量上限时为 true
+ * @description marked 解析 + DOMPurify 净化按全文一次性付费，超大正文渲染会把面板卡死。
+ *   阈值沿用旧「虚拟化」判定（25 万字符 / 400 行 / 单行 2 万），行为与统一前一致；
+ *   它属于 Markdown 水合策略，与代码高亮管线无关（高亮已统一为逐行懒加载，无整篇体量熔断）。
+ */
+export function isOversizeMarkdown(text: string | null | undefined): boolean {
+  const measured = measureText(text);
+  if (!measured.length) return false;
+  return measured.length > 250000 || measured.lines > 400 || measured.maxLineLen > 20000;
 }
 
 /**

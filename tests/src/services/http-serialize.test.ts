@@ -230,3 +230,46 @@ test("HTTP 写回: 块内的注释行不因改一个字段被抹掉，且落回�
     `正文注释要回到原文里夹着的那两行之间：\n${next.text}`
   );
 });
+
+test("HTTP 写回: 响应脚本与落盘行在重排后仍留在块尾", () => {
+  const text = [
+    "POST https://a.test/h",
+    'Content-Type: application/json',
+    "",
+    '{"a":1}',
+    "",
+    "> {%",
+    "  client.global.set(\"t\", response.body.t);",
+    "%}",
+  ].join("\n");
+  const file = parseHttpFile(text);
+  const request = file.requests[0];
+  const values = cloneForm(formValuesOfRequest(request));
+  values.url = "https://a.test/h2";
+  const next = applyHttpEdits(text, file, new Map([[0, values]]));
+  assert.equal(next.includes("> {%"), true, "脚本开头被吞掉等于删了用户写的内容");
+  assert.equal(next.includes("%}"), true, "脚本收尾也要留着");
+  assert.equal(next.includes("client.global.set(\"t\", response.body.t);"), true);
+  // 摘走再写回之后仍解析得回同一条请求与同一段脚本，行区间也不会漂。
+  const reparsed = parseHttpFile(next);
+  assert.equal(reparsed.requests.length, 1);
+  assert.equal(reparsed.requests[0].url, "https://a.test/h2");
+  assert.equal(reparsed.requests[0].responseHandler, request.responseHandler);
+});
+
+test("HTTP 写回: `> 文件` 的落盘行不被正文替换吞掉", () => {
+  const text = ["GET https://a.test/o", "Content-Type: text/plain", "", "> ./out/response.json"].join("\n");
+  const file = parseHttpFile(text);
+  const values = cloneForm(formValuesOfRequest(file.requests[0]));
+  const next = applyHttpEdits(text, file, new Map([[0, values]]));
+  assert.equal(next.includes("> ./out/response.json"), true);
+});
+
+test("HTTP 写回: curl 一节整块不动，改了也不重排成 HTTP 请求行", () => {
+  const text = ["### 一条 curl", "curl -X POST https://a.test/x -H 'A: 1' -d '{\"k\":1}'"].join("\n");
+  const file = parseHttpFile(text);
+  const values = cloneForm(formValuesOfRequest(file.requests[0]));
+  values.url = "https://a.test/changed";
+  const next = applyHttpEdits(text, file, new Map([[0, values]]));
+  assert.equal(next, text, "把 curl 命令摊成请求行就是改写用户的命令");
+});

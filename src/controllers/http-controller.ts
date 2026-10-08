@@ -16,15 +16,29 @@ import { createPanelState, pathKey } from "../state/panel-state.ts";
 import type { FileTreeEntry } from "../services/file-service.ts";
 import { basename, errorMessage } from "../services/file-service.ts";
 import type { HttpRestFile } from "../services/http-file-scan.ts";
-import { scanHttpRestFiles } from "../services/http-file-scan.ts";
+import { scanHttpRestFiles, REQUEST_FILE_EXTENSIONS, REQUEST_FILE_EXTENSION_HINT, newRequestFileTemplate } from "../services/http-file-scan.ts";
 import { parseHttpFile, httpRequestTitle } from "../services/http-request-parser.ts";
 import type { HttpParsedFile, HttpParsedRequest } from "../services/http-request-parser.ts";
 import { formValuesOfRequest, updateHttpText } from "../services/http-serialize.ts";
 import type { HttpFormValues } from "../services/http-serialize.ts";
 import { runHttpRequest } from "../services/http-runner.ts";
 import type { HttpRunResult } from "../services/http-runner.ts";
-import { saveHttpViewerMode } from "../services/settings.ts";
-import type { HttpResponseRecord } from "../services/http-variables.ts";
+import { saveHttpViewerMode, saveHttpEnvironment } from "../services/settings.ts";
+import type { HttpResponseRecord, HttpRequestRecord } from "../services/http-variables.ts";
+import {
+  loadEnvironmentStore,
+  loadDotenvVariables,
+  resolveActiveEnvironment,
+  listEnvironmentNames,
+  serializeEnvironmentJson,
+  pluginConfigDirectory,
+  joinPath,
+  NO_ENVIRONMENT_NAME,
+  ENVIRONMENT_FILE_NAME,
+} from "../services/http-env.ts";
+import type { HttpEnvironmentDraft, HttpEnvironmentSummary, HttpEnvironmentTable } from "../services/http-env.ts";
+import { relativePath, writeFileContent } from "../services/file-service.ts";
+import { createFileInDirectory, createFileRejectionMessage } from "../services/file-create.ts";
 
 /** HTTP 控制器的注入依赖：渲染回调与跨控制器回调由装配阶段回填。 */
 export type HttpControllerDeps = {
@@ -65,6 +79,13 @@ export type HttpControllerDeps = {
    *   切项目（resetForProject）不问——那时项目已经切过去了，问也来不及。
    */
   confirmDiscard?(): Promise<boolean>;
+  /**
+   * `# @note` 的发送前确认：note 是作者写给「发送」这一步的话，所以发出之前先问一句。
+   * @param text 作者在文件里写的 note 原文
+   * @returns 用户确认继续发送时 true
+   * @description 缺省时不拦：没有确认通道（例如单测）就不能凭空多一道弹窗把发送卡住。
+   */
+  confirmNote?(text: string): Promise<boolean>;
 };
 
 /**
@@ -94,6 +115,198 @@ export function createHttpController(deps: HttpControllerDeps) {
   let scannedRootKey = "";
   /** 发送令牌：换文件或重发时丢弃上一次的结果。 */
   let sendToken = 0;
+  /** 环境读取令牌：换文件、切环境、重扫都可能打断上一次读盘，晚到的结果一律丢弃。 */
+  let envToken = 0;
+
+  /**
+   * 读环境表与 `.env`。
+   * @description 位置是固定的两份：`<根>/.snow/.snow-file-explorer/env.json`（+ 同名覆盖的
+   *   `env.private.json`）与工作区根的 `.env`，都跟项目走，不随请求文件所在目录变。
+   *   打开文件时仍重读一次，用户在别处改完表就能立刻看见。
+   */
+  async function loadEnvironment() {
+    const rootPath = state.rootPath;
+    if (!rootPath) {
+      state.httpEnv = null;
+      state.httpDotenv = new Map();
+      state.httpDotenvPath = null;
+      return;
+    }
+    const token = ++envToken;
+    const store = await loadEnvironmentStore({ rootPath });
+    if (isDisposed() || token !== envToken) return;
+    state.httpEnv = store;
+    // 记住的环境名在另一个项目里可能压根没定义：落回「不选环境」，
+    // 否则界面顶着一个不存在的环境名，用户以为变量是从那里来的。
+    const names = listEnvironmentNames(store);
+    if (state.httpEnvironmentName && state.httpEnvironmentName !== NO_ENVIRONMENT_NAME && !names.includes(state.httpEnvironmentName)) {
+      state.httpEnvironmentName = NO_ENVIRONMENT_NAME;
+    }
+    const dotenv = await loadDotenvVariables({ rootPath, environment: state.httpEnvironmentName });
+    if (isDisposed() || token !== envToken) return;
+    state.httpDotenv = dotenv.variables;
+    state.httpDotenvPath = dotenv.path;
+  }
+
+  /** 当前环境与 `$shared` 合并后的变量表。 */
+  function environmentVariables(): Map<string, string> {
+    if (!state.httpEnv) return new Map();
+    return resolveActiveEnvironment(state.httpEnv, state.httpEnvironmentName).variables;
+  }
+
+  /**
+   * 界面要画的环境概况。
+   * @returns 可选环境名、当前环境、生效变量、来源文件、被覆盖的共享键，以及列表与弹窗各自要用的两份表
+   */
+  function environmentSummary(): HttpEnvironmentSummary {
+    const store = state.httpEnv;
+    const resolved = store ? resolveActiveEnvironment(store, state.httpEnvironmentName) : null;
+    const privateKeys: string[] = [];
+    if (store) {
+      for (const [environment, table] of store.privateTables) {
+        for (const key of table.keys()) privateKeys.push(`${environment}/${key}`);
+      }
+    }
+    return {
+      names: store ? listEnvironmentNames(store) : [],
+      active: state.httpEnvironmentName,
+      hasShared: Boolean(store && store.environments.has("$shared")),
+      variables: resolved ? resolved.variables : new Map<string, string>(),
+      overriddenShared: resolved ? resolved.overriddenShared : [],
+      files: store ? store.files : [],
+      directory: pluginConfigDirectory(state.rootPath || ""),
+      tables: store ? store.environments : new Map<string, HttpEnvironmentTable>(),
+      publicTables: store ? store.publicTables : new Map<string, HttpEnvironmentTable>(),
+      privateKeys,
+      issues: store ? store.issues : [],
+      dotenvPath: state.httpDotenvPath,
+      dotenvCount: state.httpDotenv.size,
+    };
+  }
+
+  /**
+   * 切换活动环境。
+   * @param name 目标环境名；NO_ENVIRONMENT_NAME 表示只用 `$shared`
+   * @param persist 是否写入用户偏好（默认写）
+   * @description 切环境会改变 `{{$dotenv}}` 的取的文件（`.env.<环境名>` 优先），
+   *   所以这里必须重读 .env，不能只换那张合并表。
+   */
+  async function setEnvironment(name: string, persist = true) {
+    const next = state.httpEnv && listEnvironmentNames(state.httpEnv).includes(name) ? name : NO_ENVIRONMENT_NAME;
+    if (next === state.httpEnvironmentName && persist === false) return;
+    state.httpEnvironmentName = next;
+    if (persist) saveHttpEnvironment(api, next);
+    await loadEnvironment();
+    deps.renderHttpPreview();
+  }
+
+  /** 启动时恢复上次选中的环境（不重读盘，读盘在打开文件时做）。 */
+  function restoreEnvironment(name: string) {
+    state.httpEnvironmentName = typeof name === "string" ? name : NO_ENVIRONMENT_NAME;
+  }
+
+  /**
+   * 界面按下「重新读取」：重读环境表与 `.env` 后重画。
+   * @description 环境表是工作区里的普通文件，用户随时可能在外面改它；
+   *   有一条显式重读的入口，就不用靠「重新点一次文件」这种隐式动作生效。
+   */
+  async function reloadEnvironment() {
+    await loadEnvironment();
+    deps.renderHttpPreview();
+  }
+
+  /**
+   * 把整份公开表写到 `<根>/.snow/.snow-file-explorer/env.json`，成功后重读回来。
+   * @returns 写成功（或本来就是这样、不需要写）时 true；失败原因已在状态条说清
+   * @description 第一次写就把配置目录一起建出来（宿主的写动作连父目录建，插件侧没有建目录的接口），
+   *   所以「新建环境」和「改已有环境」是同一条写回路。写完只重读不重画：画不画由拿到结果的调用方定。
+   */
+  async function writePublicTables(tables: Map<string, HttpEnvironmentTable>) {
+    const rootPath = state.rootPath;
+    if (!rootPath) {
+      if (typeof deps.setStatus === "function") deps.setStatus(t("http.envNoRoot", "还没打开项目，没有可以放环境表的地方"), true);
+      return false;
+    }
+    const target = joinPath(pluginConfigDirectory(rootPath), ENVIRONMENT_FILE_NAME);
+    if (!relativePath(rootPath, target)) {
+      if (typeof deps.setStatus === "function") deps.setStatus(t("http.envOutsideRoot", "环境表要写在项目根以内，这次的路径超出了项目范围"), true);
+      return false;
+    }
+    const next = serializeEnvironmentJson(tables);
+    // 跟内存里那份逐字比对，一个字没变就不写：弹窗现在也能只翻开看文件变量那一页，
+    // 看完顺手点保存不该把配置表重抄一遍（重抄动文件时间、在版本状态里凭空多一条没改过的记录，还白读一次盘）。
+    // 盘还没读成功过（`httpEnv` 为空）时不作这个判断——那时没有可比对的基准。
+    if (state.httpEnv && next === serializeEnvironmentJson(state.httpEnv.publicTables)) return true;
+    const result = await writeFileContent(api, target, next);
+    if (!result.ok) {
+      if (typeof deps.setStatus === "function") deps.setStatus(result.error || t("http.envSaveFailed", "环境表没能保存"), true);
+      return false;
+    }
+    // 重读是为了下一次发请求就用到新表，不是为了重画。
+    await loadEnvironment();
+    return true;
+  }
+
+  /**
+   * 把弹窗交回来的整张表写回公开表：表里没给的段，就是用户在弹窗里删掉的那一段。
+   * @param tables 每一段是「段名 + 变量行」，按界面上的顺序
+   * @returns 写成功时 true
+   * @description 写的是公开表那一份：私密表里的值是盖在合并结果上的，跟着抄回去就等于把密钥
+   *   写进随仓库走的那一份。所以弹窗摊开的也必须是公开表那份（概况里的 `publicTables`）。
+   *   整张表一次写回：「改一段 / 加一段 / 删一段」在盘上是一件事，分几次写就会出现只改成一半的
+   *   中间态，那时发请求用的是哪一份没人说得清。
+   *   写成了才重画面板：弹窗这时已经关了，这一张表上再没有用户填到一半的输入框。
+   */
+  async function saveEnvironmentTables(tables: HttpEnvironmentDraft[]) {
+    const next = new Map<string, HttpEnvironmentTable>();
+    for (const section of tables) {
+      const table: HttpEnvironmentTable = new Map();
+      for (const variable of section.variables) {
+        const key = variable.key.trim();
+        // 名字还空着的那一行不算一项：等它填上名字才进表（与弹窗里的收集同一条规矩）。
+        if (!key) continue;
+        table.set(key, variable.value);
+      }
+      next.set(section.name, table);
+    }
+    const saved = await writePublicTables(next);
+    if (saved) deps.renderHttpPreview();
+    return saved;
+  }
+
+  /**
+   * 新建一个请求文件。
+   * @param directoryPath 目标目录绝对路径（侧边栏选中的目录；没选就是项目根）
+   * @param fileName 用户给的名字；没写扩展名就补 `.http`，写了别的不收
+   * @returns 建好并打开时 true；任何拦截原因都已在状态条说明
+   * @description 边界（项目根以内、名字合法、同名不覆盖、扩展名只收这一类）与文件树的新建文件
+   *   是同一条规矩，所以整套判断在 file-create 里，两处入口共用一份措辞；这里只管建完之后重扫列表
+   *   并把新文件打开。这一类文件有两种写法（`.http` / `.rest`），补哪一种都行，但要和扫描认的名单一致。
+   */
+  async function createRequestFile(directoryPath: string, fileName: string) {
+    const created = await createFileInDirectory({
+      rootPath: state.rootPath,
+      directoryPath,
+      fileName,
+      // 初始模板唯一源在 http-file-scan（文件树新建 .http/.rest 也用这一份）
+      content: newRequestFileTemplate(t),
+      extension: ".http",
+      allowedExtensions: REQUEST_FILE_EXTENSIONS,
+    });
+    if (!created.ok) {
+      if (typeof deps.setStatus === "function") {
+        deps.setStatus(
+          created.error || createFileRejectionMessage(t, created.reason, created.name, REQUEST_FILE_EXTENSION_HINT),
+          true
+        );
+      }
+      return false;
+    }
+    await rescan({ force: true });
+    const entry = state.httpFiles.find((file) => pathKey(file.path) === pathKey(created.path));
+    if (entry) await openFile(entry);
+    return true;
+  }
 
   /**
    * 重新扫描整仓请求文件。
@@ -229,6 +442,9 @@ export function createHttpController(deps: HttpControllerDeps) {
     await deps.previewFile(entry);
     if (isDisposed() || pathKey(state.httpSelected || "") !== pathKey(file.path)) return;
     reloadDocument();
+    // 环境与 .env 都按这个文件所在目录往上找，必须在选中路径定了之后再读。
+    await loadEnvironment();
+    if (isDisposed() || pathKey(state.httpSelected || "") !== pathKey(file.path)) return;
     // 打开文件默认全部折叠：先给「这份文件有哪些请求」的清单，看哪条再点哪条。
     // （此处不再自动聚焦第一条——那会在用户还没选之前就摊开一条，等于替他做决定。）
     if (state.httpMode === "text") ensureEditableBuffer();
@@ -268,8 +484,8 @@ export function createHttpController(deps: HttpControllerDeps) {
   /**
    * 切换一张请求卡片的聚焦态。
    * @param key 块键：请求卡片用 `r<下标>`
-   * @description 一次只聚焦一条（对标 Postman 一次只编辑一个请求）：展开某条即聚焦它，
-   *   其余自动收起成列表行；再点同一条则收起回到「全是列表行」的浏览态。
+   * @description 一次只聚焦一条：展开某条即聚焦它，其余自动收起成列表行；再点同一条则收起，
+   *   回到「全是列表行」的浏览态。几条卡片同时摊开改的都是同一份正文，一次看清一条更数得过来。
    *   非请求键（文本态其它块）保持普通的逐个切换。
    */
   function toggleExpand(key: string) {
@@ -306,6 +522,16 @@ export function createHttpController(deps: HttpControllerDeps) {
   }
 
   /**
+   * 开合文件变量（`@name = value`）那一排。
+   * @description 默认收起：变量一多，首屏全被这排读就好的胶囊占掉，而它只是取值背景。
+   *   点开看全，再点收回；开合的是面板，不碰磁盘，也不动正文缓冲。
+   */
+  function toggleVariablesCollapsed() {
+    state.httpVariablesCollapsed = !state.httpVariablesCollapsed;
+    deps.renderHttpPreview();
+  }
+
+  /**
    * 聚焦某条请求（发送时调用，确保结果可见）。
    * @param index 请求下标
    */
@@ -338,8 +564,7 @@ export function createHttpController(deps: HttpControllerDeps) {
         deps.setStatus(t("http.bodySectionHint", "正文里以 ### 开头的行会被当成新的分节行"));
       }
     }
-    // 正文一改，整篇高亮 HTML 立刻作废（与 preview.handlePreviewInput 同一口径）。
-    state.preview.highlightedHtml = "";
+    // 正文一改，Markdown 渲染缓存立刻作废。
     state.preview.html = "";
     state.preview.saveState = "idle";
     state.preview.saveMessage = "";
@@ -467,6 +692,29 @@ export function createHttpController(deps: HttpControllerDeps) {
   }
 
   /**
+   * 收集会话里已发过的命名请求的请求侧快照，供 `{{name.request.body...}}` 取值。
+   * @returns 名字 → 请求快照
+   * @description 只有真发出过的才算数（`attempted`）：被前置拦下的请求没有「发出去的正文」，
+   *   拿它当快照会让 `{{x.request.body.$.name}}` 取到一个从未离开本地的值。
+   */
+  function requestRecords(): Map<string, HttpRequestRecord> {
+    const out = new Map<string, HttpRequestRecord>();
+    const file = state.httpFile;
+    if (!file) return out;
+    for (const [index, result] of state.httpResponses) {
+      const name = file.requests[index] && file.requests[index].name;
+      if (!name || !result.attempted) continue;
+      out.set(name, {
+        method: result.sent.method,
+        url: result.sent.url,
+        headers: result.sent.headers,
+        body: result.sent.body,
+      });
+    }
+    return out;
+  }
+
+  /**
    * 取本次请求的 `# @prompt` 填值。
    * @param file 当前文件的解析结果
    * @param index 请求下标
@@ -495,6 +743,11 @@ export function createHttpController(deps: HttpControllerDeps) {
     const file = state.httpFile;
     const request = effectiveRequest(index);
     if (!file || !request) return;
+    // `# @note` 是作者写给发送这一步的话，不是卡片上的装饰文字，所以要拦在发出之前问一句。
+    if (request.note && typeof deps.confirmNote === "function") {
+      const confirmed = await deps.confirmNote(request.note);
+      if (isDisposed() || !confirmed) return;
+    }
     const filePath = state.httpSelected || state.preview.path;
     const identity = requestIdentity(file.requests[index]);
     const fetch = api && api.net && typeof api.net.fetch === "function" ? api.net.fetch.bind(api.net) : null;
@@ -530,10 +783,14 @@ export function createHttpController(deps: HttpControllerDeps) {
         filePath,
         rootPath: state.rootPath,
         scope: {
-          // 文件变量交给 runHttpRequest 从 file 上取；这里只带本次请求的 prompt 值与既有响应。
+          // 文件变量交给 runHttpRequest 从 file 上取；这里带的是本次请求的 prompt 值、既有响应与请求快照，
+          // 以及按当前文件读到的环境变量与 .env。
           fileVariables: new Map(),
           prompts: promptValues(file, index),
           responses: responseRecords(),
+          requests: requestRecords(),
+          environment: environmentVariables(),
+          dotenv: state.httpDotenv,
         },
       });
     } catch (err) {
@@ -624,6 +881,9 @@ export function createHttpController(deps: HttpControllerDeps) {
     state.httpScanning = false;
     state.httpCollapsed = new Set();
     state.httpSelected = null;
+    state.httpEnv = null;
+    state.httpDotenv = new Map();
+    state.httpDotenvPath = null;
     releaseDocument();
   }
 
@@ -682,6 +942,7 @@ export function createHttpController(deps: HttpControllerDeps) {
     toggleCollapse,
     toggleExpand,
     setRequestBodyOpen,
+    toggleVariablesCollapsed,
     setMode,
     ensureEditable: ensureEditableBuffer,
     markDirty,
@@ -696,5 +957,11 @@ export function createHttpController(deps: HttpControllerDeps) {
     invalidateScan,
     isDirty,
     discardChanges,
+    environmentSummary,
+    setEnvironment,
+    restoreEnvironment,
+    reloadEnvironment,
+    saveEnvironmentTables,
+    createRequestFile,
   };
 }

@@ -2,9 +2,9 @@
  * HTTP 结果渲染 (src/components/http-result-view.ts)
  * @description 一条请求「发出去了什么、回来了什么」的完整展示：状态行、实际发出的请求、
  *   告警与错误、响应头、响应正文（JSON 走可折叠视图）。
- * @description 抽成独立组件是因为两个地方都要用同一套：GUI 态的卡片下方，
- *   以及文本态的右分栏（对标上游 vscode-restclient 的 Exchange 预览：请求与响应同屏）。
- *   两份实现迟早会漂移，那是 bug 的温床。
+ * @description 同一份结果两处都要用：GUI 态的卡片下方，以及文本态的右分栏——
+ *   请求与响应要同屏对照，和 Git 的分栏比对是同一个理由。
+ *   因此只留这一个组件、两处共用：两份实现迟早会漂移，那是 bug 的温床。
  */
 
 import type { TranslateFn } from "../types/panel-state.ts";
@@ -50,9 +50,9 @@ function extensionForContentType(contentType: string): string {
 
 /**
  * JSON 正文按两空格缩进美化；不是 JSON 或体量过大就原样返回。
- * @description 判定只看「能不能 parse」，不迷信 Content-Type：
- *   上游（vscode-restclient 的 ResponseFormatUtility）在 content-type 对不上时同样按 JSON 试一遍，
- *   数组正文 `[...]`、以及宿主没回 Content-Type 的情况都要吃到这条。
+ * @description 判定只看「能不能 parse」，不迷信 Content-Type：服务端把 JSON 标成别的类型、
+ *   甚至干脆不回 Content-Type 都很常见，所以正文开头是 `{` / `[` 就先试一遍（数组响应靠这条才吃得到美化）；
+ *   Content-Type 说是 JSON 的同样试。试失败原样返回，正文一个字符都不动。
  */
 function prettyBody(body: string, contentType: string): string {
   if (body.length > MAX_PRETTY_CHARS) return body;

@@ -56,6 +56,21 @@ function panelOptions(partial: Partial<Parameters<typeof renderHttpRequestPanel>
     onSend: () => {},
     onPromptChange: () => {},
     getPromptValue: () => "",
+    // 默认「项目里没有环境表」：环境条只在有内容时出现，不给既有断言添噪。
+    environment: {
+      names: [],
+      active: "",
+      hasShared: false,
+      variables: new Map(),
+      overriddenShared: [],
+      files: [],
+      directory: "",
+      tables: new Map(),
+      privateKeys: [],
+      issues: [],
+      dotenvPath: null,
+      dotenvCount: 0,
+    },
     t,
     ...partial,
   } as Parameters<typeof renderHttpRequestPanel>[1];
@@ -212,14 +227,13 @@ test("HTTP GUI: JSON 响应按语义着色（键/字符串/数字/布尔/null �
     host,
     panelOptions({ responses: new Map([[0, { ...okResult(), response: { ...okResult().response!, body } }]]) })
   );
-  // 键着色："name": 里的 "name" 是键，不是普通字符串
-  assert.equal(host.querySelector(".sfe-json-key")!.textContent, '"name"');
-  assert.equal(host.querySelector(".sfe-json-string")!.textContent, '"Ada"');
-  assert.equal(host.querySelector(".sfe-json-number")!.textContent, "37");
-  assert.equal(host.querySelector(".sfe-json-boolean")!.textContent, "true");
-  assert.equal(host.querySelector(".sfe-json-null")!.textContent, "null");
-  // 不再产出代码高亮的 token 类（那是「代码美化」的残留）
-  assert.equal(host.querySelector(".sfe-json-code .token"), null);
+  // 键着色："name": 里的 "name" 是键，不是普通字符串。
+  // JSON 语义着色统一走 Prism token 类名（与 .json 文件同一色板，见 syntax.css）。
+  assert.equal(host.querySelector(".sfe-json-code .token.property")!.textContent, '"name"');
+  assert.equal(host.querySelector(".sfe-json-code .token.string")!.textContent, '"Ada"');
+  assert.equal(host.querySelector(".sfe-json-code .token.number")!.textContent, "37");
+  assert.equal(host.querySelector(".sfe-json-code .token.boolean")!.textContent, "true");
+  assert.equal(host.querySelector(".sfe-json-code .token.null")!.textContent, "null");
 });
 
 test("HTTP GUI: 响应正文默认展开（请求完成就是看结果），可整体收起", () => {
@@ -269,9 +283,9 @@ test("HTTP 结果视图: 实际发出的请求里的 JSON 正文也做语义着�
   };
   renderHttpResult(host, result, t);
   const body = host.querySelector<HTMLElement>(".sfe-http-sent-body")!;
-  assert.equal(body.querySelector(".sfe-json-key")!.textContent, '"name"', "发出的正文里键有着色");
-  assert.equal(body.querySelector(".sfe-json-string")!.textContent, '"Ada"');
-  assert.equal(body.querySelector(".sfe-json-number")!.textContent, "37");
+  assert.equal(body.querySelector(".token.property")!.textContent, '"name"', "发出的正文里键有着色");
+  assert.equal(body.querySelector(".token.string")!.textContent, '"Ada"');
+  assert.equal(body.querySelector(".token.number")!.textContent, "37");
 });
 
 test("HTTP 结果视图: 实际发出的请求默认折叠（要看再展开）", () => {
@@ -486,8 +500,8 @@ test("HTTP GUI: 请求体是「可折叠 + 语义着色」的视图，点编辑�
   assert.equal(fold.open, true, "请求体默认展开（操作型区块）");
   assert.equal(fold.querySelector("summary")!.textContent!.includes("请求体"), true);
   // 内部 JSON 已语义着色
-  assert.equal(fold.querySelector(".sfe-json-key")!.textContent, '"name"');
-  assert.equal(fold.querySelector(".sfe-json-string")!.textContent, '"Ada"');
+  assert.equal(fold.querySelector(".token.property")!.textContent, '"name"');
+  assert.equal(fold.querySelector(".token.string")!.textContent, '"Ada"');
   // 点「编辑」切到 textarea 编辑态
   (fold.querySelector(".sfe-json-edit-btn") as HTMLElement).dispatchEvent(
     new dom.window.MouseEvent("click", { bubbles: true })
@@ -508,8 +522,8 @@ test("HTTP GUI: 请求体编辑态随键入重绘高亮层并上交新值", () =
   const body = editor.querySelector<HTMLTextAreaElement>(".sfe-http-body")!;
   body.value = '{ "count": 3 }';
   body.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
-  assert.equal(highlight.querySelector(".sfe-json-key")!.textContent, '"count"');
-  assert.equal(highlight.querySelector(".sfe-json-number")!.textContent, "3");
+  assert.equal(highlight.querySelector(".token.property")!.textContent, '"count"');
+  assert.equal(highlight.querySelector(".token.number")!.textContent, "3");
   assert.equal(changes[changes.length - 1], '{ "count": 3 }', "新值照常上交装配层");
 });
 

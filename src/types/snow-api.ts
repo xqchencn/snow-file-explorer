@@ -4,7 +4,7 @@
  * 真源是 Snow App 的 preload 出口：`src/preload/index.ts:55` 把 24 个模块对象展开成
  * `contextBridge.exposeInMainWorld("snow", api)`，`src/preload/index.ts:60` 导出
  * `export type SnowApi = typeof api`。宿主那份类型包含 ssh / conversation / updater /
- * pets 等与文件浏览器无关的能力，因此这里只声明插件**实际调用**的 33 个方法，
+ * pets 等与文件浏览器无关的能力，因此这里只声明插件**实际调用**的 34 个方法，
  * 逐个方法标注宿主出处（文件:行号），清单与签名对照见 docs/host-api.md。
  *
  * 之所以按「宿主一定提供」来声明而不是全方法可选：宿主进程内 `window.snow` 必然存在，
@@ -13,8 +13,9 @@
  * 入口判空、`src/services/file-service.ts` 的读取守卫、`src/services/terminal-runner.ts` 的
  * `isTerminalAvailable()`），探测不通过就走「宿主未提供该能力」的降级分支。
  *
- * 文件写入不在此通道：改名/删除/写文件走受 privacy 门控的 `api.write.run("filesystem.*")`，
- * 见 src/types/plugin-runtime.ts。
+ * 文件改动只有「新建文件」走这条通道（`writeFileContent`）：受 privacy 门控的
+ * `filesystem.writeFile` 动作还多一道「正文不许为空白」的入参检查，新建空文件会被它挡下来。
+ * 改名与删除仍走 `api.write.run("filesystem.*")`，见 src/types/plugin-runtime.ts。
  */
 
 import type { ResponsesApiResult, ResponsesApiStreamChunk } from "./host/host-api.ts";
@@ -93,6 +94,14 @@ export type SnowApi = {
    *          由 `isImage` / `isBinary` / `isSvg` 与 `mimeType` 区分渲染方式
    */
   readFileContent: (filePath: string) => Promise<FileContentResult>;
+
+  /**
+   * 写入单个文件的完整正文（覆盖写，父目录不存在时由宿主一并建出来）。
+   * @param filePath 文件绝对路径；宿主只要求它是非空白字符串，**不校验是否在工作区以内**
+   * @param content 完整文本；空串也收（新建的空文件本来就没有正文）
+   * @returns 写入完成即 resolve，没有回传数据；写失败时 reject，错误文本由宿主给出
+   */
+  writeFileContent: (filePath: string, content: string) => Promise<void>;
 
   /**
    * 按名称与工作区行内容搜索文件。

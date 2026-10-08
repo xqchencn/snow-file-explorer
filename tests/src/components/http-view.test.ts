@@ -145,7 +145,8 @@ test("HTTP 列表: 空态区分扫描中与确实没有，截断时追加一条�
   // 确实没有时补一句这里是干嘛的：光说「没有」用户不知道这视图该装什么。
   assert.equal(
     emptyHost.querySelector(".sfe-http-empty-hint")!.textContent,
-    "当前展示项目里的 REST 请求文件（.http / .rest）。在项目里新建一个 .http 文件，回到这里点「重新扫描」即可"
+    "当前展示项目里的 REST 请求文件（.http / .rest）",
+    "只说这块展示什么；新建入口已经在列表头上，不必再教用户去项目里手建再回来重扫"
   );
 
   const truncatedHost = document.createElement("div");
@@ -166,4 +167,26 @@ test("HTTP 列表: 给了刷新回调才出现刷新按钮，点击即重扫", (
   const noRefresh = document.createElement("div");
   renderHttpList(noRefresh, options({ files: [httpFile("a.http")] }));
   assert.equal(noRefresh.querySelector(".sfe-http-head-action"), null);
+});
+
+test("HTTP 列表: 给了新建回调才出现「新建请求文件」，点击即发起", () => {
+  const host = document.createElement("div");
+  let created = 0;
+  renderHttpList(host, options({ files: [httpFile("a.http")], onCreateRequestFile: () => (created += 1) }));
+  const buttons = [...host.querySelectorAll<HTMLButtonElement>(".sfe-http-head-action")];
+  assert.equal(buttons.length, 1, "只给新建时头部就只有这一颗按钮");
+  assert.equal(buttons[0].title, "新建请求文件");
+  buttons[0].dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
+  assert.equal(created, 1);
+
+  // 两颗都在时才并排；没给新建通道就别摆一颗点不动的按钮。
+  const both = document.createElement("div");
+  renderHttpList(both, options({ files: [httpFile("a.http")], onRefresh: () => {}, onCreateRequestFile: () => {} }));
+  assert.deepEqual(
+    [...both.querySelectorAll<HTMLButtonElement>(".sfe-http-head-action")].map((button) => button.title),
+    ["新建请求文件", "重新扫描"]
+  );
+  const refreshOnly = document.createElement("div");
+  renderHttpList(refreshOnly, options({ files: [httpFile("a.http")], onRefresh: () => {} }));
+  assert.equal(refreshOnly.querySelectorAll(".sfe-http-head-action").length, 1);
 });

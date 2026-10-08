@@ -29,7 +29,9 @@ export type ExcludedEntryMarks = {
   isMetaExcluded: boolean;
   /** 是否被某条 .gitignore 规则命中。 */
   isGitignored: boolean;
-  /** 两者任一命中：开关关闭时仍以浅色显示而非隐藏。 */
+  /** 是否属于 IDE / AI 工具生成的目录 / 文件（EXCLUDED_TOOL_DIRS / FILES，与 gitignore 同开关）。 */
+  isToolExcluded: boolean;
+  /** 三者任一命中：开关关闭时仍以浅色显示而非隐藏。 */
   isSoftHidden: boolean;
 };
 
@@ -43,7 +45,11 @@ export type GitignoreRulesOption = {
 export type ExclusionFilterOptions = GitignoreRulesOption & {
   /** 是否排除 .git/.svn/.hg/CVS/.DS_Store/Thumbs.db；缺省排除。 */
   excludeMeta?: boolean;
-  /** 是否应用 .gitignore 过滤；缺省应用。 */
+  /**
+   * 是否应用 .gitignore 过滤；缺省应用。
+   * @description 开启时 IDE / AI 工具目录清单（EXCLUDED_TOOL_DIRS / FILES）一并生效：
+   *   就算没写进 .gitignore 也从代码层面屏蔽（用户约定）。
+   */
   useGitignore?: boolean;
 };
 
@@ -53,6 +59,66 @@ export type ExclusionFilterOptions = GitignoreRulesOption & {
 export const EXCLUDED_META_NAMES: ReadonlySet<string> = Object.freeze(
   new Set([".git", ".svn", ".hg", "CVS", ".DS_Store", "Thumbs.db"])
 );
+
+/**
+ * IDE / AI 工具在项目内生成的目录名：即使没写进 .gitignore 也强制隐藏。
+ * @description 挂在「按 .gitignore」开关（useGitignore）下，命中后与 gitignored 走同一套
+ *   隐藏 / 浅色逻辑。按**目录名**匹配任意层级：嵌套包的 packages/x/node_modules 同样挡住。
+ *   清单为用户拍板版：`build` / `out` / `bin` / `vendor` / `.yarn` 这类通用名刻意不在内
+ *   （可能被当源码目录或团队提交目录），交给 .gitignore 层管。
+ */
+export const EXCLUDED_TOOL_DIRS: ReadonlySet<string> = Object.freeze(
+  new Set([
+    // AI 编辑器 / AI CLI
+    ".agents", ".amazonq", ".aider", ".claude", ".cline", ".cody", ".codeium", ".codex",
+    ".continue", ".copilot", ".crush", ".cursor", ".factory", ".gemini", ".goose", ".iflow",
+    ".junie", ".kilocode", ".mimosa", ".opencode", ".plandex", ".qoder", ".qwen", ".roo",
+    ".serena", ".snow", ".sourcegraph", ".tabnine", ".trae", ".windsurf", ".zcode",
+    // IDE / 编辑器
+    ".fleet", ".history", ".idea", ".nbproject", ".settings", ".vs", ".vscode",
+    // Node / 前端框架
+    ".angular", ".astro", ".next", ".nuxt", ".output", ".parcel-cache", ".pnpm-store",
+    ".svelte-kit", ".turbo", "node_modules",
+    // Python
+    ".eggs", ".hypothesis", ".ipynb_checkpoints", ".mypy_cache", ".nox", ".pytest_cache",
+    ".ruff_cache", ".tox", ".venv", "venv", "__pycache__",
+    // JVM / Rust / .NET / Terraform
+    ".gradle", ".terraform", "artifacts", "obj", "target", "TestResults",
+    // 打包产物 / 覆盖率
+    ".nyc_output", "coverage", "dist",
+    // Flutter / Ruby
+    ".bundle", ".dart_tool", ".expo",
+  ])
+);
+
+/**
+ * IDE / AI 工具生成的杂散**文件**名：与目录清单同层（useGitignore 开关）强制隐藏。
+ */
+export const EXCLUDED_TOOL_FILES: ReadonlySet<string> = Object.freeze(
+  new Set([
+    ".classpath", ".project", ".aider.chat.history.md", ".aider.tags.yml",
+    ".coverage", ".eslintcache", "pnpm-debug.log",
+  ])
+);
+
+/** 工具生成的后缀匹配文件（如 `*.tsbuildinfo`）。 */
+const EXCLUDED_TOOL_FILE_SUFFIXES: readonly string[] = [".tsbuildinfo"];
+
+/**
+ * 判断条目是否属于 IDE / AI 工具的强制排除清单
+ * @param name 条目名称（不含路径）
+ * @param isDirectory 是否目录
+ * @returns 命中工具目录 / 工具文件清单时为 true
+ */
+export function isExcludedToolItem(name: string, isDirectory: boolean): boolean {
+  const n = String(name || "");
+  if (!n) return false;
+  if (isDirectory) return EXCLUDED_TOOL_DIRS.has(n);
+  if (EXCLUDED_TOOL_FILES.has(n)) return true;
+  return EXCLUDED_TOOL_FILE_SUFFIXES.some(
+    (suffix) => n.length > suffix.length && n.toLowerCase().endsWith(suffix)
+  );
+}
 
 /**
  * 判断条目名是否属于需排除的元数据项
@@ -198,6 +264,7 @@ export function annotateExcludedEntry<T extends FileTreeEntry>(
   if (!entry) return entry;
   const { gitignoreRules = [] } = opts;
   const metaExcluded = isExcludedMeta(entry.name);
+  const toolExcluded = isExcludedToolItem(entry.name, !!entry.isDirectory);
   const rel = getRelativeGitPath(entry.path, rootPath);
   const gitignored =
     !!rel && isIgnoredByRules(rel, !!entry.isDirectory, gitignoreRules);
@@ -205,7 +272,8 @@ export function annotateExcludedEntry<T extends FileTreeEntry>(
     ...entry,
     isMetaExcluded: metaExcluded,
     isGitignored: gitignored,
-    isSoftHidden: metaExcluded || gitignored,
+    isToolExcluded: toolExcluded,
+    isSoftHidden: metaExcluded || gitignored || toolExcluded,
   };
 }
 
@@ -279,13 +347,15 @@ export function filterExcludedEntries<T extends FileTreeEntry>(
       let marks = marksKey ? marksByKey.get(marksKey) : undefined;
       if (!marks) {
         const metaExcluded = isExcludedMeta(entry.name);
+        const toolExcluded = isExcludedToolItem(entry.name, !!entry.isDirectory);
         const rel = getRelativeGitPath(entry.path, rootPath);
         const gitignored =
           !!rel && isIgnoredByRules(rel, !!entry.isDirectory, gitignoreRules);
         marks = {
           isMetaExcluded: metaExcluded,
           isGitignored: gitignored,
-          isSoftHidden: metaExcluded || gitignored,
+          isToolExcluded: toolExcluded,
+          isSoftHidden: metaExcluded || gitignored || toolExcluded,
         };
         if (marksKey) marksByKey.set(marksKey, marks);
       }
@@ -295,6 +365,8 @@ export function filterExcludedEntries<T extends FileTreeEntry>(
       if (!entry) return false;
       if (excludeMeta && entry.isMetaExcluded) return false;
       if (useGitignore && entry.isGitignored) return false;
+      // IDE / AI 工具目录挂在 .gitignore 开关下：开启即代码层面强制屏蔽（用户约定）
+      if (useGitignore && entry.isToolExcluded) return false;
       return true;
     });
 }

@@ -57,7 +57,9 @@ export type FileTreeEntry = FileTreeEntryBase & {
   isMetaExcluded?: boolean;
   /** 是否被某条 .gitignore 规则命中（file-filter.annotate 写入）。 */
   isGitignored?: boolean;
-  /** 两类排除任一命中：开关关闭时以浅色显示而非隐藏（file-filter.annotate 写入）。 */
+  /** 是否属于 IDE / AI 工具生成的目录 / 文件（file-filter.annotate 写入，随 .gitignore 开关隐藏）。 */
+  isToolExcluded?: boolean;
+  /** 三类排除任一命中：开关关闭时以浅色显示而非隐藏（file-filter.annotate 写入）。 */
   isSoftHidden?: boolean;
 };
 
@@ -324,6 +326,108 @@ export function relativePath(fromRoot: string, targetPath: string): string | nul
 }
 
 /**
+ * 计算带工作区根目录名的 Windows 相对路径。
+ * @description 先复用 relativePath 做工作区边界校验，再把工作区名加到路径前面；
+ *   根目录本身返回工作区名，越界路径返回 null，避免把工作区外路径伪装成相对路径。
+ * @param fromRoot 工作区根路径
+ * @param targetPath 目标路径
+ * @returns `工作区名\\子路径`；分隔符跟随工作区路径风格，目标越界或路径无效时返回 null
+ */
+export function workspaceRelativePath(fromRoot: string, targetPath: string): string | null {
+  const relative = relativePath(fromRoot, targetPath);
+  if (relative == null) return null;
+  const workspaceName = basename(fromRoot);
+  if (!workspaceName) return null;
+  if (relative === ".") return workspaceName;
+  // Windows 盘符/UNC 路径统一输出反斜杠，POSIX 根路径统一输出正斜杠，禁止混用。
+  const separator = /^[A-Za-z]:[\\/]|^\\\\/.test(String(fromRoot)) ? String.fromCharCode(92) : "/";
+  return `${workspaceName}${separator}${relative.replace(/\//g, separator)}`;
+}
+
+/**
+ * 根据聊天输入框当前内容计算本次追加文本。
+ * @description 宿主 `chatInput.insertText` 是追加语义：空输入直接追加消息，已有草稿才补一个换行。
+ * @param currentText 当前聊天输入框内容
+ * @param text 要追加的消息
+ * @returns 应传给 `chatInput.insertText` 的实际追加文本
+ */
+export function appendChatText(currentText: string, text: string): string {
+  const message = String(text ?? "")
+    // contenteditable 选区 / 终端复制的首尾换行是边界分隔符，不是正文空白段。
+    .replace(/^(?:\r\n|\r|\n)+/, "")
+    .replace(/(?:\r\n|\r|\n)+$/, "");
+  if (!message) return "";
+  // contenteditable 的空输入可能暂时发布为空白字符；视觉上无内容时不能再补换行。
+  if (!currentText.trim()) return message;
+  // 宿主可能把真实草稿末尾的换行一起发布；已有行尾时直接接正文，避免凭空制造空行。
+  if (/(?:\r\n|[\r\n])[\t ]*$/.test(currentText)) return message;
+  return `\n${message}`;
+}
+
+/**
+ * 构造文件右键「发送到对话框」的引用文本。
+ * @description 消息只包含带工作区名的路径和完整行范围，不包含文件正文；空文件按 1 行处理。
+ * @param rootPath 工作区根路径
+ * @param targetPath 文件绝对路径
+ * @param text 文件文本内容，仅用于计算总行数
+ * @returns `工作区名\\文件路径 L1-LN`；目标越界时返回 null
+ */
+export function buildFileChatReference(rootPath: string, targetPath: string, text: string): string | null {
+  const path = workspaceRelativePath(rootPath, targetPath);
+  if (path == null) return null;
+  const lineCount = String(text ?? "").split(/\r\n|\r|\n/).length;
+  return `${path} L1-L${lineCount}`;
+}
+
+/**
+ * 构造代码查看器选区的会话消息。
+ * @description 消息头只包含工作区路径和 1 基行范围，正文保持选区原文，不加代码围栏或逐行行号。
+ * @param rootPath 工作区根路径
+ * @param targetPath 文件绝对路径
+ * @param fullText 文件全文
+ * @param selectedText 选中的原文
+ * @param selectionStart 编辑态选区起点；只读态缺省时从全文查找选区
+ * @returns `路径 L起始-L结束\\n正文`；路径越界或选区无法定位时返回 null
+ */
+export function buildFileSelectionChatMessage(
+  rootPath: string,
+  targetPath: string,
+  fullText: string,
+  selectedText: string,
+  selectionStart?: number,
+): string | null {
+  const path = workspaceRelativePath(rootPath, targetPath);
+  if (path == null || !selectedText) return null;
+
+  // 磁盘原文在 Windows 上是 CRLF，而 DOM 选区与 textarea.value 一律用 \n 表示换行
+  // （HTML 规范把 CRLF/CR 归一为 \n）。不归一会让只读态 indexOf 定位不到选区而返回 null，
+  // 表现为「右键发送到对话框点了没反应」；整数下标路径（编辑态）也会算错行号。
+  // 因此匹配与行号一律在 LF 视图上做，正文仍保留选区原文。
+  const lfText = String(fullText ?? "").replace(/\r\n|\r/g, "\n");
+  const rawSelected = String(selectedText);
+  // 代码行 / REST 文本的 DOM 选区可能把行间分隔符带到选区边界；它不是正文，
+  // 否则路径头后会再插入一个换行，REST 发送到对话框时第一行就会变成空行。
+  const leadingBreaks = rawSelected.match(/^(?:(?:\r\n)|\r|\n)+/)?.[0] ?? "";
+  // 尾部换行是用户真实选中的正文，必须保留；聊天追加层会把它视为边界分隔符，
+  // 但这里还要用原选区计算行范围，不能在构造消息时擅自改写正文。
+  const selected = rawSelected.slice(leadingBreaks.length);
+  if (!selected) return null;
+  const lfSelected = selected.replace(/\r\n|\r/g, "\n");
+  const start = Number.isInteger(selectionStart)
+    ? Number(selectionStart) + leadingBreaks.replace(/\r\n|\r/g, "\n").length
+    : lfText.indexOf(lfSelected);
+  if (start < 0 || start + lfSelected.length > lfText.length) return null;
+
+  const lineNumber = (offset: number): number => lfText.slice(0, offset).split("\n").length;
+  const startLine = lineNumber(start);
+  let endPrefix = lfText.slice(0, start + lfSelected.length);
+  // 选区末尾的换行属于当前行的分隔符，不应凭空把结束行推到下一行。
+  if (lfSelected.endsWith("\n")) endPrefix = endPrefix.replace(/\n$/, "");
+  const endLine = endPrefix.split("\n").length;
+  return `${path} L${startLine}-L${endLine}\n${selected}`;
+}
+
+/**
  * 写入文本文件内容
  * @description 插件 ESM 运行时通过 api.write.run("filesystem.writeFile", params) 执行真实写入，宿主参数名为 filePath。
  *   宿主未提供能力或动作失败时统一返回 ok:false，调用方不得伪造保存成功。
@@ -343,6 +447,32 @@ export function writeFileContent(
     { filePath, content: String(content ?? "") },
     "当前宿主未提供文件写入能力"
   );
+}
+
+/**
+ * 用宿主原始通道新建一个文件（只给「新建文件」这一条路用）。
+ * @param filePath 文件绝对路径
+ * @param content 完整正文；空串也收
+ * @returns 与门控写动作同一套 ok/error 结果，成功时 data 为本次写入的路径
+ * @description 走 `window.snow.writeFileContent`：那条门控动作对正文还有一道「不许为空白」的
+ *   入参检查，新建空文件会在写盘那一步被它挡下来，而界面上早就说「能建」。
+ *   这条通道换掉了那道检查，也换掉了宿主侧的路径把关——位置在不在项目根以内、
+ *   有没有撞名，一律由调用方自己判（见 `file-create`）。
+ */
+export async function writeFileContentRaw(
+  filePath: string,
+  content: string
+): Promise<FileWriteResult<{ filePath: string }>> {
+  const snow = window.snow;
+  if (!snow || typeof snow.writeFileContent !== "function") {
+    return { ok: false, error: "当前宿主未提供新建文件能力" };
+  }
+  try {
+    await snow.writeFileContent(filePath, content);
+    return { ok: true, data: { filePath } };
+  } catch (err) {
+    return { ok: false, error: errorMessage(err) };
+  }
 }
 
 /* JVM 项目检测服务定义如下。 */

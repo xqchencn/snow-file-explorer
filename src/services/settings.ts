@@ -165,6 +165,44 @@ export async function loadHttpViewerMode(api: SettingsRuntimeApi | null): Promis
   return "gui";
 }
 
+// 活动 HTTP 环境的持久化偏好。
+
+const HTTP_ENVIRONMENT_KEY = "httpEnvironment";
+
+/**
+ * 读取上次选中的 HTTP 环境名
+ * @param api 宿主插件运行时 API
+ * @returns 环境名；没持久化过时为空串（只用 `$shared`）
+ */
+export async function loadHttpEnvironment(api: SettingsRuntimeApi | null): Promise<string> {
+  try {
+    if (api && api.storage && typeof api.storage.getJson === "function") {
+      const saved: unknown = await api.storage.getJson<unknown>(HTTP_ENVIRONMENT_KEY, null);
+      if (typeof saved === "string") return saved;
+    }
+  } catch (err) {
+    console.warn("[FileExplorer] 读取 HTTP 环境失败:", err);
+  }
+  return "";
+}
+
+/**
+ * 保存选中的 HTTP 环境名（尽力而为，不抛异常）
+ * @param api 宿主插件运行时 API
+ * @param name 环境名；空串表示「不选环境」
+ */
+export function saveHttpEnvironment(api: SettingsRuntimeApi | null, name: string): void {
+  try {
+    if (api && api.storage && typeof api.storage.setJson === "function") {
+      api.storage.setJson(HTTP_ENVIRONMENT_KEY, String(name ?? "")).catch((err) => {
+        console.warn("[FileExplorer] 保存 HTTP 环境失败:", err);
+      });
+    }
+  } catch (err) {
+    console.warn("[FileExplorer] 保存 HTTP 环境失败:", err);
+  }
+}
+
 /**
  * 保存 HTTP 请求文件的查看形态偏好（尽力而为，不抛异常）
  * @param api 宿主插件运行时 API

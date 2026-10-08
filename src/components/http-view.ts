@@ -65,8 +65,12 @@ export type HttpViewOptions = {
   onToggleCollapse?: (relPath: string) => void;
   /** 重新扫描回调；缺省时头部不渲染刷新按钮。 */
   onRefresh?: () => void;
-  /** 行右键回调 (file, event)；缺省时右键无动作。 */
+  /** 头部「新建请求文件」回调（建在项目根）；缺省时头部不渲染这颗按钮。 */
+  onCreateRequestFile?: () => void;
+  /** 文件行右键回调 (file, event)；缺省时右键无动作。 */
   onContextMenu?: (file: HttpRestFile, event: MouseEvent) => void;
+  /** 目录行右键回调 (node, event)；缺省时目录行的右键交给浏览器原生菜单。 */
+  onFolderContextMenu?: (node: HttpTreeNode, event: MouseEvent) => void;
   /** 国际化翻译函数。 */
   t: TranslateFn;
 };
@@ -193,6 +197,13 @@ function renderFolderRow(row: Extract<HttpTreeRow, { kind: "folder" }>, opts: Ht
   item.addEventListener("click", () => {
     if (typeof opts.onToggleCollapse === "function") opts.onToggleCollapse(node.relPath);
   });
+  item.addEventListener("contextmenu", (event) => {
+    // 与文件行同一约定：装配层没给回调就不接管这次右键，不摆一个「按了什么都不发生」的菜单。
+    if (typeof opts.onFolderContextMenu !== "function") return;
+    event.preventDefault();
+    event.stopPropagation();
+    opts.onFolderContextMenu(node, event);
+  });
   return item;
 }
 
@@ -255,6 +266,19 @@ export function renderHttpList(parentEl: HTMLElement, opts: HttpViewOptions): vo
   title.appendChild(el("span", "sfe-http-head-label", t("http.title", "REST 请求")));
   if (files.length) title.appendChild(el("span", "sfe-http-count", String(files.length)));
   head.appendChild(title);
+  if (typeof opts.onCreateRequestFile === "function") {
+    const createFile = el("button", "sfe-http-head-action");
+    createFile.type = "button";
+    createFile.title = t("http.newRequestFile", "新建请求文件");
+    createFile.setAttribute("aria-label", t("http.newRequestFile", "新建请求文件"));
+    // 头部两端对齐：剩余空间全部留在这颗按钮左边，它才会和「重新扫描」并排靠右，而不是被挤到中间。
+    createFile.style.marginLeft = "auto";
+    createFile.appendChild(createActionIcon("plus", 14));
+    createFile.addEventListener("click", () => {
+      if (typeof opts.onCreateRequestFile === "function") opts.onCreateRequestFile();
+    });
+    head.appendChild(createFile);
+  }
   if (typeof opts.onRefresh === "function") {
     const refresh = el("button", "sfe-http-head-action");
     refresh.type = "button";
@@ -289,7 +313,7 @@ export function renderHttpList(parentEl: HTMLElement, opts: HttpViewOptions): vo
     // 只有「确实没有」才说明这里展示的是什么：扫描中说这句是废话，用户还没看到结论。
     if (!scanning) {
       empty.appendChild(
-        el("div", "sfe-http-empty-hint", t("http.emptyHint", "当前展示项目里的 REST 请求文件（.http / .rest）。在项目里新建一个 .http 文件，回到这里点「重新扫描」即可"))
+        el("div", "sfe-http-empty-hint", t("http.emptyHint", "当前展示项目里的 REST 请求文件（.http / .rest）"))
       );
     }
     scroll.appendChild(empty);

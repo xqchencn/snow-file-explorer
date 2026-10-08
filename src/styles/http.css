@@ -494,38 +494,56 @@ html:has(.app-shell.right-panel-fullscreen) .sfe-http-pane {
 
 .sfe-http-headers,
 .sfe-http-prompts,
+.sfe-http-params,
 .sfe-http-body-wrap {
   display: flex;
   flex-direction: column;
   gap: 5px;
 }
 
-.sfe-http-header-rows {
+.sfe-http-header-rows,
+.sfe-http-param-rows {
   display: flex;
   flex-direction: column;
   gap: 4px;
 }
 
-.sfe-http-header-row {
+.sfe-http-header-row,
+.sfe-http-param-row {
   display: flex;
   gap: 6px;
   align-items: center;
 }
 
-.sfe-http-header-name {
+.sfe-http-header-name,
+.sfe-http-param-name {
   flex: 0 0 34%;
   min-width: 0;
   font-family: var(--font-mono, monospace);
 }
 
-.sfe-http-header-value {
+.sfe-http-header-value,
+.sfe-http-param-value {
   flex: 1;
   min-width: 0;
   font-family: var(--font-mono, monospace);
 }
 
+/* curl 一节的只读投影：与可编辑行同宽同字体，但没有输入框的边框，一眼看得出不可改。 */
+.sfe-http-header-static {
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  color: var(--text-secondary);
+  padding: 3px 7px;
+  border-radius: var(--radius-sm, 4px);
+  background: var(--bg-secondary, transparent);
+  overflow-wrap: anywhere;
+}
+
 .sfe-http-header-remove,
-.sfe-http-header-add {
+.sfe-http-header-add,
+.sfe-http-param-remove,
+.sfe-http-param-add {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -638,7 +656,8 @@ html:has(.app-shell.right-panel-fullscreen) .sfe-http-pane {
 }
 
 .sfe-http-hint,
-.sfe-http-variable {
+.sfe-http-variable,
+.sfe-http-env-hint {
   font-size: 11px;
   color: var(--text-muted);
   overflow-wrap: anywhere;
@@ -661,6 +680,85 @@ html:has(.app-shell.right-panel-fullscreen) .sfe-http-pane {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 环境区：一行控件（见 .sfe-http-env-line），其下只有说明性的行。
+   外壳与上面的文件变量条同一档——两张表来源不同，观感该是一样的。 */
+.sfe-http-env {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--border-color, var(--border-light));
+  border-radius: var(--radius-sm, 4px);
+  background: var(--bg-secondary, transparent);
+}
+
+.sfe-http-env-label {
+  font-size: 11.5px;
+  color: var(--text-secondary);
+}
+
+.sfe-http-env-select {
+  max-width: 180px;
+}
+
+.sfe-http-env-chip {
+  padding: 1px 6px;
+  border-radius: 9px;
+  font-size: 10.5px;
+  font-family: var(--font-mono, monospace);
+  background: var(--bg-active);
+  color: var(--text-secondary);
+}
+
+.sfe-http-env-note {
+  font-size: 11px;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+/* 环境区那一行控件：切换下拉、$shared 标记与那颗「修改」贴着排，独占一行，
+   免得下面的说明文字插进它们中间。 */
+.sfe-http-env-line {
+  flex: 1 1 100%;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 区外那两颗「图标 + 文字」的小钮：改环境表的那颗「修改」，与开合文件变量的那颗。
+   尺度与结果区的 .sfe-http-copy 同一档。 */
+.sfe-http-env-modify,
+.sfe-http-env-fold {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border: 1px solid var(--border-color, var(--border-light));
+  border-radius: var(--radius-sm, 4px);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.sfe-http-env-modify:hover,
+.sfe-http-env-fold:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+/* 折叠钮钉在环境那一行最右侧：那一行的左边是「用的是哪一段」，右边是「还有几项背景值」。 */
+.sfe-http-env-fold {
+  margin-left: auto;
+}
+
+/* 环境那一行没出现时（这篇文件没用到要人给值的变量），折叠钮自己占一行。 */
+.sfe-http-variables-head {
+  display: flex;
 }
 
 .sfe-http-warning {
@@ -1041,33 +1139,8 @@ html:has(.app-shell.right-panel-fullscreen) .sfe-http-pane {
   display: inline;
 }
 
-/* JSON 语义着色：键 / 字符串 / 数字 / 布尔 / null / 标点各一色，全部取自宿主主题变量。
-   这是 JSON 美化该有的样子——不是代码分词，是把结构分清。 */
-.sfe-json-key {
-  color: var(--accent-blue-text, var(--accent-blue, var(--text-primary)));
-}
-
-.sfe-json-string {
-  color: var(--accent-green-text, var(--accent-green, var(--text-primary)));
-}
-
-.sfe-json-number {
-  color: var(--accent-red-text, var(--accent-red, var(--text-primary)));
-}
-
-.sfe-json-boolean {
-  color: var(--accent-purple, var(--accent-color));
-  font-weight: 600;
-}
-
-.sfe-json-null {
-  color: var(--text-muted);
-  font-style: italic;
-}
-
-.sfe-json-punct {
-  color: var(--text-muted);
-}
+/* JSON 语义着色统一走 Prism token 类名（PRISM_JSON_CLASSES），色板见 syntax.css 第 13 节；
+   曾独立的 sfe-json-* 六条颜色规则已随之删除。 */
 
 .sfe-http-response-json .sfe-json-code {
   overflow-wrap: anywhere;

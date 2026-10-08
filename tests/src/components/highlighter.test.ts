@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { highlightCodeHtml, shouldHighlight, isLargeText } from '../../../src/components/highlighter.ts';
+import { highlightCodeHtml } from '../../../src/components/highlighter.ts';
 import { highlightCodeHtml as clientHighlight } from '../../../src/components/highlight-client.ts';
 import { isBasicHighlightExt, highlightHttpLine } from '../../../src/components/syntax-basic.ts';
 
@@ -51,12 +51,16 @@ test('语法高亮: 空白输入安全返回', () => {
   assert.equal(highlightCodeHtml(NULL_INPUT, 'js'), '');
 });
 
-test('语法高亮: 超大文本 (>250k) 熔断保护', () => {
-  const bigCode = 'const x = 1;\n'.repeat(25000); // > 300,000 字符
-  const html = highlightCodeHtml(bigCode, 'js');
-  // 熔断时不调用 prismjs，直接返回安全 escape 的纯文本
-  assert.ok(!html.includes('class="token keyword"'));
-  assert.ok(html.includes('const x = 1;'));
+test('语法高亮: 超长单行熔断保护（Prism 防灾难性回溯）', () => {
+  // 压缩 JSON / minified 代码的一行可以有几万字符，Prism 会在其上灾难性卡死，
+  // 超过单行上限时直接转义为纯文本，不进入 prismjs。
+  const longLine = 'const x = 1; '.repeat(2000); // 单行 > 20000 字符
+  assert.ok(longLine.length > 20000, '用例须越过单行上限');
+  const html = highlightCodeHtml(longLine, 'js');
+  assert.ok(!html.includes('class="token'), '超长单行不得产出 token');
+  assert.ok(html.includes('const x = 1;'), '熔断时直接返回安全 escape 的纯文本');
+  // 普通长度行照常着色
+  assert.match(highlightCodeHtml('const a = 1;', 'js'), /class="token keyword"/);
 });
 
 test('语法高亮: 真实多语言样本产出的所有 token 类别均有 CSS 配色覆盖', () => {
@@ -108,6 +112,25 @@ test('语法高亮: 真实多语言样本产出的所有 token 类别均有 CSS 
 
   const missing = [...produced].filter((t) => !covered.has(t) && !isContainer(t)).sort();
   assert.deepEqual(missing, [], `以下 token 类别缺少 CSS 配色规则: ${missing.join(', ')}`);
+});
+
+test('语法高亮: .vue 整篇调用按 SFC 区块分节着色（兜底路径不得退纯文本）', () => {
+  // Prism 没有 vue 语言、EXT_TO_PRISM_LANG 也不再映射——整篇调用必须在懒块内
+  // 按 SFC 区块拆行着色，否则 diff 兜底等调用方拿到的是转义纯文本。
+  const vue = [
+    '<template>',
+    '  <b class="a">{{ n }}</b>',
+    '</template>',
+    '<script lang="ts">',
+    'const n = 1;',
+    '</script>',
+  ].join('\n');
+  const html = highlightCodeHtml(vue, 'vue');
+  assert.match(html, /class="token tag"/, '模板行按 HTML 着色');
+  assert.match(html, /class="token keyword"/, '脚本体按 TS 着色');
+  assert.match(html, /class="token attr-name"/, '模板属性按 HTML 着色');
+  // svelte 同构
+  assert.match(highlightCodeHtml('<style>\n.a{color:red}\n</style>', 'svelte'), /class="token selector"/);
 });
 
 test('语法高亮: .http 文件正文 JSON 着色（不写 Content-Type 也要着色）', () => {
@@ -167,40 +190,25 @@ test('语法高亮: 请求行认 {{变量}} 前缀地址，方法/变量/路径/
   assert.doesNotMatch(html, /token number/, 'HTTP 版本不该被当成 JSON 数字');
 });
 
-test('语法高亮: shouldHighlight 熔断判定同时按字符数与行数', () => {
-  // 小文本：高亮
-  assert.equal(shouldHighlight('const a = 1;'), true);
-  assert.equal(shouldHighlight(''), false);
-  // 字符数超限：熔断
-  assert.equal(shouldHighlight('x'.repeat(250001)), false);
-  // 单行超长：压缩 JSON / minified 代码即便总字符数与行数都未超限，也必须熔断，
-  // 否则 Prism 会在单行上灾难性卡死（行数熔断挡不住它）。
-  assert.equal(shouldHighlight('x'.repeat(20001)), false, '单行超长应熔断');
-  assert.equal(shouldHighlight('x'.repeat(20000)), true, '单行未超阈值仍可高亮');
-  // 行数超限但字符数远未超限：这是本次修复的核心——大文件按行数熔断，
-  // 逐行高亮不再被单行短文本绕过。
-  assert.equal(shouldHighlight('a\n'.repeat(4000)), false, '4001 行应熔断');
-  // 行数边界：恰好 4000 行仍可高亮
-  assert.equal(shouldHighlight('a\n'.repeat(3999)), true, '4000 行应在阈值内');
+test('语法高亮: 熔断只剩单行长度上限，整篇体量阈值已随统一管线废除', () => {
+  // 单行超长：压缩 JSON / minified 代码即便行数极少也必须熔断，
+  // 否则 Prism 会在单行上灾难性卡死。
+  assert.doesNotMatch(highlightCodeHtml('x'.repeat(20001), 'js'), /class="token/);
+  // 单行未超阈值仍可高亮（边界：恰好 20000 字符）
+  assert.match(highlightCodeHtml('const a = 1; '.padEnd(20000, 'x'), 'js'), /class="token keyword"/);
+  // 「行数多但每行很短」的大文件由调用方逐行喂入，照常着色：
+  // 整篇行数 / 字符数不再构成熔断条件（统一懒加载后不存在整篇高亮路径）。
+  const lines = Array.from({ length: 5000 }, (_, i) => `const v${i} = ${i};`);
+  for (const line of lines.slice(0, 50).concat(lines.slice(-50))) {
+    assert.match(highlightCodeHtml(line, 'js'), /class="token keyword"/, '大文件的单行也必须着色');
+  }
 });
 
-test('语法高亮: 约 400 行以上需要虚拟列表，短文本不需要', async () => {
-  const { shouldVirtualize } = await import('../../../src/components/highlighter.ts');
-  assert.equal(shouldVirtualize('const a = 1;'), false);
-  assert.equal(shouldVirtualize('a\n'.repeat(500)), true);
-});
-
-test('语法高亮: isLargeText 判定大文件，空文本不算大', () => {
-  // 空文本不应被当作「大文件」（否则空文件会被误导去走虚拟化渲染）
-  assert.equal(isLargeText(''), false);
-  assert.equal(isLargeText(NULL_INPUT), false);
-  // 普通文件不是大文件
-  assert.equal(isLargeText('const a = 1;'), false);
-  // 行数/字符数任一超限即大文件
-  assert.equal(isLargeText('a\n'.repeat(4000)), true);
-  assert.equal(isLargeText('x'.repeat(250001)), true);
-  // 单行超长（行数远未超限）同样视为大文件，交由虚拟化渲染
-  assert.equal(isLargeText('x'.repeat(20001)), true);
+test('语法高亮: measureText 一次扫描得到行数与最长行（Markdown 水合门控消费）', async () => {
+  const { measureText } = await import('../../../src/components/highlight-policy.ts');
+  assert.deepEqual(measureText(''), { length: 0, lines: 0, maxLineLen: 0 });
+  assert.equal(measureText(NULL_INPUT).lines, 0);
+  assert.deepEqual(measureText('a\nbb\nccc'), { length: 8, lines: 3, maxLineLen: 3 });
 });
 
 test('语法高亮: http/rest 由首屏内置着色器同步上色，不依赖懒加载高亮块', () => {

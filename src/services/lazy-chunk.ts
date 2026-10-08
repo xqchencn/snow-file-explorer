@@ -16,7 +16,7 @@ import type { LazyChunkModule, LazyChunkName } from "./lazy-chunk-source.ts";
 export type ChunkModuleMap = {
   /** 文件图标数据块：EXT_ICONS / NAME_ICONS / ICON_SVGS / FILE / FOLDER / FOLDER_OPEN。 */
   icons: typeof import("../lazy/icons.ts");
-  /** Prism 高亮块：highlightCodeHtml / shouldHighlight。 */
+  /** Prism 高亮块：highlightCodeHtml。 */
   highlighter: typeof import("../lazy/highlighter.ts");
   /** xterm 视图块：createXtermView。 */
   terminal: typeof import("../lazy/terminal.ts");
@@ -128,10 +128,19 @@ export function loadChunk<K extends LazyChunkName>(
     return cached as Promise<ChunkModuleMap[K] | null>;
   }
   const pending = loadHostChunk(name)
+    .catch((err) => {
+      // 宿主插件目录可能暂时没有块文件；不能让一次读取失败变成未捕获拒绝，
+      // 先记录真实原因，再走源码/单测兜底。构建后的入口兜底为空，不会把 Prism 打回入口。
+      console.warn(`[FileExplorer] 加载懒块 ${name} 失败，尝试兜底`, err);
+      return null;
+    })
     .then((mod) => mod || loadSourceChunk(name))
     .catch((err) => {
+      // 块加载失败只能降级为未就绪，消费方会显示安全纯文本；缓存必须清掉，
+      // 后续重新挂载仍有机会重新读取新安装的块，而不是永久记住一次失败。
       cache.delete(name);
-      throw err;
+      console.warn(`[FileExplorer] 懒块 ${name} 不可用`, err);
+      return null;
     });
   cache.set(name, pending);
   return pending as Promise<ChunkModuleMap[K] | null>;

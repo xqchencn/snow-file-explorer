@@ -6,6 +6,8 @@ import {
   isBraceStyleVariableLine,
   isHttpCommentLine,
   isHttpFileVariableLine,
+  splitUrlQuery,
+  buildUrlWithQuery,
   parseHttpFile,
 } from "../../../src/services/http-request-parser.ts";
 import type { HttpParsedRequest } from "../../../src/services/http-request-parser.ts";
@@ -23,13 +25,13 @@ test("HTTP 解析: 请求行的方法可缺省，尾部 HTTP 版本被剥离", (
   assert.equal(requestAt(withVersion.requests, 0).url, "https://a.test/comments/1");
 
   const urlOnly = parseHttpFile("https://a.test/comments/1");
-  assert.equal(requestAt(urlOnly.requests, 0).method, "GET", "没写方法时上游按 GET");
+  assert.equal(requestAt(urlOnly.requests, 0).method, "GET", "没写方法时按 GET 处理");
   assert.equal(requestAt(urlOnly.requests, 0).url, "https://a.test/comments/1");
 
   const post = parseHttpFile("post https://a.test HTTP/1.1");
   assert.equal(requestAt(post.requests, 0).method, "POST", "方法大小写不敏感，存为大写");
   assert.equal(requestAt(post.requests, 0).url, "https://a.test");
-  assert.ok(HTTP_REQUEST_METHODS.includes("MKCALENDAR"), "WebDAV 方法也在上游方法表里");
+  assert.ok(HTTP_REQUEST_METHODS.includes("MKCALENDAR"), "WebDAV 一族方法也在方法表里");
 });
 
 test("HTTP 解析: 查询串续行并入 URL，且请求行占用的末行行号如实记录", () => {
@@ -88,7 +90,7 @@ test("HTTP 解析: 无请求体与多行请求体的行区间都对齐原文", (
   assert.equal(withBody.endLine, 5);
 });
 
-test("HTTP 解析: 元数据指令覆盖全集，# 与 // 同效", () => {
+test("HTTP 解析: 元数据指令覆盖全集，`#` 与 `//` 都认", () => {
   const file = [
     "# @name login",
     "# @note 这会真的下单",
@@ -108,14 +110,14 @@ test("HTTP 解析: 元数据指令覆盖全集，# 与 // 同效", () => {
     { name: "otp", description: "邮箱里的一次性密码" },
     { name: "username", description: null },
   ]);
-  assert.deepEqual(request.unknownMetadata, ["weird-key"], "上游不认的键要留痕而不是被当成请求行");
+  assert.deepEqual(request.unknownMetadata, ["weird-key"], "不认识的反向记法要留痕，而不是被当成请求行");
   assert.equal(request.startLine, 7, "前导注释与变量定义行都不属于请求块");
 });
 
 test("HTTP 解析: 元数据只认请求行之前的注释，请求体里的 @name 不算", () => {
   const file = ["GET https://a.test", "Content-Type: text/plain", "", "# @name injected", "body"].join("\n");
   const request = requestAt(parseHttpFile(file).requests, 0);
-  assert.equal(request.name, null, "上游一碰到非注释行就停止采纳元数据");
+  assert.equal(request.name, null, "元数据只认请求行之前的连续注释，碰到别的内容就停");
   assert.deepEqual(request.variableRefs, []);
 });
 
@@ -133,7 +135,7 @@ test("HTTP 解析: 文件变量整份文件可见，转义还原且同名后者�
   const byName = new Map(parsed.variables.map((variable) => [variable.name, variable]));
   assert.equal(byName.get("host")!.value, "override.example.com");
   assert.equal(byName.get("host")!.line, 4);
-  assert.equal(byName.get("multi")!.value, "line1\nline2", "上游只还原 \\n \\r \\t 三个转义");
+  assert.equal(byName.get("multi")!.value, "line1\nline2", "变量值里只还原 \\n \\r \\t 三个转义");
   const request = requestAt(parsed.requests, 0);
   assert.deepEqual(request.variableRefs, ["host", "%name"]);
 });
@@ -176,7 +178,7 @@ test("HTTP 解析: 请求体里的文件引用行按 < 与 <@ 两种形态识别
     { line: 3, path: "./demo.xml", processVariables: false, encoding: null },
     { line: 4, path: "./other.xml", processVariables: true, encoding: "latin1" },
     { line: 5, path: "./vars.xml", processVariables: true, encoding: null },
-    // 编码名必须紧贴 @：`<@ spaced` 里那段空格让上游正则把整串当路径。
+    // 编码名要紧贴 @：`<@ spaced` 的 @ 后面接的不是词字符，整串就被当路径收下。
     { line: 6, path: "spaced ./x.xml", processVariables: true, encoding: null },
   ]);
 });
@@ -208,7 +210,7 @@ test("HTTP 解析: 注释行与文件变量行的判定与解析内部一致", (
 
 test("HTTP 解析: 花括号写法的变量定义不被认成定义，也不被误当请求行", () => {
   const parsed = parseHttpFile(["{{host}} = https://a.test", "", "GET {{host}}/x"].join("\n"));
-  assert.deepEqual(parsed.variables, [], "上游只认 @ 前缀");
+  assert.deepEqual(parsed.variables, [], "变量定义只认 @ 前缀");
   assert.deepEqual(parsed.braceStyleVariableLines, [0], "行号要留出来，界面才能说清哪行没生效");
   assert.equal(parsed.requests.length, 1);
   assert.equal(requestAt(parsed.requests, 0).url, "{{host}}/x");
@@ -239,7 +241,7 @@ test("HTTP 解析: 节起始行含分隔行，标题优先于 @name", () => {
   // 元数据只在本节内生效：写在上一条分隔行之前，就归不到这条请求。
   const before = parseHttpFile(["# @name login", "### 登录接口", "GET https://a.test/users"].join("\n"));
   assert.equal(before.requests.length, 1);
-  assert.equal(requestAt(before.requests, 0).name, null, "上游同样是「分隔行切断元数据」");
+  assert.equal(requestAt(before.requests, 0).name, null, "分隔行同样切断元数据：那行属于上一节末尾的说明");
   assert.equal(requestAt(before.requests, 0).title, "登录接口");
 
   const first = parseHttpFile("GET https://a.test/users");
@@ -287,4 +289,96 @@ test("HTTP 解析: GraphQL 的行号表只对应查询段，不与变量段混�
   assert.equal(request.body, "query Foo { a }");
   assert.equal(request.graphQlVariables, '{"id": 1}');
   assert.deepEqual(request.bodyLineNumbers, [3], "行号表要与 body 的行数一致，否则正文文件引用会按错的下标落位");
+});
+
+test("HTTP 解析: curl 一节还原成请求，而不是把 -H 当成头部名", () => {
+  const text = [
+    "### curl 一条",
+    "curl -X POST 'https://a.test/x' \\",
+    "  -H 'Content-Type: application/json' \\",
+    "  -H 'X-Trace: yes' \\",
+    "  -d '{\"k\":1}'",
+  ].join("\n");
+  const request = requestAt(parseHttpFile(text).requests, 0);
+  assert.equal(request.curl, true);
+  assert.equal(request.method, "POST");
+  assert.equal(request.url, "https://a.test/x");
+  assert.equal(request.title, "curl 一条");
+  assert.deepEqual(
+    request.headers.map((header) => `${header.name}: ${header.value}`),
+    ["Content-Type: application/json", "X-Trace: yes"]
+  );
+  assert.equal(request.body, '{"k":1}');
+  // 关键回归：这些 `-H 'Content-Type` 之类曾经整串被当成头部名，宿主会因非法头部字符直接抛错。
+  for (const header of request.headers) assert.equal(/^[A-Za-z][\w-]*$/.test(header.name), true, header.name);
+});
+
+test("HTTP 解析: curl 里 -d @文件 摊成正文文件引用", () => {
+  const request = requestAt(parseHttpFile(["curl https://a.test -d @./body.json"].join("\n")).requests, 0);
+  assert.equal(request.body, "< ./body.json");
+  assert.deepEqual(request.bodyFiles.map((ref) => ref.path), ["./body.json"]);
+  assert.deepEqual(request.bodyLineNumbers, [request.endLine], "行号表要指回那一行，发送层才能按行内联");
+});
+
+test("HTTP 解析: 响应脚本从正文里摘走，不留成非法头部", () => {
+  const afterHeaders = requestAt(
+    parseHttpFile(["POST https://a.test/h", "Content-Type: application/json", "", '{"a":1}', "> {%", "  client.global.set('t', response.body.t);", "%}"].join("\n")).requests,
+    0
+  );
+  assert.equal(afterHeaders.body, '{"a":1}', "脚本不进正文");
+  assert.equal(afterHeaders.responseHandler, "client.global.set('t', response.body.t);");
+  assert.deepEqual(afterHeaders.headers.map((header) => header.name), ["Content-Type"]);
+
+  // 紧贴头部写（没空行）时脚本也不再被切成头部行。
+  const tight = requestAt(
+    parseHttpFile(["GET https://a.test/h", "> {% client.log(1); %}"].join("\n")).requests,
+    0
+  );
+  assert.deepEqual(tight.headers, [], "一行版脚本不该变成名为 `> {% client.log(1); %}` 的头部");
+  assert.equal(tight.responseHandler, "client.log(1);");
+  assert.equal(tight.body, null);
+});
+
+test("HTTP 解析: `> 文件` 认成响应落盘路径而不是正文", () => {
+  const request = requestAt(
+    parseHttpFile(["GET https://a.test/o", "Content-Type: text/plain", "", "> ./out/response.json"].join("\n")).requests,
+    0
+  );
+  assert.equal(request.outputRedirect, "./out/response.json");
+  assert.equal(request.body, null);
+});
+
+test("HTTP 解析: 查询串拆成参数表，值里的变量原样留着", () => {
+  const request = requestAt(
+    parseHttpFile(["GET https://a.test/c?page=2", "    &pageSize=10", "    &q={{name}}"].join("\n")).requests,
+    0
+  );
+  assert.deepEqual(request.queryParams, [
+    { name: "page", value: "2" },
+    { name: "pageSize", value: "10" },
+    { name: "q", value: "{{name}}" },
+  ]);
+  const noQuery = requestAt(parseHttpFile("GET https://a.test/c").requests, 0);
+  assert.deepEqual(noQuery.queryParams, []);
+  const flag = requestAt(parseHttpFile("GET https://a.test/c?debug").requests, 0);
+  assert.deepEqual(flag.queryParams, [{ name: "debug", value: "" }], "只有名字没有等号也算一个参数");
+});
+
+test("HTTP 解析: 拆出去的查询串能拼回同一个地址", () => {
+  for (const url of ["https://a.test/c", "https://a.test/c?a=1", "https://a.test/c?a=1&b={{x}}", "https://a.test/c?a=&b=2"]) {
+    const { base, params } = splitUrlQuery(url);
+    assert.equal(buildUrlWithQuery(base, params), url, url);
+  }
+  // 只有名字的参数按「空值」处理：拆出来是 {name:'flag',value:''}，拼回去写成 `flag=`。
+  const flag = splitUrlQuery("https://a.test/c?flag");
+  assert.deepEqual(flag.params, [{ name: "flag", value: "" }]);
+  assert.equal(buildUrlWithQuery(flag.base, flag.params), "https://a.test/c?flag=");
+  assert.equal(buildUrlWithQuery("https://a.test/c", []), "https://a.test/c", "参数清空不该留一个光秃秃的 ?");
+  assert.equal(buildUrlWithQuery("https://a.test/c?", [{ name: "a", value: "1" }]), "https://a.test/c?a=1");
+});
+
+test("HTTP 解析: 分隔行之后的粘贴响应段也如实计入跳过数", () => {
+  const parsed = parseHttpFile(["### 一条请求", "GET https://a.test/x", "### 这是粘贴的响应", "HTTP/1.1 200 OK", "", '{"ok":true}'].join("\n"));
+  assert.equal(parsed.requests.length, 1, "响应段不该被当成请求");
+  assert.equal(parsed.skippedResponseSections.length, 1, "界面上要说清跳过了几段，之前这里恒报 0");
 });

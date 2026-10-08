@@ -51,6 +51,8 @@ export type TerminalControllerDeps = {
   renderGitViewSwitchInToolbar(): void;
   /** 手动登记脚本命令后重绘顶栏运行控件（index 渲染分区）。 */
   renderRunToolbarView(): void;
+  /** 把一段文本确认后作为用户消息发送到宿主当前会话（index 装配的确认弹窗 + chatInput.sendMessage）。 */
+  sendToChat(text: string): void;
 };
 
 export function createTerminalController(deps: TerminalControllerDeps) {
@@ -555,6 +557,19 @@ export function createTerminalController(deps: TerminalControllerDeps) {
     void copyToClipboard(text || "");
   }
 
+  /** 把某 tab 的标识（运行=命令原文，终端=标题）作为用户消息发送到当前会话。 */
+  function sendTabTextToChat(id: string) {
+    const term = findTerminal(id);
+    if (!term || !term.title) return;
+    deps.sendToChat(term.title);
+  }
+
+  /** 把某 tab 终端的选中文本作为用户消息发送到当前会话（内容区菜单 / 工具栏「发送到当前会话」用）。 */
+  function sendTerminalSelectionToChat(id: string, text: string) {
+    if (!findTerminal(id)) return;
+    deps.sendToChat(text || "");
+  }
+
   /**
    * 读取系统剪贴板文本（终端右键「粘贴」用）。
    * @description 优先宿主 IPC `window.snow.readClipboardText`（走主进程，渲染进程无权限限制；
@@ -600,6 +615,8 @@ export function createTerminalController(deps: TerminalControllerDeps) {
       onCloseOthers: closeOtherTerminals,
       onCloseAll: () => closeAllTerminalsOfMode("terminal"),
       onCopyTab: copyTerminalTab,
+      onSendTab: sendTabTextToChat,
+      onSendSelection: sendTerminalSelectionToChat,
       onPasteText: readClipboardText,
     };
   }
@@ -626,7 +643,9 @@ export function createTerminalController(deps: TerminalControllerDeps) {
       onCloseOthers: closeOtherTerminals,
       onCloseAll: () => closeAllTerminalsOfMode("run"),
       onCopyTab: copyTerminalTab,
+      onSendTab: sendTabTextToChat,
       onCopySelection: copyTerminalSelection,
+      onSendSelection: sendTerminalSelectionToChat,
       onPasteText: readClipboardText,
       getShowOtherRuns: () => state.showOtherProjectRuns,
       onToggleShowOtherRuns: toggleShowOtherProjectRuns,

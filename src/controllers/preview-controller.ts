@@ -13,13 +13,13 @@ import type { FileTreeEntry, ErrorLike } from "../services/file-service.ts";
 import type { PanelState, LayoutEls, PanelPreviewState } from "../state/panel-state.ts";
 import { pathKey, MAX_PREVIEW_BYTES } from "../state/panel-state.ts";
 import { copyToClipboard, humanSize } from "../utils/dom.ts";
-import { basename, relativePath, readFileContent, writeFileContent } from "../services/file-service.ts";
+import { basename, workspaceRelativePath, readFileContent, writeFileContent } from "../services/file-service.ts";
 import {
   isMarkdownPath,
   resolveMarkdownAssetPath,
   readImageAsDataUrl,
+  isOversizeMarkdown,
 } from "../services/markdown-asset.ts";
-import { shouldVirtualize } from "../components/highlight-policy.ts";
 import { filterExcludedEntries } from "../services/file-filter.ts";
 import { loadChunk } from "../services/lazy-chunk.ts";
 import { syncViewerChrome } from "../components/code-viewer.ts";
@@ -109,17 +109,16 @@ export function createPreviewController(deps: PreviewControllerDeps) {
 
     const text = String(result.content || "");
     const isMarkdown = isMarkdownPath(entry.name);
-    const virtual = shouldVirtualize(text);
+    const oversize = isOversizeMarkdown(text);
 
     return {
       kind: "text",
       name: entry.name,
       path: entry.path,
       text,
-      highlightedHtml: "",
       isMarkdown,
       // 大 Markdown 先显示源码。小 Markdown 的 HTML 由后续的块加载补上。
-      mode: isMarkdown && virtual ? "code" : "preview",
+      mode: isMarkdown && oversize ? "code" : "preview",
       html: "",
       editable: false,
       saveState: "idle",
@@ -379,7 +378,7 @@ export function createPreviewController(deps: PreviewControllerDeps) {
   async function hydrateFileMarkdown(requestId: number) {
     const preview = state.preview;
     if (!preview || preview.kind !== "text" || !preview.isMarkdown || preview.mode !== "preview") return;
-    if (shouldVirtualize(preview.text)) {
+    if (isOversizeMarkdown(preview.text)) {
       if (isDisposed() || requestId !== previewRequestId) return;
       state.preview = { ...state.preview, mode: "code" };
       deps.renderPreview();
@@ -437,8 +436,6 @@ export function createPreviewController(deps: PreviewControllerDeps) {
     state.preview.text = String(value ?? "");
     state.preview.saveState = "idle";
     state.preview.saveMessage = "";
-    // 整篇高亮 HTML 与 text 同源才可用；文本一改立即作废，避免编辑态复用到过期配色。
-    state.preview.highlightedHtml = "";
     state.preview.html = "";
   }
 
@@ -468,7 +465,6 @@ export function createPreviewController(deps: PreviewControllerDeps) {
     ) return;
 
     if (result && result.ok === true) {
-      state.preview.highlightedHtml = "";
       state.preview.html = "";
       // 磁盘内容已变，Git 预览里缓存的 diff / 工作区全文随之过期。
       deps.invalidateGitDiffCache();
@@ -547,7 +543,6 @@ export function createPreviewController(deps: PreviewControllerDeps) {
       name: "",
       path: "",
       text: "",
-      highlightedHtml: "",
       isMarkdown: false,
       mode: "preview",
       html: "",
@@ -591,7 +586,7 @@ export function createPreviewController(deps: PreviewControllerDeps) {
     const filePath = state.preview && state.preview.path;
     if (!filePath || !state.rootPath) return;
 
-    const value = relativePath(state.rootPath, filePath);
+    const value = workspaceRelativePath(state.rootPath, filePath);
     if (value == null) {
       deps.setOperationStatus(false, "目标路径不在当前工作区内");
       return;

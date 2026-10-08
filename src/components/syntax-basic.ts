@@ -9,8 +9,7 @@
 
 import { HTTP_REQUEST_METHODS } from "../services/http-request-parser.ts";
 import { escapeHtml } from "../utils/dom.ts";
-import { segmentJsonLine } from "./json-view.ts";
-import type { JsonClassMap } from "./json-view.ts";
+import { segmentJsonLine, PRISM_JSON_CLASSES } from "./json-view.ts";
 
 /** 单行着色上限。超过只跳过该行（转义为纯文本），不连累整篇——超长行多是压缩 JSON / 超长 URL。 */
 const MAX_BASIC_LINE_LEN = 20000;
@@ -29,7 +28,7 @@ export function isBasicHighlightExt(ext: string): boolean {
 
 /**
  * 请求行整体：方法 + 地址 + 可选 `HTTP/x.y` 版本。
- * @description 地址不做字符级校验（只要求非空白）：rest-client 的地址普遍是 `{{host}}/login`
+ * @description 地址不做字符级校验（只要求非空白）：`.http` 里的地址普遍是 `{{host}}/login`
  *   这种「变量前缀 + 相对路径」写法，用 `https?://` 或 `/` 开头去卡会整行漏掉——
  *   方法 / 地址不着色，`HTTP/1.1` 还会被当 JSON 数字染上颜色。
  *   方法表复用解析器的 HTTP_REQUEST_METHODS，避免高亮与解析两处各维护一份而漂移。
@@ -57,19 +56,6 @@ function highlightUrlSegment(url: string): string {
   if (last < url.length) out.push(`<span class="token url">${escapeHtml(url.slice(last))}</span>`);
   return out.join("");
 }
-
-/**
- * `.http` 正文着色用的 JSON 语义类名：与 Prism 的 token 类一致，
- * 这样 syntax.css 里既有的 token 配色直接命中，不必为本模块另写一套样式。
- */
-const PRISM_JSON_CLASSES: JsonClassMap = {
-  punct: "punctuation",
-  key: "property",
-  string: "string",
-  boolean: "boolean",
-  null: "null",
-  number: "number",
-};
 
 /**
  * `.http` / `.rest` 的行级高亮。

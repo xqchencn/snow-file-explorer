@@ -33,6 +33,8 @@ import {
   joinPath,
 } from "../services/file-filter.ts";
 import { saveViewSettings } from "../services/settings.ts";
+import { createFileInDirectory, createFileRejectionMessage } from "../services/file-create.ts";
+import { isHttpRestFileName, newRequestFileTemplate } from "../services/http-file-scan.ts";
 import { getRelativeGitPath } from "../services/git-service.ts";
 import { mapPool } from "../utils/async.ts";
 import { paintTreeGitStatus } from "../components/tree-view.ts";
@@ -530,6 +532,38 @@ export function createTreeController(deps: TreeControllerDeps) {
     deps.setOperationStatus(true);
   }
 
+  /**
+   * 在指定目录里新建一个文件（右键菜单「新建文件」，名字由弹窗给）。
+   * @param directoryPath 目标目录绝对路径
+   * @param fileName 用户输入的文件名
+   * @returns 建出来并打开时 true；被拦的原因已在状态条说清
+   * @description 边界判断全在 `file-create` 那一层，与请求文件列表的新建是同一条规矩。
+   *   名字是 `.http` / `.rest` 时初始正文用请求文件模板（与 HTTP 管理的新建同一份，
+   *   见 http-file-scan.newRequestFileTemplate）；其余扩展名落一个换行。
+   *   建完只重读那一个目录（不整树重建），再把新文件展开到位并预览——文件出现在眼前才算建完了。
+   */
+  async function createFileIn(directoryPath: string, fileName: string) {
+    const created = await createFileInDirectory({
+      rootPath: state.rootPath,
+      directoryPath,
+      fileName,
+      content: isHttpRestFileName(fileName) ? newRequestFileTemplate(t) : "\n",
+    });
+    if (!created.ok) {
+      deps.setOperationStatus(false, created.error || createFileRejectionMessage(t, created.reason, created.name));
+      return false;
+    }
+    await refreshFileTreeAfterMutation([directoryPath]);
+    await deps.refreshGitAll();
+    // 先展开再找那一行：目标目录没展开过时它的子项还没读，靠 findTreeEntry 判「有没有」
+    // 就等于永远找不到——找不到就不展开也不预览，用户看到的是一点反应都没有。
+    await expandTreeToPath(created.path);
+    const entry = findTreeEntry(state.rootNodes, created.path);
+    if (entry) await deps.previewFile(entry);
+    deps.setOperationStatus(true);
+    return true;
+  }
+
   async function handleContextOpen(entry: FileTreeEntry | null) {
     if (!entry || state.operationBusy) return;
 
@@ -845,6 +879,7 @@ export function createTreeController(deps: TreeControllerDeps) {
     refreshFileTreeAfterMutation,
     handleDelete,
     submitRename,
+    createFileIn,
     handleContextOpen,
     handleTreeSelectionChange,
     handleTreeKeyDown,

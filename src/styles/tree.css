@@ -75,6 +75,12 @@
   flex-shrink: 0;
 }
 
+/* 没有搜索词时这颗 ✕ 靠 hidden 收起；上面那条 display:inline-flex 会盖掉 UA 的 [hidden]{display:none}，
+   必须显式让位，否则清除搜索的按钮一直摆在搜索框里。 */
+.sfe-search-clear[hidden] {
+  display: none;
+}
+
 .sfe-search-clear:hover {
   background: var(--bg-hover);
   color: var(--text-primary);

@@ -11,6 +11,8 @@ import type { FileTreeEntry, JvmProjectDetection } from "../services/file-servic
 import type { GitStatusMap } from "../services/git-service.ts";
 import type { GitignoreRule } from "../services/file-filter.ts";
 import type { HttpRestFile } from "../services/http-file-scan.ts";
+import type { HttpEnvironmentStore } from "../services/http-env.ts";
+import { NO_ENVIRONMENT_NAME } from "../services/http-env.ts";
 import type { HttpParsedFile } from "../services/http-request-parser.ts";
 import type { HttpRunResult } from "../services/http-runner.ts";
 import type { HttpFormValues } from "../services/http-serialize.ts";
@@ -378,8 +380,26 @@ export type PanelState = {
    *   因此折叠卡片再展开、切来切去，看到的都是该请求此刻该有的默认态，不会被别的请求带偏。
    */
   httpBodyCollapsed: Set<number>;
+  /**
+   * 文件变量那一排（`@name = value`）是否收起。
+   * @description 默认收起：变量一多，首屏全被这排读就好的胶囊占掉，而它平时只是背景信息。
+   *   开合的入口挂在环境那一行的右侧——那一行本来就是「这篇文件的取值背景」，两件事同一个位置。
+   */
+  httpVariablesCollapsed: boolean;
   /** HTTP 正文缓冲里有还没写盘的改动；写盘成功由保存通道清掉。 */
   httpDirty: boolean;
+  /**
+   * 项目里读到的环境表（`.snow/.snow-file-explorer/env.json` 与私密表合并后的原样）。
+   * @description 位置跟着工作区根固定，与请求文件在哪个子目录无关；切项目时必须丢掉，
+   *   否则界面顶着上一个项目的变量表，等于用错了后端。
+   */
+  httpEnv: HttpEnvironmentStore | null;
+  /** 当前选中的环境名；空串（NO_ENVIRONMENT_NAME）表示只用 `$shared`。 */
+  httpEnvironmentName: string;
+  /** 当前环境对应的 `.env` 内容；没读到为空表。 */
+  httpDotenv: Map<string, string>;
+  /** `.env` 命中的绝对路径；没有时为 null，界面据此说「没找到 .env」。 */
+  httpDotenvPath: string | null;
   /** 右键菜单状态；null 表示未打开。 */
   contextMenu: ContextMenuState | null;
   /** 确认弹窗状态；null 表示未打开。 */
@@ -468,7 +488,12 @@ export function createPanelState(): PanelState {
     httpPrompts: new Map(),
     httpExpanded: new Set(),
     httpBodyCollapsed: new Set(),
+    httpVariablesCollapsed: true,
     httpDirty: false,
+    httpEnv: null,
+    httpEnvironmentName: NO_ENVIRONMENT_NAME,
+    httpDotenv: new Map(),
+    httpDotenvPath: null,
     contextMenu: null,
     confirmDialog: null,
     operationBusy: false,
@@ -490,7 +515,6 @@ export function createPanelState(): PanelState {
       name: "",
       path: "",
       text: "",
-      highlightedHtml: "",
       isMarkdown: false,
       mode: "preview",
       html: "",

@@ -229,6 +229,16 @@ const SCAN_SKIP_DIRS = new Set([
   ".mypy_cache",
   "pods",
   "bower_components",
+  // IDE / AI 工具目录：与 file-filter 的 EXCLUDED_TOOL_DIRS 对齐（此处统一小写，比较前 toLowerCase）；
+  // build / out / bin / vendor / .yarn 这类通用名是用户拍板保留的，不在其列。
+  ".agents", ".amazonq", ".aider", ".angular", ".astro", ".bundle", ".claude", ".cline",
+  ".cody", ".codeium", ".codex", ".continue", ".copilot", ".crush", ".cursor", ".dart_tool",
+  ".eggs", ".expo", ".factory", ".fleet", ".gemini", ".goose", ".history", ".hypothesis",
+  ".iflow", ".ipynb_checkpoints", ".junie", ".kilocode", ".mimosa", ".nbproject", ".nox",
+  ".nyc_output", ".opencode", ".output", ".parcel-cache", ".plandex", ".pnpm-store",
+  ".qoder", ".qwen", ".roo", ".ruff_cache", ".serena", ".settings", ".snow", ".sourcegraph",
+  ".svelte-kit", ".tabnine", ".terraform", ".tox", ".trae", ".vs", ".vscode", ".windsurf",
+  ".zcode", "artifacts", "obj", "testresults",
 ]);
 
 /** 单次扫描允许发现的最大包数量（防御性上限，避免超大仓库卡顿）。

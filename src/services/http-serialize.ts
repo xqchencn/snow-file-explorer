@@ -81,6 +81,14 @@ function buildBlock(request: HttpParsedRequest, values: HttpFormValues): string[
     lines.push("");
     lines.push(...request.graphQlVariables.split("\n"));
   }
+  // `> ./file` 与 `> {% … %}` 不属于请求，但它们是用户写在这一节里的内容：
+  // 按块重排时原样附在块尾，否则改一个字段就把别人的脚本删了（本插件不执行它，也不该销毁它）。
+  if (request.outputRedirect) lines.push(`> ${request.outputRedirect}`);
+  if (request.responseHandler) {
+    lines.push("> {%");
+    lines.push(...request.responseHandler.split("\n"));
+    lines.push("%}");
+  }
   return lines;
 }
 
@@ -107,9 +115,15 @@ export function applyHttpEdits(
   for (const [index, values] of edits) {
     const request = file.requests[index];
     if (!request) continue;
+    // curl 一节不在这里重排：整段替换要按「请求行 / 头部 / 正文」重拼，
+    // 而 curl 命令的信息全在 `-H`/`-d` 这些参数里，重拼出来的行和原文不可能一模一样——
+    // 改一下地址就把用户写的命令换成另一种写法，等于悄悄换了一份内容。界面上这一类只读
+    // （见 http-request-panel）。
+    if (request.curl) continue;
     const block = buildBlock(request, values);
     const current = lines.slice(request.startLine, request.endLine + 1);
-    // 逐字符相同就一个字节都不碰：这条路径同时保证「没改动不产生 diff」和「不动它就不会重排」。
+    // 重排结果与原文一字不差时一个字节都不碰：这条路径同时守住「没改动不产生 diff」
+    // 和「不去动它就永远不会被重排」——表单只是正文的投影，投影没变就不该惊动正文。
     if (block.length === current.length && block.every((line, at) => line === current[at])) continue;
     replacements.push({ from: request.startLine, to: request.endLine, lines: block });
   }

@@ -150,9 +150,7 @@ export type ToolPopupMenuItem = {
   paste?: boolean;
 };
 
-/**
- * 运行窗口工具栏按钮引用（终端窗口没有工具栏，故整体可缺）。
- */
+/** 运行窗口工具栏按钮引用（终端窗口没有工具栏，故整体可缺）。 */
 type RunToolbarRefs = {
   /** 「重新运行」按钮。 */
   rerun: HTMLButtonElement;
@@ -160,6 +158,8 @@ type RunToolbarRefs = {
   stop: HTMLButtonElement;
   /** 「复制选中文本」按钮（仅有选区时可用）。 */
   copy: HTMLButtonElement;
+  /** 「发送到当前会话」按钮（仅有选区时可用）。 */
+  send: HTMLButtonElement;
   /** 「滚动到底」按钮。 */
   scroll: HTMLButtonElement;
   /** 「清空输出」按钮。 */
@@ -244,8 +244,12 @@ export type ToolWindowOptions = {
   onCloseAll?: () => void;
   /** 复制该 tab 的标识（命令 / 标题）；可缺。 */
   onCopyTab?: (id: string) => void;
+  /** 把该 tab 的标识（命令 / 标题）作为用户消息发送到当前会话；可缺（缺失时菜单不给该项）。 */
+  onSendTab?: (id: string) => void;
   /** 仅 kind=run：复制当前 tab 的选中文本；可缺。 */
   onCopySelection?: (id: string, text: string) => void;
+  /** 把当前 tab 的选中文本作为用户消息发送到当前会话（内容区菜单 / 工具栏按钮）；可缺。 */
+  onSendSelection?: (id: string, text: string) => void;
   /** 终端右键「粘贴」的剪贴板文本来源；可缺（缺失时不提供粘贴）。 */
   onPasteText?: () => Promise<string>;
   /** 仅 kind=run：是否正在显示其他项目的后台任务；可缺（缺失时右键菜单不给开关）。 */
@@ -366,7 +370,9 @@ export function renderToolWindow(container: HTMLElement, options: ToolWindowOpti
     onCloseOthers,
     onCloseAll,
     onCopyTab,
+    onSendTab,
     onCopySelection,
+    onSendSelection,
     onPasteText,
     getShowOtherRuns,
     onToggleShowOtherRuns,
@@ -432,14 +438,16 @@ export function renderToolWindow(container: HTMLElement, options: ToolWindowOpti
     const bar = el("div", "sfe-run-toolbar-bar");
     const rerunBtn = iconButton("sfe-run-tb-btn rerun", "rerun", t("run.window.rerun", "重新运行"), 14);
     const stopBtn = iconButton("sfe-run-tb-btn stop", "square", t("run.window.stop", "停止"), 13);
-    // 复制选中文本：只在当前 tab 有选区时可用（选区变化经 onSelectionChange 实时刷新）。
+    // 复制选中文本 / 发送到当前会话：只在当前 tab 有选区时可用（选区变化经 onSelectionChange 实时刷新）。
     const copyBtn = iconButton("sfe-run-tb-btn copy", "copy", t("run.copySelection", "复制选中文本"), 13);
+    const sendBtn = iconButton("sfe-run-tb-btn send", "send", t("action.sendToChat", "发送到当前会话"), 13);
     const scrollBtn = iconButton("sfe-run-tb-btn", "arrowDown", t("run.scrollToEnd", "滚动到底"), 14);
     const clearBtn = iconButton("sfe-run-tb-btn", "eraser", t("run.clear", "清空输出"), 13);
     const moreBtn = iconButton("sfe-run-tb-btn more", "more", t("run.toolbar.more", "更多"), 14);
     rerunBtn.addEventListener("click", () => withActive((id) => onRerun && onRerun(id)));
     stopBtn.addEventListener("click", () => withActive((id) => onStop && onStop(id)));
     copyBtn.addEventListener("click", () => copySelection());
+    sendBtn.addEventListener("click", () => sendSelectionToChat());
     scrollBtn.addEventListener("click", () => withActive((id) => onScrollToBottom && onScrollToBottom(id)));
     clearBtn.addEventListener("click", () => withActive((id) => onClear && onClear(id)));
     moreBtn.addEventListener("click", (event) => {
@@ -449,11 +457,12 @@ export function renderToolWindow(container: HTMLElement, options: ToolWindowOpti
     bar.appendChild(rerunBtn);
     bar.appendChild(stopBtn);
     bar.appendChild(copyBtn);
+    bar.appendChild(sendBtn);
     bar.appendChild(scrollBtn);
     bar.appendChild(clearBtn);
     bar.appendChild(moreBtn);
     container.appendChild(bar);
-    toolbarRefs = { rerun: rerunBtn, stop: stopBtn, copy: copyBtn, scroll: scrollBtn, clear: clearBtn };
+    toolbarRefs = { rerun: rerunBtn, stop: stopBtn, copy: copyBtn, send: sendBtn, scroll: scrollBtn, clear: clearBtn };
   }
 
   // ── 终端容器：每个终端一个 host（激活者显示，其余隐藏；xterm 实例常驻不销毁）──
@@ -525,6 +534,15 @@ export function renderToolWindow(container: HTMLElement, options: ToolWindowOpti
     if (!active || !view) return;
     const text = typeof view.getSelection === "function" ? view.getSelection() : "";
     if (text && typeof onCopySelection === "function") onCopySelection(active.id, text);
+  }
+
+  /** 把当前激活终端的选中文本发送到当前会话（无选区则忽略）。 */
+  function sendSelectionToChat(): void {
+    const active = activeTerminal();
+    const view = activeView();
+    if (!active || !view) return;
+    const text = typeof view.getSelection === "function" ? view.getSelection() : "";
+    if (text && typeof onSendSelection === "function") onSendSelection(active.id, text);
   }
 
   // ───────────────────────── 浮动菜单 ─────────────────────────
@@ -609,6 +627,9 @@ export function renderToolWindow(container: HTMLElement, options: ToolWindowOpti
       items.push({ separator: true });
     }
     items.push({ label: t("run.copyTab", "复制命令"), icon: "copy", onClick: () => onCopyTab && onCopyTab(id) });
+    if (typeof onSendTab === "function") {
+      items.push({ label: t("run.sendTab", "发送命令到当前会话"), icon: "send", onClick: () => onSendTab(id) });
+    }
     items.push({ separator: true });
     items.push({ label: t("run.closeTab", "关闭"), icon: "close", onClick: () => onCloseTerminal && onCloseTerminal(id) });
     items.push({ label: t("run.closeOthers", "关闭其它"), onClick: () => onCloseOthers && onCloseOthers(id) });
@@ -648,6 +669,7 @@ export function renderToolWindow(container: HTMLElement, options: ToolWindowOpti
     for (const item of tabMenuItems(id)) {
       if (item.separator) continue;
       if (item.label === t("run.copyTab", "复制命令")) continue;
+      if (item.label === t("run.sendTab", "发送命令到当前会话")) continue;
       if (isRun && (item.label === t("run.stop", "停止") || item.label === t("run.restart", "重新运行"))) continue;
       out.push(item);
     }
@@ -693,6 +715,15 @@ export function renderToolWindow(container: HTMLElement, options: ToolWindowOpti
           if (view && typeof view.getSelection === "function") void copyToClipboard(view.getSelection());
         },
       });
+      if (typeof onSendSelection === "function") {
+        items.push({
+          label: t("action.sendToChat", "发送到当前会话"),
+          icon: "send",
+          onClick: () => {
+            if (view && typeof view.getSelection === "function") onSendSelection(id, view.getSelection());
+          },
+        });
+      }
     }
     let needClipboard = false;
     if (!readOnly) {
@@ -860,6 +891,7 @@ export function renderToolWindow(container: HTMLElement, options: ToolWindowOpti
     toolbarRefs.rerun.disabled = !active;
     toolbarRefs.stop.disabled = !running;
     if (toolbarRefs.copy) toolbarRefs.copy.disabled = !activeHasSelection();
+    if (toolbarRefs.send) toolbarRefs.send.disabled = !activeHasSelection();
     toolbarRefs.scroll.disabled = !active;
     toolbarRefs.clear.disabled = !active;
   }

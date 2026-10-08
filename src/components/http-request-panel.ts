@@ -13,10 +13,13 @@
 
 import type { TranslateFn } from "../types/panel-state.ts";
 import type { ViewerChromeState } from "./code-viewer.ts";
-import type { HttpParsedFile } from "../services/http-request-parser.ts";
+import type { HttpParsedFile, HttpParsedRequest, HttpQueryParameter } from "../services/http-request-parser.ts";
+import { splitUrlQuery, buildUrlWithQuery } from "../services/http-request-parser.ts";
+import type { HttpEnvironmentSummary } from "../services/http-env.ts";
+import { NO_ENVIRONMENT_NAME } from "../services/http-env.ts";
 import type { HttpFormValues } from "../services/http-serialize.ts";
 import type { HttpRunResult } from "../services/http-runner.ts";
-import { isBuiltinVariableReference } from "../services/http-variables.ts";
+import { missingVariableNames } from "../services/http-variables.ts";
 import { el } from "../utils/dom.ts";
 import { createActionIcon } from "../icons/action-icons.ts";
 import { renderHttpResult } from "./http-result-view.ts";
@@ -64,9 +67,51 @@ export type HttpRequestPanelOptions = {
   onPromptChange: (index: number, name: string, value: string) => void;
   /** 取提示变量已填的值 (requestIndex, name)；未填为空串。 */
   getPromptValue: (index: number, name: string) => string;
+  /**
+   * 环境概况（当前环境名、可切的环境、各段的变量与来源文件）。
+   * @description 由控制器给，组件自己不读盘：环境表和 `.env` 都在工作区的那几个固定位置上，
+   *   组件手里只有请求文件的解析结果，拼不出这张表。
+   */
+  environment: HttpEnvironmentSummary;
+  /** 切换环境回调 (name)；缺省时下拉禁用（例如宿主没给环境通道）。 */
+  onEnvironmentChange?: (name: string) => void;
+  /**
+   * 打开「环境」弹窗：整张表（哪几段、各自哪些变量、加段、删段、保存）都在那一个弹窗里管。
+   * 缺省时不出现「修改」那颗钮。
+   * @description 弹窗要摊开什么都由装配层现读：段名查重、私密表盖住了哪些项，组件手里都没有。
+   *   没有弹窗就没有能一次改完一张表的地方，而在面板里凭空摊开一堆输入框会连带重绘、
+   *   把用户正敲到一半的那一格销毁。
+   */
+  onManageEnvironments?: () => Promise<void>;
+  /**
+   * 文件变量（`@name = value`）那一排此刻是否收起；省略按收起算。
+   * @description 默认收起：变量一多，首屏全被这排读就好的胶囊占掉。折叠钮摆在环境那一行的右侧。
+   *   没给开合通道（`onToggleVariables`）时没有折叠入口，这一排就一直列着——这里只用得上这一个开关。
+   */
+  variablesCollapsed?: boolean;
+  /** 开合文件变量那一排；缺省时不出现那颗折叠钮（点了没用的控件不摆）。 */
+  onToggleVariables?: () => void;
   /** 本地化翻译函数。 */
   t: TranslateFn;
 };
+
+/**
+ * 提示变量里要掩码输入的变量名：写死的九个拼法（password / passwd / pass 各三种大小写）。
+ * @description 判定是整名精确匹配，所以每个拼法都得单独列进来，少一个就漏一个。
+ *   用固定名单而不是「这个名字像不像密码」的猜测：名单内一律掩码、名单外照常明文，
+ *   哪些输入会被藏起来是用户能提前预期的。
+ */
+const MASKED_PROMPT_NAMES: ReadonlySet<string> = new Set([
+  "password",
+  "Password",
+  "PASSWORD",
+  "passwd",
+  "Passwd",
+  "PASSWD",
+  "pass",
+  "Pass",
+  "PASS",
+]);
 
 /** 提交当前卡片的全部可编辑字段（输入框与头部表都从 DOM 现值取，避免各自为政）。 */
 function collectForm(card: HTMLElement, headerRows: HTMLElement[]): HttpFormValues {
@@ -121,13 +166,258 @@ function renderHeaderRow(
   return row;
 }
 
-/**
- * 折叠态摘要：方法 + 地址，等宽展示。
- * @param form 该请求当前表单值
- * @returns 摘要节点
- */
+/** 渲染折叠摘要：方法 + 地址，等宽展示。 */
 function buildCardSummary(form: HttpFormValues): HTMLElement {
   return el("span", "sfe-http-card-summary", `${form.method} ${form.url}`.trim());
+}
+
+/**
+ * 渲染一条请求的参数表（`?` 之后的查询串）。
+ * @param card 所属卡片（collectForm 要从这里取各字段现值）
+ * @param urlInput 地址输入框；参数表改的就是它 `?` 之后的那一段
+ * @param headerRows 头部行清单（emit 时一起收集）
+ * @returns 参数区容器，另带回一个「按地址现值重画参数行」的函数
+ * @description 地址与参数表不是两份数据：参数表只是地址 `?` 那一段的另一种编辑面。
+ *   每次改动都从**地址框的现值**取 `?` 之前的部分再拼回去，所以在地址框里改了路径
+ *   不会把改动丢掉；反过来，在地址框里直接改查询串时由调用方重画参数行。
+ *   改参数时**不重画参数行**：那会销毁用户正在敲的那一格。
+ */
+function renderParamsSection(
+  card: HTMLElement,
+  urlInput: HTMLInputElement,
+  headerRows: HTMLElement[],
+  opts: HttpRequestPanelOptions,
+  index: number
+): { wrap: HTMLElement; redraw: (params: readonly HttpQueryParameter[]) => void } {
+  const wrap = el("div", "sfe-http-params");
+  wrap.appendChild(el("div", "sfe-http-section-title", opts.t("http.params", "地址参数")));
+  const rowsWrap = el("div", "sfe-http-param-rows");
+  const paramRows: HTMLElement[] = [];
+
+  const collect = (): HttpQueryParameter[] =>
+    paramRows.map((row) => ({
+      name: row.querySelector<HTMLInputElement>(".sfe-http-param-name")?.value || "",
+      value: row.querySelector<HTMLInputElement>(".sfe-http-param-value")?.value || "",
+    }));
+
+  const apply = () => {
+    const { base } = splitUrlQuery(urlInput.value);
+    urlInput.value = buildUrlWithQuery(base, collect());
+    opts.onFormChange(index, collectForm(card, headerRows));
+  };
+
+  const makeRow = (param: HttpQueryParameter): HTMLElement => {
+    const row = el("div", "sfe-http-param-row");
+    const name = el("input", "sfe-http-param-name");
+    name.type = "text";
+    name.spellcheck = false;
+    name.value = param.name;
+    name.placeholder = opts.t("http.paramName", "参数名");
+    const value = el("input", "sfe-http-param-value");
+    value.type = "text";
+    value.spellcheck = false;
+    value.value = param.value;
+    value.placeholder = opts.t("http.paramValue", "值");
+    const remove = el("button", "sfe-http-param-remove");
+    remove.type = "button";
+    remove.title = opts.t("http.removeParam", "删除这个参数");
+    remove.setAttribute("aria-label", remove.title);
+    remove.appendChild(createActionIcon("minus", 13));
+    for (const input of [name, value]) input.addEventListener("input", apply);
+    remove.addEventListener("click", () => {
+      row.remove();
+      const at = paramRows.indexOf(row);
+      if (at >= 0) paramRows.splice(at, 1);
+      apply();
+    });
+    row.appendChild(name);
+    row.appendChild(value);
+    row.appendChild(remove);
+    return row;
+  };
+
+  const redraw = (params: readonly HttpQueryParameter[]): void => {
+    paramRows.length = 0;
+    rowsWrap.replaceChildren();
+    for (const param of params) {
+      const row = makeRow(param);
+      paramRows.push(row);
+      rowsWrap.appendChild(row);
+    }
+  };
+  redraw(splitUrlQuery(urlInput.value).params);
+
+  const add = el("button", "sfe-http-param-add");
+  add.type = "button";
+  add.appendChild(createActionIcon("plus", 12));
+  add.appendChild(el("span", null, opts.t("http.addParam", "添加参数")));
+  add.addEventListener("click", () => {
+    const row = makeRow({ name: "", value: "" });
+    paramRows.push(row);
+    rowsWrap.appendChild(row);
+    row.querySelector<HTMLInputElement>(".sfe-http-param-name")?.focus();
+    apply();
+  });
+  wrap.appendChild(rowsWrap);
+  wrap.appendChild(add);
+  return { wrap, redraw };
+}
+
+
+
+/**
+ * 「修改 / 添加环境」那颗按钮：整张环境表都在它打开的弹窗里管（加段、改名以外的编辑、删段、加行、保存）。
+ * @param opts 面板数据
+ * @returns 按钮节点；没有这条通道时为 null（点了没用的控件不摆是这仓的规矩）
+ * @description 项目里一份环境表都没有时它叫「添加环境」：那时没有东西可改，词要跟用户能做的事对上；
+ *   建出第一份表之后这颗钮就变回「修改」。
+ */
+function renderEnvironmentModify(opts: HttpRequestPanelOptions): HTMLElement | null {
+  if (typeof opts.onManageEnvironments !== "function") return null;
+  const { environment, t } = opts;
+  // 「没有环境表」看三处：没有表文件、没有可切环境、连 $shared 都没有。
+  const empty = !environment.files.length && !environment.names.length && !environment.hasShared;
+  const button = el("button", "sfe-http-env-modify");
+  button.type = "button";
+  button.appendChild(createActionIcon(empty ? "plus" : "pencil", 12));
+  button.appendChild(el("span", null, empty ? t("http.envAddSection", "添加环境") : t("http.envModify", "修改")));
+  button.addEventListener("click", () => {
+    // 弹窗、现读、落盘都在装配层那一条路上：这里只负责把它叫出来。
+    void opts.onManageEnvironments!();
+  });
+  return button;
+}
+
+/**
+ * 文件变量那一排的折叠钮。
+ * @param opts 面板数据
+ * @returns 按钮节点；这篇文件没有文件变量、或没给开合通道时为 null
+ * @description 钮上直接报「几项」，所以收起时不列也不觉得少了什么；点开才逐条列出来。
+ *   它挂在环境那一行的最右侧——那一行本来就是「这篇文件的取值背景」，两件事同一个位置。
+ */
+function renderVariablesFold(opts: HttpRequestPanelOptions): HTMLElement | null {
+  const count = opts.file.variables.length;
+  if (!count || typeof opts.onToggleVariables !== "function") return null;
+  const { t } = opts;
+  const collapsed = opts.variablesCollapsed !== false;
+  const label = t("http.fileVariables", "文件变量 {{count}}", { count });
+  const button = el("button", "sfe-http-env-fold");
+  button.type = "button";
+  button.appendChild(createActionIcon(collapsed ? "chevronRight" : "chevronDown", 12));
+  button.appendChild(el("span", null, label));
+  button.title = `${collapsed ? t("http.expand", "展开") : t("http.collapse", "折叠")}: ${label}`;
+  button.setAttribute("aria-expanded", collapsed ? "false" : "true");
+  button.addEventListener("click", () => {
+    if (typeof opts.onToggleVariables === "function") opts.onToggleVariables();
+  });
+  return button;
+}
+
+/**
+ * 渲染环境区：一行「环境 [下拉] [修改] [文件变量 ▸]」，其下只留说明性的行（覆盖情况、`.env` 计数、解析问题）。
+ * @param opts 面板数据（含环境概况、切换环境与打开弹窗的通道）
+ * @param fold 文件变量那一排的折叠钮；给的时候钉在这一行最右侧（这一行没出现时由调用方另找位置）
+ * @returns 环境区节点；一行内容都凑不出来时为 null（调用方不摆空块）
+ * @description 入口常驻：环境是项目级的配置，没用到引用的普通文件也得有地方创建第一份环境表——
+ *   入口只在「用到变量」时才出现的话，一篇干净文件永远开不了这张表。没得切仍不摆死下拉，
+ *   缺值引导也只在该缺的时候出现；弹窗通道没给时只少那颗钮，叙述照常（表读坏了照样要说）。
+ * @description 区外不再逐段摆清单：哪一段带哪些键、谁盖住了谁，都在弹窗里对着改；
+ *   常驻区只留「现在用的是哪一段」与一颗改得动的钮。
+ */
+function renderEnvironmentBar(opts: HttpRequestPanelOptions, fold: HTMLElement | null): HTMLElement | null {
+  const { environment, t } = opts;
+  const names = environment.names;
+  const references = opts.file.requests.flatMap((request) => request.variableRefs);
+  const bar = el("div", "sfe-http-env");
+  // 缺变量的判断与卡片那条共用一份逻辑：两处各算一次会给出两个答案。
+  const defined = new Set<string>([
+    ...environment.variables.keys(),
+    ...opts.file.variables.map((variable) => variable.name),
+    ...opts.file.requests.flatMap((request) => request.prompts.map((prompt) => prompt.name)),
+  ]);
+  const needed = missingVariableNames(references, defined);
+  // 一份环境表都没有、引用又取不到值：先把「为什么要点这颗钮」说清，再让钮出场。
+  if (!environment.files.length && !names.length && !environment.hasShared && needed.length) {
+    bar.appendChild(
+      el("div", "sfe-http-env-hint", t("http.envMissing", "{{names}} 还没有取值处，创建环境后在这里填值", { names: needed.join(", ") }))
+    );
+  }
+
+  const line = el("div", "sfe-http-env-line");
+  // 一个可选的环境都没有就不摆下拉：只剩「不选环境」一项的选择器是颗点不出名堂的死控件。
+  // 这一段环境还是得露面（它的值此刻正在被用），只是没得切。
+  if (names.length) {
+    const picker = el("select", "sfe-http-env-select");
+    const none = el("option", null, t("http.envNone", "不选环境"));
+    none.value = NO_ENVIRONMENT_NAME;
+    if (environment.active === NO_ENVIRONMENT_NAME) none.selected = true;
+    picker.appendChild(none);
+    for (const name of names) {
+      const option = el("option", null, name);
+      option.value = name;
+      if (name === environment.active) option.selected = true;
+      picker.appendChild(option);
+    }
+    picker.disabled = typeof opts.onEnvironmentChange !== "function";
+    picker.title = t("http.envSwitch", "切换环境");
+    picker.setAttribute("aria-label", picker.title);
+    picker.addEventListener("change", () => {
+      if (typeof opts.onEnvironmentChange === "function") opts.onEnvironmentChange(picker.value);
+    });
+    const label = el("label", "sfe-http-env-label", t("http.environment", "环境"));
+    label.setAttribute("for", "sfe-http-env-select");
+    picker.id = "sfe-http-env-select";
+    line.appendChild(label);
+    line.appendChild(picker);
+  }
+  if (environment.hasShared) {
+    const chip = el("span", "sfe-http-env-chip", "$shared");
+    chip.title = t("http.sharedReserved", "$shared 是保留名，里面的变量对所有环境可见");
+    line.appendChild(chip);
+  }
+  const modify = renderEnvironmentModify(opts);
+  if (modify) line.appendChild(modify);
+  // 文件变量的折叠钮钉在这一行最右侧：常驻区就这一行讲取值背景，两件事不该占两处。
+  // 但它不蹭空行者的名分——这行一件环境的事都没有时（没通道没环境），它回调用方给自己摆的那一行。
+  if (fold && line.childNodes.length) line.appendChild(fold);
+  if (line.childNodes.length) bar.appendChild(line);
+  if (environment.overriddenShared.length) {
+    bar.appendChild(
+      el(
+        "div",
+        "sfe-http-env-note",
+        t("http.envOverridesShared", "当前环境覆盖了共享环境的 {{count}} 项：{{names}}", {
+          count: environment.overriddenShared.length,
+          names: environment.overriddenShared.join(", "),
+        })
+      )
+    );
+  }
+  if (environment.dotenvPath) {
+    bar.appendChild(el("div", "sfe-http-env-note", `.env · ${environment.dotenvCount}`));
+  }
+  for (const issue of environment.issues) {
+    bar.appendChild(
+      el(
+        "div",
+        "sfe-http-warning",
+        issue.code === "invalidJson"
+          ? t("http.envInvalidJson", "{{file}} 不是合法的 JSON，这份环境表没有生效", { file: issue.file })
+          : issue.code === "notObject"
+            ? t("http.envBadShape", "{{file}} 的形状不对：环境表要写成 { \u0022环境名\u0022: { \u0022变量名\u0022: \u0022值\u0022 } }", {
+                file: issue.file,
+              })
+            : issue.code === "skippedValue"
+              ? t("http.envSkippedValue", "{{file}} 里 {{name}} 的值不是文字/数字/真假，这一项不生效", {
+                  file: issue.file,
+                  name: issue.name || "",
+                })
+              : t("http.envReadFailed", "{{file}} 没能读取", { file: issue.file })
+      )
+    );
+  }
+  // 一行都凑不出来（没通道、没环境、没折叠钮、没引导也没问题可报）：整块不摆，别留一个空壳。
+  return bar.childNodes.length ? bar : null;
 }
 
 /** 渲染一条请求的卡片。 */
@@ -210,6 +500,33 @@ function renderRequestCard(index: number, opts: HttpRequestPanelOptions, bodyOpe
     // 构建区收起时，发送按钮仍留在这一行，改完地址不必回头找。
     line.appendChild(send);
     builder.appendChild(line);
+  } else if (request.curl) {
+    // curl 一节的只读投影：发送照做（把还原出来的方法 / 地址 / 头部 / 正文发出去是真效果），
+    // 但不给可编辑控件——GUI 改动写不回 curl 命令（http-serialize 会跳过这类块），
+    // 摆一堆改了没用的框等于骗人。要改就回文本态改那行 curl。
+    const summary = el("div", "sfe-http-line");
+    summary.appendChild(el("span", "sfe-http-builder-summary", `${form.method} ${form.url}`.trim()));
+    summary.appendChild(send);
+    builder.appendChild(summary);
+    builderBody.appendChild(
+      el("div", "sfe-http-hint", t("http.curlReadOnly", "这条是从 curl 命令还原出来的，改动请回文本态改那条命令"))
+    );
+    if (form.headers.length) {
+      const list = el("div", "sfe-http-headers");
+      list.appendChild(el("div", "sfe-http-section-title", t("http.headers", "请求头")));
+      for (const header of form.headers) {
+        list.appendChild(el("div", "sfe-http-header-static", `${header.name}: ${String(header.value ?? "")}`));
+      }
+      builderBody.appendChild(list);
+    }
+    const bodyText = String(form.body || "");
+    const bodyList = el("div", "sfe-http-body-wrap");
+    const bodyHost = el("div", "sfe-http-body-host");
+    if (bodyText.trim()) renderJsonFoldView(bodyHost, bodyText, t, {});
+    else bodyHost.appendChild(el("div", "sfe-http-body-empty", t("http.bodyEmpty", "没有请求体")));
+    bodyList.appendChild(bodyHost);
+    builderBody.appendChild(bodyList);
+    builder.appendChild(builderBody);
   } else {
     const method = el("select", "sfe-http-method");
     const candidates = SENDABLE_METHODS.includes(form.method) ? SENDABLE_METHODS : [form.method, ...SENDABLE_METHODS];
@@ -226,7 +543,12 @@ function renderRequestCard(index: number, opts: HttpRequestPanelOptions, bodyOpe
     url.spellcheck = false;
     url.value = form.url;
     url.placeholder = t("http.urlPlaceholder", "https:// 或 {{变量}}");
-    url.addEventListener("input", () => opts.onFormChange(index, collectForm(card, headerRows)));
+    /** 参数区在头部之前建好；地址框被直接改动时按新地址重画参数行。 */
+    let redrawParams: ((params: readonly HttpQueryParameter[]) => void) | null = null;
+    url.addEventListener("input", () => {
+      opts.onFormChange(index, collectForm(card, headerRows));
+      if (redrawParams) redrawParams(splitUrlQuery(url.value).params);
+    });
     line.appendChild(method);
     line.appendChild(url);
     // 发送按钮收进地址行，形成「方法 / 地址 / 发送」一体的 Omnibar。
@@ -237,6 +559,12 @@ function renderRequestCard(index: number, opts: HttpRequestPanelOptions, bodyOpe
       builderBody.appendChild(el("div", "sfe-http-hint", t("http.emptyAddress", "这条请求还没填地址，发送会被拦下")));
     }
 
+    /** 头部行清单：地址框与参数表都要在改动时把整张卡片现值收回去，故先于参数区声明。 */
+    const headerRows: HTMLElement[] = [];
+    const params = renderParamsSection(card, url, headerRows, opts, index);
+    redrawParams = params.redraw;
+    builderBody.appendChild(params.wrap);
+
     const headersWrap = el("div", "sfe-http-headers");
     const headersTitle = el("div", "sfe-http-section-title", t("http.headers", "请求头"));
     const addHeader = el("button", "sfe-http-header-add");
@@ -245,7 +573,6 @@ function renderRequestCard(index: number, opts: HttpRequestPanelOptions, bodyOpe
     addHeader.appendChild(el("span", null, t("http.addHeader", "添加头部")));
     headersWrap.appendChild(headersTitle);
     const rowsWrap = el("div", "sfe-http-header-rows");
-    const headerRows: HTMLElement[] = [];
     for (const header of form.headers) {
       const row = renderHeaderRow(header, card, headerRows, opts, index);
       headerRows.push(row);
@@ -268,7 +595,8 @@ function renderRequestCard(index: number, opts: HttpRequestPanelOptions, bodyOpe
         const row = el("div", "sfe-http-prompt-row");
         const label = el("label", "sfe-http-prompt-label", prompt.description || prompt.name);
         const input = el("input", "sfe-http-prompt-input");
-        input.type = "text";
+        // 密码一族变量名一律掩码输入：只看那张固定名单，不靠猜哪些名字算敏感。
+        input.type = MASKED_PROMPT_NAMES.has(prompt.name) ? "password" : "text";
         input.value = opts.getPromptValue(index, prompt.name);
         input.placeholder = prompt.name;
         input.addEventListener("input", () => opts.onPromptChange(index, prompt.name, input.value));
@@ -322,19 +650,21 @@ function renderRequestCard(index: number, opts: HttpRequestPanelOptions, bodyOpe
 
     // 只提示「本文件该定义却没定义」的变量：系统变量、请求变量、`# @prompt` 声明的变量
     // 天生不在文件变量表里，一并算进去的话正常文件会常驻假警告。
-    const refs = request.variableRefs.filter((ref) => !isBuiltinVariableReference(ref));
-    const declaredPrompts = new Set(request.prompts.map((prompt) => prompt.name));
-    const missing = refs.filter((ref) => {
-      const name = ref.replace(/^%/, "");
-      if (declaredPrompts.has(name)) return false;
-      return !file.variables.some((variable) => variable.name === name);
-    });
+    // 环境表里的键同理——选了环境之后 `{{host}}` 是有值的，不能再报「本文件里没有定义」。
+    const defined = new Set<string>([
+      ...request.prompts.map((prompt) => prompt.name),
+      ...opts.environment.variables.keys(),
+      ...file.variables.map((variable) => variable.name),
+    ]);
+    const missing = missingVariableNames(request.variableRefs, defined);
     if (missing.length) {
       builderBody.appendChild(
         el(
           "div",
           "sfe-http-warning",
-          t("http.missingVariables", "这些变量在本文件里没有定义：{{names}}", { names: missing.join(", ") })
+          opts.environment.files.length
+            ? t("http.missingVariablesInEnv", "这些变量在本文件和当前环境里都没有定义：{{names}}", { names: missing.join(", ") })
+            : t("http.missingVariables", "这些变量在本文件里没有定义：{{names}}", { names: missing.join(", ") })
         )
       );
     }
@@ -357,7 +687,7 @@ function renderRequestCard(index: number, opts: HttpRequestPanelOptions, bodyOpe
 }
 
 /** 元数据 chips：note / no-redirect / no-cookie-jar / 未识别的键。 */
-function requestMetadataChips(request: HttpParsedFile["requests"][number], opts: HttpRequestPanelOptions): HTMLElement[] {
+function requestMetadataChips(request: HttpParsedRequest, opts: HttpRequestPanelOptions): HTMLElement[] {
   const out: HTMLElement[] = [];
   const add = (text: string, tone: string, hint = "") => {
     const chip = el("span", "sfe-http-chip " + tone, text);
@@ -367,6 +697,18 @@ function requestMetadataChips(request: HttpParsedFile["requests"][number], opts:
   if (request.note) add(request.note, "note");
   if (request.noRedirect) add(opts.t("http.chipNoRedirect", "不跟随重定向"), "warn");
   if (request.noCookieJar) add(opts.t("http.chipNoCookieJar", "不存 cookie"), "warn");
+  // 响应脚本不执行、响应不落盘：这两段都不在本插件的执行范围，既不跑也不写文件。
+  // 卡片上要点名「这一段被忽略了」——静默吞掉用户写在这一节里的内容，比报个错更难查。
+  if (request.responseHandler) {
+    add(opts.t("http.chipHandler", "响应脚本不执行"), "unknown", opts.t("http.handlerHint", "这段响应脚本不会被执行，原文仍留在文件里"));
+  }
+  if (request.outputRedirect) {
+    add(
+      opts.t("http.chipOutput", "响应不落盘"),
+      "unknown",
+      opts.t("http.outputHint", "响应不会写进文件，这一行原样留在请求里")
+    );
+  }
   // 未识别的 `# @key`：只画一个 chip 用户看不懂，补一句「这项不会生效」。
   for (const key of request.unknownMetadata) {
     add(`@${key}`, "unknown", opts.t("http.unknownMetadata", "这项指令没有被识别，不会生效"));
@@ -385,9 +727,19 @@ export function renderHttpRequestPanel(parent: HTMLElement, opts: HttpRequestPan
   const previousScroll = previous ? previous.scrollTop : 0;
   parent.replaceChildren();
   const wrap = el("div", "sfe-http-panel");
-  // 文件变量条：横向换行排布（原来是每变量一行，变量一多首屏全被它占掉）。
-  // 只读展示，改值仍回文本态，避免同一份定义两处可编。
-  if (opts.file.variables.length) {
+  // 文件变量的折叠钮先建好：环境那一行出现就挂在它右侧，没出现就自己占一行（不然收起后没地方展开）。
+  const fold = renderVariablesFold(opts);
+  // 环境条放最前面：它决定 `{{host}}` 这类变量今天是从哪一套值里取的。
+  const envBar = renderEnvironmentBar(opts, fold);
+  if (envBar) wrap.appendChild(envBar);
+  else if (fold) {
+    const head = el("div", "sfe-http-variables-head");
+    head.appendChild(fold);
+    wrap.appendChild(head);
+  }
+  // 文件变量条：横向换行排布，默认收起（只读展示，改值仍回文本态，避免同一份定义两处可编）。
+  // 没给开合通道时没有折叠入口，就照原样一直列着。
+  if (opts.file.variables.length && (!fold || opts.variablesCollapsed === false)) {
     const variableList = el("div", "sfe-http-variables");
     for (const variable of opts.file.variables) {
       variableList.appendChild(el("div", "sfe-http-variable", `@${variable.name} = ${variable.value}`));
@@ -411,7 +763,7 @@ export function renderHttpRequestPanel(parent: HTMLElement, opts: HttpRequestPan
       el(
         "div",
         "sfe-http-warning",
-        opts.t("http.skippedResponses", "已跳过 {{count}} 段粘贴进来的响应内容", {
+        opts.t("http.skippedResponses", "{{count}} 段粘贴进来的响应内容不会发送", {
           count: opts.file.skippedResponseSections.length,
         })
       )

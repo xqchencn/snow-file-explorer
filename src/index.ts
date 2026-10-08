@@ -10,6 +10,7 @@ import type { Unsubscribe } from "./types/snow-api.ts";
 import type { GitFileStatus } from "./types/host/host-git.ts";
 import type { FileTreeEntry, ErrorLike, FileWriteResult } from "./services/file-service.ts";
 import type { GitTreeNode } from "./services/git-service.ts";
+import type { HttpEnvironmentDraft } from "./services/http-env.ts";
 import type { FlatRunCommand } from "./services/project-commands.ts";
 import type { RunToolbarHandle } from "./components/run-toolbar.ts";
 import type { GitSection, GitViewOptions } from "./components/git-view.ts";
@@ -18,6 +19,7 @@ import type {
   PanelState,
   LayoutEls,
   ConfirmDialogState,
+  ContextMenuState,
 } from "./state/panel-state.ts";
 
 import { el, copyToClipboard } from "./utils/dom.ts";
@@ -25,9 +27,15 @@ import { createActionIcon } from "./icons/action-icons.ts";
 import {
   basename,
   relativePath,
+  readFileContent,
+  workspaceRelativePath,
+  buildFileChatReference,
   resolveActiveDirectoryPath,
 } from "./services/file-service.ts";
-import { isHttpRestFileName } from "./services/http-file-scan.ts";
+import { joinPath } from "./services/file-filter.ts";
+import { isHttpRestFileName, REQUEST_FILE_EXTENSIONS, REQUEST_FILE_EXTENSION_HINT } from "./services/http-file-scan.ts";
+import { directoryOf, newFileNameProblem } from "./services/file-create.ts";
+import { SHARED_ENVIRONMENT_NAME } from "./services/http-env.ts";
 import { subscribeGitStatus, partitionGitFiles } from "./services/git-service.ts";
 import { loadChunk, releaseChunkStyles } from "./services/lazy-chunk.ts";
 import { installFileIcons, refreshInstalledIcons, createFileIconNode } from "./icons/file-icons.ts";
@@ -36,13 +44,23 @@ import { renderCodeViewer, disposeViewerViewport } from "./components/code-viewe
 import { renderGitCommitBar, renderGitList, closeGitContextMenu } from "./components/git-view.ts";
 import { renderHttpList } from "./components/http-view.ts";
 import { renderHttpRequestPanel } from "./components/http-request-panel.ts";
+import { createEnvironmentForm } from "./components/environment-form.ts";
 import { renderHttpResult } from "./components/http-result-view.ts";
 import { formValuesOfRequest } from "./services/http-serialize.ts";
 import { renderGitSyncIndicator } from "./components/git-sync-indicator.ts";
-import { loadViewSettings, loadDiffViewMode, loadHttpViewerMode } from "./services/settings.ts";
+import { loadViewSettings, loadDiffViewMode, loadHttpViewerMode, loadHttpEnvironment } from "./services/settings.ts";
 import { ensureProjectCommands, flattenCommands } from "./services/project-commands.ts";
 import { renderRunToolbar } from "./components/run-toolbar.ts";
-import { isRightPanelFullscreen } from "./utils/panel-fullscreen.ts";
+import {
+  insertChatTextWithRetry,
+  normalizeEmptyChatInput,
+  type ChatInputInsertStatus,
+} from "./services/chat-input-service.ts";
+import {
+  isRightPanelFullscreen,
+  exitRightPanelFullscreen,
+  waitForNextFrame,
+} from "./utils/panel-fullscreen.ts";
 import { createPanelState, pathKey } from "./state/panel-state.ts";
 import { createGitController } from "./controllers/git-controller.ts";
 import { createHttpController } from "./controllers/http-controller.ts";
@@ -55,6 +73,51 @@ import { createTerminalController } from "./controllers/terminal-controller.ts";
 // 这些形状的真源就是本文件的 state 对象与终端记录；组件层只消费其中切片。
 // 跨层已有的形状一律 import 复用（见上方 import type），此处只声明确实新增的部分。
 // ---------------------------------------------------------------------------
+
+/**
+ * 一次弹窗挂进正文位置的那一块（`formBody` 槽位的元素）。
+ * @description state.confirmDialog 那份形状只带标题 / 正文 / 按钮，装不下输入框，也装不下整块表单，
+ *   故单独记一份；它与弹窗本体同生同灭（弹窗状态清成 null 的那几处一并清它）。
+ *   同时只可能有一个弹窗开着，所以一个槽位就够。
+ */
+type ConfirmDialogBody = {
+  /** 取消按钮文案；由调用方给，没有正文替换的确认框用渲染处的「取消」兜底。 */
+  cancelLabel: string;
+  /**
+   * 取代正文那一块的节点。
+   * @description 建一次就留着复用：面板全量重绘会连弹窗 DOM 一起重建，每次挂回同一个节点，
+   *   用户刚打进去的字才不会被抹掉。
+   */
+  node: HTMLElement;
+  /** 弹窗打开时聚焦的元素：文本弹窗是那个输入框，表单弹窗是第一个该填的框。 */
+  focusTarget: HTMLElement;
+  /**
+   * 就地显示校验失败的那一行；只有当场要校验的弹窗才给（见 askEnvironment）。
+   * @description 没给就一行都不渲染；给的时候初始必须是 hidden——错误出现之前不该占着一行空位。
+   */
+  errorNode?: HTMLElement;
+  /**
+   * 每次把弹窗画出来之后要叫一次的动作（带即时校验的弹窗用它把禁用态刷到当前那颗确认钮上）。
+   * @description 输入框建一次就留着复用，所以「打字→重新判一遍」的监听只挂在输入框上；
+   *   而确认钮每轮重绘都是新的一颗——两头对不上，就得由渲染处每画一次问一次调用方。
+   */
+  onRendered?: () => void;
+};
+
+/**
+ * 弹窗在本文件里实际记的那份状态形状。
+ * @description 跨层那份 ConfirmDialogState（各控制器看到的）只有标题 / 正文 / 按钮与两个回调；
+ *   带表单的弹窗还要多一条「关弹窗之前先验一遍」的钩子，就在这儿加宽一层。
+ *   state 上声明的仍是跨层那份，取回来用时按这一份读（见 confirmDialogAction）。
+ */
+type ConfirmDialogWithForm = ConfirmDialogState & {
+  /**
+   * 点确认 / 按 Enter 之后、关弹窗之前的校验；缺省视为通过（确认框与文本弹窗都没有它）。
+   * @returns 可以关弹窗并把答复交给等待方时 true；校验没过时 false——弹窗原样留着、
+   *   等待方收不到任何答复，错误由 body 的 errorNode 就地显示。
+   */
+  onBeforeConfirm?: () => boolean;
+};
 
 /**
  * 插件主挂载入口
@@ -145,6 +208,20 @@ export function mount(
 
   const state = createPanelState();
 
+  // 弹窗的正文替换；只可能有一个弹窗开着，故单个槽位，见 askText / askEnvironment 与 renderConfirmDialog。
+  let formBody: ConfirmDialogBody | null = null;
+  // 当前那次渲染画出来的那颗「确认」钮；带即时校验的正文要靠它把禁用态刷上去（见 askText）。
+  // 每次渲染先清空再按新画的那颗赋值，所以留下的不会是上一轮弹窗的按钮。
+  let dialogConfirmButton: HTMLButtonElement | null = null;
+
+  /**
+   * HTTP 列表目录行右键的目标目录（相对项目根，正斜杠）与它所属的那一次菜单。
+   * @description 菜单状态那份形状只认「文件」目标，目录没有可放的字段，就把目标和打开它的那个
+   *   菜单对象绑在一起记：每次开菜单都是新对象，对不上号即当作没有，
+   *   不会出现「右键文件树条目却弹出目录那一项」。
+   */
+  let httpFolderMenu: { owner: ContextMenuState; relPath: string } | null = null;
+
   // ------------------------------------------------------------------
   // 控制器装配：Git / 文件树 / 预览 / 终端各管一块。渲染回调是函数声明（提升可用）；
   // 跨控制器引用一律 () => x.y() 晚绑定，创建顺序不构成依赖。
@@ -217,6 +294,10 @@ export function mount(
     setOperationStatus,
     renderGitViewSwitchInToolbar,
     renderRunToolbarView,
+    // 终端 / 运行的「发送到当前会话」：控制器只递文本，确认弹窗与写动作在这里。
+    sendToChat: (text: string) => {
+      void sendTextToChat(text);
+    },
   });
 
   const http = createHttpController({
@@ -238,6 +319,13 @@ export function mount(
         title: t("http.discardTitle", "有未保存的改动"),
         message: t("http.discardMessage", "当前请求文件里还有没写盘的内容，继续就会丢掉这些改动。"),
         confirmLabel: t("http.discardConfirm", "丢弃并继续"),
+      }),
+    // `# @note` 是作者写给发送这一步的话，不是卡片上的装饰文字，所以发之前问一句、确认了才发。
+    confirmNote: (note) =>
+      askConfirm({
+        title: t("http.noteTitle", "这条请求留了一句话"),
+        message: note,
+        confirmLabel: t("http.noteConfirm", "仍然发送"),
       }),
   });
 
@@ -314,6 +402,7 @@ export function mount(
     // 换项目会把弹窗直接作废：等待确认的流程（如换请求文件）也要收到答复，别把 await 悬在那里。
     if (state.confirmDialog && typeof state.confirmDialog.onCancel === "function") state.confirmDialog.onCancel();
     state.confirmDialog = null;
+    formBody = null;
     state.operationBusy = false;
     state.gitStatus = null;
     state.collapsedStaged = null;
@@ -331,7 +420,6 @@ export function mount(
       name: "",
       path: "",
       text: "",
-      highlightedHtml: "",
       isMarkdown: false,
       mode: "preview",
       html: "",
@@ -425,6 +513,157 @@ export function mount(
     return false;
   }
 
+  /** 宿主运行时快照里与会话投递相关的字段（真源 snow-app `plugins/runtimeSnapshot.ts`）。 */
+  type ChatRuntimeSnapshot = {
+    /**
+     * 输入区实时数据：仅在输入框组件挂载期间持续发布。
+     * @description `conversationId` 为 null 只代表「新会话输入区尚未绑定会话」，
+     *   **不能**据此判「窗口没开」（小窗口新会话就是 null）；输入框是否在位要用探针实测。
+     */
+    chatInput?: { conversationId?: string | null; inputText?: string | null } | null;
+  };
+
+  /** 读取宿主运行时快照；宿主不可用或异常时为 null（按「无目标」处理）。 */
+  async function readChatRuntime(): Promise<ChatRuntimeSnapshot | null> {
+    try {
+      if (api && api.metadata && typeof api.metadata.get === "function") {
+        const response = await api.metadata.get("runtime");
+        const domains = ((response && (response as { domains?: Record<string, unknown> }).domains) || {});
+        return (domains.runtime as ChatRuntimeSnapshot | undefined) || null;
+      }
+    } catch (err) {
+      console.warn("[FileExplorer] 读取宿主会话运行时失败", err);
+    }
+    return null;
+  }
+
+  /**
+   * 单按钮提示弹窗：复用确认框的遮罩 / 焦点 / 关闭机制，只给一个「知道了」。
+   * 发送失败与无目标的场景都必须显式可见，不能静默（此前状态条提示太弱，用户以为功能无效）。
+   */
+  function askSendToChatAlert(message: string): Promise<void> {
+    return new Promise<void>((resolve) => {
+      const opened = openConfirmDialog({
+        title: t("action.sendToChatTitle", "发送到当前会话"),
+        message,
+        confirmLabel: t("action.sendToChatOk", "知道了"),
+        danger: false,
+        onConfirm: () => resolve(),
+        onCancel: () => resolve(),
+      });
+      if (!opened) {
+        // 已有别的弹窗在用：说明原因后放行，不悬挂等待。
+        setStatusText(t("http.confirmBusy", "请先处理当前对话框"));
+        resolve();
+      }
+    });
+  }
+
+  /**
+   * 一次真实追加：服务层会在每次尝试前重新读 runtime，并按本次内容计算 appendedText。
+   * @description 这里只把宿主 API 接到事务边界；不要在这里缓存输入内容或直接重试写动作。
+   */
+  async function insertIntoChatInput(text: string): Promise<ChatInputInsertStatus> {
+    const run = api && api.write && api.write.run;
+    if (typeof run !== "function") return "failed";
+
+    return insertChatTextWithRetry(text, {
+      readRuntime: readChatRuntime,
+      // runtime 快照在输入区卸载后仍保留旧值；只有当前聊天输入 DOM 在位时才允许发写动作。
+      isInputMounted: () => {
+        return document.querySelector(
+          '[data-snow-anchor="chat.input"] .input-field-editable[contenteditable="true"]',
+        ) !== null;
+      },
+      // 宿主输入区切回聊天后，runtime 可能还留着切换前的草稿；data-empty 是宿主
+      // 根据真实 contenteditable 内容发布的即时标记。空输入必须按空串追加，不能凭旧草稿补首行换行。
+      readCurrentText: () => {
+        const input = document.querySelector<HTMLElement>(
+          '[data-snow-anchor="chat.input"] .input-field-editable[contenteditable="true"]',
+        );
+        if (!input) return null;
+        if (input.dataset.empty === "true" || (!input.textContent && !input.innerHTML)) return "";
+        return undefined;
+      },
+      insertText: (appendedText) => run("chatInput.insertText", { text: appendedText }),
+    });
+  }
+
+  /**
+   * 把一段文本填入宿主会话的输入框（**只填入，不代发**：内容由用户确认后自己发送）。
+   * 流程（用户方案，统一所有场景）：
+   *   ① 右面板处于全屏 → 先退出全屏，并确认 DOM 状态已经消失；
+   *   ② 每次尝试先重新读取输入框，再按本次内容计算 appendedText；
+   *   ③ 只有输入框未挂载/写动作失败才允许重试；已发出但 snapshot 延迟时禁止重复写入。
+   * @param text 消息原文（代码选区只带正文：md 原文 / 代码围栏；终端 / 运行为原文）
+   * @returns 是否成功填入
+   */
+  async function sendTextToChat(text: string): Promise<boolean> {
+    if (!text) return false;
+
+    // 不能先用 isRightPanelFullscreen() 决定是否调用退出：宿主 React 切换时，
+    // “退出全屏”按钮的 aria-label 可能已更新，而 .fullscreen class 还没提交。
+    // 退出函数本身是幂等的，必须每次都调用，让它同时覆盖两种时序。
+    const exited = await exitRightPanelFullscreen();
+    if (!exited || isRightPanelFullscreen()) {
+      await askSendToChatAlert(
+        t("action.sendToChatFullscreenFailed", "无法退出右侧全屏，内容未填入；请先退出全屏后重试。"),
+      );
+      return false;
+    }
+
+    const input = document.querySelector<HTMLElement>(
+      '[data-snow-anchor="chat.input"] .input-field-editable[contenteditable="true"]',
+    );
+    if (input && normalizeEmptyChatInput(input)) {
+      // 宿主的 latestValueRef 在 input 事件后下一帧才反映空串；等这一帧再发追加事件。
+      await waitForNextFrame();
+    }
+
+    const status = await insertIntoChatInput(text);
+    if (status === "confirmed") {
+      setOperationStatus(true, t("action.sendToChatDone", "已填入会话输入框，请确认后发送"));
+      return true;
+    }
+
+    if (status === "unconfirmed") {
+      // 写动作可能已同步修改真实输入框，只有 runtime effect 延迟；此处绝不能再写一次。
+      await askSendToChatAlert(
+        t("action.sendToChatUnconfirmed", "已尝试填入，但宿主状态尚未确认；为避免重复追加，未再次写入，请检查输入框后重试。"),
+      );
+      return false;
+    }
+
+    await askSendToChatAlert(
+      t("action.sendToChatNotOpen", "没能确认会话输入框已打开，内容未填入；请手动打开会话窗口后重试。"),
+    );
+    return false;
+  }
+
+  /**
+   * 文件树右键「发送到对话框」只发送文件引用，不发送文件正文。
+   * @description 先读取文件判定文本类型并计算行数，再把「工作区名\\相对路径 1-N」填入现有聊天输入框。
+   */
+  async function handleSendFileToChat(entry: FileTreeEntry): Promise<void> {
+    const result = await readFileContent(entry.path);
+    if (
+      !result ||
+      result.isBinary ||
+      result.isImage ||
+      typeof result.content !== "string"
+    ) {
+      setOperationStatus(false, "只能发送文本文件");
+      return;
+    }
+
+    const reference = buildFileChatReference(state.rootPath, entry.path, result.content);
+    if (!reference) {
+      setOperationStatus(false, "目标路径不在当前工作区内");
+      return;
+    }
+    await sendTextToChat(reference);
+  }
+
   async function handleRevealInExplorer(entry: Pick<FileTreeEntry, "path"> | null) {
     if (!entry || state.operationBusy) return;
     closeContextMenu();
@@ -445,9 +684,19 @@ export function mount(
     terminal.handleNewTerminal({ cwd: target || state.rootPath, mode: "terminal" });
   }
 
-  function openConfirmDialog({ title, message, confirmLabel, danger = true, onConfirm }: ConfirmDialogState) {
+  function openConfirmDialog(
+    dialog: ConfirmDialogWithForm,
+    body: ConfirmDialogBody | null = null,
+  ): boolean {
     if (state.confirmDialog) return false;
-    state.confirmDialog = { title, message, confirmLabel, danger, onConfirm };
+    // onCancel 也得存进状态：取消按钮、点遮罩、Escape、切项目这四条关闭路径都只认这一份状态，
+    // 漏掉它等待方（askConfirm / askText / askEnvironment 的 await）就永远收不到答复。
+    // 递进来的那一份整份抄下来：onBeforeConfirm 跟着状态一起走，逐个字段挑着抄就会把校验钩子抄丢。
+    // danger 在这里把默认值定死（省略即危险动作）：读的人就只管看布尔值，不必各自再补一遍。
+    state.confirmDialog = { ...dialog, danger: dialog.danger !== false };
+    // 正文替换与弹窗本体同批写：确认框没有正文替换就是 null，占着弹窗的第二次询问
+    // 也不会踩掉正在用着的那一份。
+    formBody = body;
     renderConfirmDialog();
     return true;
   }
@@ -456,6 +705,7 @@ export function mount(
     if (!state.confirmDialog) return;
     const cancelled = state.confirmDialog.onCancel;
     state.confirmDialog = null;
+    formBody = null;
     renderConfirmDialog();
     // 取消也要给等待方一个答复（见 askConfirm）。
     if (typeof cancelled === "function") cancelled();
@@ -482,11 +732,177 @@ export function mount(
     });
   }
 
+  /**
+   * 一次文本输入弹窗：把确认框那套遮罩 / 焦点 / 关闭机制换成「标题 + 一个输入框」。
+   * @param options 标题 / 输入框标签 / 占位 / 预填文本 / 两个按钮文案，外加一条可选的当场判定
+   * @param options.validate 按输入框现值判这一屏能不能交出去；回一句理由就是不能交的理由。
+   *   给了它，「确认」那颗钮就跟着打字禁用或放开，理由显示在输入框下面，Enter 那条路也一并堵住——
+   *   先给一颗点了没用的按钮、等人敲完再报红字，等于让人白敲一遍。
+   * @returns 输入框里的原文（不 trim、不代填默认值）；取消、关闭、切项目或已有别的弹窗在用时为 null
+   * @description 「填了个空格」与「什么都没填」的处置并不一样，判空交给调用方，
+   *   原语这里只把用户给的字符原样带回去。
+   */
+  function askText(options: {
+    title: string;
+    label: string;
+    placeholder?: string;
+    defaultValue?: string;
+    confirmLabel: string;
+    cancelLabel: string;
+    validate?: (raw: string) => string | null;
+  }): Promise<string | null> {
+    return new Promise<string | null>((resolve) => {
+      // 输入行在开弹窗之前就建好，之后只挪不换（见 ConfirmDialogBody.node）。
+      const input = el("input", "sfe-confirm-field-input");
+      input.type = "text";
+      input.value = options.defaultValue || "";
+      if (options.placeholder) input.placeholder = options.placeholder;
+      const row = el("label", "sfe-confirm-field");
+      row.appendChild(el("span", "sfe-confirm-field-label", options.label));
+      row.appendChild(input);
+      // 那一行说明只有要当场校验时才建：没话可说的弹窗不该多占一行空位。
+      const errorLine = options.validate ? el("div", "sfe-confirm-error") : null;
+      if (errorLine) errorLine.hidden = true;
+      const problem = (): string | null => (options.validate ? options.validate(input.value) : null);
+      const sync = (): void => {
+        const text = problem();
+        if (errorLine) {
+          // 一个字都还没打的时候不把这句话喊出来：那是「还没填」，不是「填错了」，
+          // 弹窗一开就先红一格骂人，等于把刚要开始填的人挡回去。「创建」按不动已经说清了这件事。
+          const shown = input.value.trim() ? text : null;
+          errorLine.textContent = shown || "";
+          errorLine.hidden = !shown;
+        }
+        // 确认钮每轮重绘都是新的一颗，所以现问现取当前那一个。
+        if (dialogConfirmButton) dialogConfirmButton.disabled = Boolean(text);
+      };
+      // 输入框建一次就留着复用，这条监听因而只挂一次；换按钮那一头由 body.onRendered 补上。
+      input.addEventListener("input", sync);
+      // 输入行跟着这次弹窗一起交给 openConfirmDialog：它开成才写进槽位，开不成什么都不动。
+      const opened = openConfirmDialog(
+        {
+          title: options.title,
+          message: "",
+          confirmLabel: options.confirmLabel,
+          danger: false,
+          onBeforeConfirm: () => {
+            // 按钮已经跟着打字禁用/放开了，这一条堵的是 Enter 那条不走按钮的路。
+            if (!problem()) return true;
+            sync();
+            return false;
+          },
+          onConfirm: () => {
+            resolve(input.value);
+          },
+          onCancel: () => resolve(null),
+        },
+        {
+          cancelLabel: options.cancelLabel,
+          node: row,
+          focusTarget: input,
+          errorNode: errorLine || undefined,
+          onRendered: options.validate ? sync : undefined,
+        },
+      );
+      if (!opened) {
+        // 已有别的弹窗在用：明确告诉用户为什么点了没反应，而不是静默什么都不做。
+        setStatusText(t("http.confirmBusy", "请先处理当前对话框"));
+        resolve(null);
+      }
+    });
+  }
+
+  /**
+   * 一次「修改环境」弹窗：整张表（每一段的名字与变量行）挂进确认框那套遮罩 / 焦点 / Esc / 关闭机制里，
+   * 底下是「保存」「取消」两颗钮。
+   * @description 这篇文件带着文件变量时，弹窗里多一个只读的「文件变量」页，环境表还是第一页：
+   *   两件事都在「这个 `{{host}}` 究竟从哪儿来的」这条线上，分两个入口反而要说清谁盖谁。
+   *   交回来的只有环境表那一页——文件变量这一页没有输入框，压根没有可交的东西。
+   * @returns 点了保存的整张表；取消、Esc、点遮罩、切项目或已有别的弹窗在用时为 null
+   * @description 打开之前先现读一遍盘：环境表是工作区里的普通文件，随时可能在外面被改过——
+   *   摊开一份过期的表再整张写回，等于把别处刚加的那几段抹掉，而且这一步不留任何痕迹。
+   * @description 摊开的行只取**写得回去的那一份**：只住在私密表里的项改了不顶用，摊开来等于骗人改一遍。
+   * @description 取消这条路什么都不写：草稿只在保存时交出去，写哪儿去、怎么写归拿到草稿的调用方。
+   * @description 校验不过就不关弹窗：新加的那一段名字撞了或没填，要能就地改了再点一次保存，
+   *   而不是弹窗一关、什么也没发生。
+   */
+  async function askEnvironmentTables(): Promise<HttpEnvironmentDraft[] | null> {
+    await http.reloadEnvironment();
+    const summary = http.environmentSummary();
+    // `$shared` 提到最前：它是所有环境的公共底，摆在第一段才看得清谁覆盖了谁。
+    // 比较器只认这一条先后，其余返回 0——排序是稳定的，别的段保持读到的原顺序。
+    const sections = [...summary.publicTables.entries()]
+      .sort((a, b) => {
+        if (a[0] === SHARED_ENVIRONMENT_NAME) return -1;
+        if (b[0] === SHARED_ENVIRONMENT_NAME) return 1;
+        return 0;
+      })
+      .map(([name, table]) => ({
+        name,
+        variables: [...table.entries()].map(([key, value]) => ({ key, value })),
+      }));
+    const form = createEnvironmentForm({
+      t,
+      sections,
+      takenNames: [...summary.names, SHARED_ENVIRONMENT_NAME],
+      privateKeys: summary.privateKeys,
+      // 这篇文件的文件变量摊到第二页只念：它们住在正文里，改了不生效的原因一句话在这儿说不清，
+      // 但「为什么这个值不来自环境」必须在同一个弹窗里答得上来。
+      fileVariables: (state.httpFile?.variables || []).map((variable) => ({ name: variable.name, value: variable.value })),
+    });
+    // 错误那一行也建一次就留着：重绘只把它挪回弹窗，刚说的那句原因不会跟着重绘一起消失。
+    const errorLine = el("div", "sfe-confirm-error");
+    errorLine.hidden = true;
+    // 校验先过一遍，草稿留在这个变量里；等弹窗真关掉了才由 onConfirm 交出去，
+    // 「关弹窗」与「答复等待方」这两件事就不挤在同一个回调里抢先后。
+    let saved: HttpEnvironmentDraft[] | null = null;
+    return new Promise<HttpEnvironmentDraft[] | null>((resolve) => {
+      const opened = openConfirmDialog(
+        {
+          title: t("http.envDialogTitle", "修改环境"),
+          message: "",
+          confirmLabel: t("action.save", "保存"),
+          danger: false,
+          onBeforeConfirm: () => {
+            const result = form.collect();
+            if (result.error !== undefined) {
+              errorLine.textContent = result.error;
+              errorLine.hidden = false;
+              // 出错的那段已被组件切到眼前：焦点直送拦下来的那一格，改完直接就能再点保存。
+              (result.offender || form.focusTarget).focus();
+              return false;
+            }
+            saved = result.tables;
+            return true;
+          },
+          onConfirm: () => resolve(saved),
+          onCancel: () => resolve(null),
+        },
+        {
+          cancelLabel: t("action.cancel", "取消"),
+          node: form.node,
+          focusTarget: form.focusTarget,
+          errorNode: errorLine,
+        },
+      );
+      if (!opened) {
+        // 已有别的弹窗在用：明确告诉用户为什么点了没反应，而不是静默什么都不做。
+        setStatusText(t("http.confirmBusy", "请先处理当前对话框"));
+        resolve(null);
+      }
+    });
+  }
+
   async function confirmDialogAction() {
-    const dialog = state.confirmDialog;
+    // 记进状态的那一份按本文件的形状读：跨层那份装不下 onBeforeConfirm。
+    const dialog = state.confirmDialog as ConfirmDialogWithForm | null;
     if (!dialog) return;
 
+    // 先问校验：没过就什么都不动——弹窗留着、等待方也收不到答复，错误那一行由正文自己显示。
+    if (dialog.onBeforeConfirm && !dialog.onBeforeConfirm()) return;
+
     state.confirmDialog = null;
+    formBody = null;
     renderConfirmDialog();
     try {
       await dialog.onConfirm();
@@ -501,9 +917,13 @@ export function mount(
 
     const oldOverlay = root.querySelector(".sfe-confirm-overlay");
     if (oldOverlay) oldOverlay.remove();
+    // 这一轮还没画出确认钮；带校验的正文要的「当前那颗」从这里取，所以先把上一颗的清掉。
+    dialogConfirmButton = null;
 
     const confirmState = state.confirmDialog;
     if (!confirmState) return;
+    // 正文替换由调用方随本次弹窗一起放好；确认框那一路永远是 null，正文照旧。
+    const body = formBody;
 
     const overlay = el("div", "sfe-confirm-overlay");
     overlay.setAttribute("role", "presentation");
@@ -520,16 +940,24 @@ export function mount(
       if (event.key === "Escape") {
         event.preventDefault();
         closeConfirmDialog();
-      } else if (event.key === "Enter" && event.target === dialog) {
+      } else if (event.key === "Enter" && (body || event.target === dialog)) {
+        // 正文里有输入框时 Enter 就等于点确认（创建环境那一路就是点保存）；
+        // 确认框没正文替换，维持原样——焦点在弹窗本体上才算数。
         event.preventDefault();
         void confirmDialogAction();
       }
     });
 
     const title = el("h2", "sfe-confirm-title", confirmState.title);
-    const message = el("p", "sfe-confirm-message", confirmState.message);
+    // 右上角一颗 ❌：跟 Esc、点遮罩同一条取消路，光靠键盘快捷键关弹窗不算人人都会。
+    const closeButton = el("button", "sfe-confirm-close");
+    closeButton.type = "button";
+    closeButton.title = t("dialog.close", "关闭");
+    closeButton.setAttribute("aria-label", closeButton.title);
+    closeButton.appendChild(createActionIcon("close", 14));
+    closeButton.addEventListener("click", closeConfirmDialog);
     const actions = el("div", "sfe-confirm-actions");
-    const cancelButton = el("button", "sfe-confirm-button", t("action.cancel", "取消"));
+    const cancelButton = el("button", "sfe-confirm-button", (body && body.cancelLabel) || t("action.cancel", "取消"));
     cancelButton.type = "button";
     cancelButton.addEventListener("click", closeConfirmDialog);
     const confirmButtonClass = confirmState.danger ? "sfe-confirm-button danger" : "sfe-confirm-button";
@@ -540,19 +968,35 @@ export function mount(
     );
     confirmButton.type = "button";
     confirmButton.addEventListener("click", () => void confirmDialogAction());
+    dialogConfirmButton = confirmButton;
 
     // 统一保持“取消 → 确认动作”的顺序，危险动作通过 danger 样式强调。
     actions.appendChild(cancelButton);
     actions.appendChild(confirmButton);
     dialog.appendChild(title);
-    dialog.appendChild(message);
+    dialog.appendChild(closeButton);
+    if (body) {
+      // 调用方给的整块正文取代 message。节点建一次就留着复用：面板全量重绘会连弹窗 DOM 一起重建，
+      // 换新元素等于把用户刚打进去的字抹掉。
+      dialog.appendChild(body.node);
+      // 校验错误那一行：只在有正文替换、且调用方给了错误位的弹窗里出现，
+      // 没有错误时它一直 hidden，不占位置。
+      if (body.errorNode) dialog.appendChild(body.errorNode);
+    } else {
+      dialog.appendChild(el("p", "sfe-confirm-message", confirmState.message));
+    }
     dialog.appendChild(actions);
     overlay.appendChild(dialog);
     root.appendChild(overlay);
+    // 正文要刷的就是这一颗：画一次问一次，重绘换了按钮也不用重新挂监听。
+    if (body && body.onRendered) body.onRendered();
 
     setTimeout(() => {
       if (!disposed && dialog.isConnected) {
-        dialog.focus();
+        // 带正文替换的弹窗打开就落在它给的元素上（输入框 / 环境名），直接就能打字；
+        // 确认框没有正文替换，焦点照旧留在弹窗本体。
+        if (body) body.focusTarget.focus();
+        else dialog.focus();
       }
     }, 0);
   }
@@ -604,6 +1048,19 @@ export function mount(
     };
     const separator = () => menu.appendChild(el("div", "sfe-context-menu-separator"));
 
+    // 选项画完必须挂上菜单并按视口夹住位置：任何分支提前 return 前都得先走这一步，
+    // 否则菜单建在内存里、屏幕上什么都没有，用户看到的就只是「右键没反应」。
+    const showMenu = () => {
+      root.appendChild(menu);
+      const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
+      const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+      const rect = menu.getBoundingClientRect();
+      const left = Math.max(4, Math.min(context.x, viewportWidth ? viewportWidth - rect.width - 4 : context.x));
+      const top = Math.max(4, Math.min(context.y, viewportHeight ? viewportHeight - rect.height - 4 : context.y));
+      menu.style.left = `${left}px`;
+      menu.style.top = `${top}px`;
+    };
+
     // HTTP 请求文件行的右键菜单：与文件树/Git 列表对等的那几项。
     // 不复用下面的 entry 分支：「打开文件」在那边走的是文件树通道，会与当前主视图对不上。
     const httpFile = context.httpFile;
@@ -622,16 +1079,6 @@ export function mount(
         () => handleRevealInExplorer({ path: httpFile.path }),
         disabled,
       );
-      addItem(t("action.copyPath", "复制路径"), () => copyPathText(httpFile.path), disabled);
-      addItem(
-        t("action.copyRelativePath", "复制相对路径"),
-        () => {
-          const value = relativePath(state.rootPath, httpFile.path);
-          if (value == null) setOperationStatus(false, "目标路径不在当前工作区内");
-          else void copyPathText(value);
-        },
-        disabled,
-      );
       separator();
       addItem(
         t("action.refresh", "刷新"),
@@ -641,6 +1088,34 @@ export function mount(
         },
         disabled,
       );
+      addItem(t("action.copyPath", "复制路径"), () => copyPathText(httpFile.path), disabled);
+      addItem(
+        t("action.copyRelativePath", "复制相对路径"),
+        () => {
+          const value = workspaceRelativePath(state.rootPath, httpFile.path);
+          if (value == null) setOperationStatus(false, "目标路径不在当前工作区内");
+          else void copyPathText(value);
+        },
+        disabled,
+      );
+      showMenu();
+      return;
+    }
+
+    // HTTP 列表目录行的右键菜单：只有「在这个目录里新建请求文件」这一项。
+    // 目录不是文件树条目（列表来自整仓扫描），下面那几条分支的动作都是按文件树的条目办事的，套不上。
+    const folderMenu = httpFolderMenu && httpFolderMenu.owner === context ? httpFolderMenu : null;
+    if (folderMenu) {
+      const relPath = folderMenu.relPath;
+      addItem(
+        t("http.newRequestFile", "新建请求文件"),
+        () => {
+          closeContextMenu();
+          void createRequestFileIn(relPath);
+        },
+        disabled,
+      );
+      showMenu();
       return;
     }
 
@@ -735,7 +1210,16 @@ export function mount(
         disabled,
       );
     } else if (!entry) {
-      // 空白区右键：无具体条目，仅提供工作区级操作（刷新 / 打开工作区 / 复制工作区路径）
+      // 空白区右键：无具体条目，仅提供工作区级操作（新建文件 / 刷新 / 打开工作区 / 复制工作区路径）
+      addItem(
+        t("action.newFile", "新建文件"),
+        () => {
+          closeContextMenu();
+          void createPlainFileIn(state.rootPath);
+        },
+        disabled || !state.rootPath,
+      );
+      separator();
       addItem(t("action.refresh", "刷新"), () => handleRefresh(), disabled);
       separator();
       addItem(
@@ -762,33 +1246,49 @@ export function mount(
       addItem(t("action.openInTerminal", "在终端中打开"), () => handleOpenInTerminal(entry), disabled);
       addItem(t("action.revealInExplorer", "在资源管理器中打开"), () => handleRevealInExplorer(entry), disabled);
       separator();
+      // 刷新放在复制路径之前；删除是危险操作，单独隔离在普通文件操作之外。
+      addItem(t("action.refresh", "刷新"), () => handleRefresh(), disabled);
       addItem(t("action.copyPath", "复制路径"), () => copyPathText(entry.path), disabled);
       addItem(
         t("action.copyRelativePath", "复制相对路径"),
         () => {
-          const value = relativePath(state.rootPath, entry.path);
+          const value = workspaceRelativePath(state.rootPath, entry.path);
           if (value == null) setOperationStatus(false, "目标路径不在当前工作区内");
           else void copyPathText(value);
         },
         disabled,
       );
+      // 文件右键的发送入口只放在文件分支；目录菜单不提供该动作。
+      if (!entry.isDirectory) {
+        addItem(
+          t("action.sendToChat", "发送到对话框"),
+          () => {
+            closeContextMenu();
+            void handleSendFileToChat(entry);
+          },
+          disabled,
+        );
+      }
+      separator();
+      // 「新建文件」要跟着人刚点的那一处，只有右键空白区（没有那一项）才退回项目根。
+      addItem(
+        t("action.newFile", "新建文件"),
+        () => {
+          closeContextMenu();
+          const directory = entry.isDirectory ? entry.path : tree.parentDirectoryPath(entry.path);
+          void createPlainFileIn(directory || state.rootPath);
+        },
+        disabled,
+      );
       separator();
       addItem(t("action.rename", "重命名"), () => beginRename(entry), disabled);
-      addItem(t("action.delete", "删除"), () => tree.handleDelete(entry), disabled);
       separator();
-      addItem(t("action.refresh", "刷新"), () => handleRefresh(), disabled);
+      addItem(t("action.delete", "删除"), () => tree.handleDelete(entry), disabled);
       separator();
       appendViewToggles(disabled);
     }
 
-    root.appendChild(menu);
-    const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
-    const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
-    const rect = menu.getBoundingClientRect();
-    const left = Math.max(4, Math.min(context.x, viewportWidth ? viewportWidth - rect.width - 4 : context.x));
-    const top = Math.max(4, Math.min(context.y, viewportHeight ? viewportHeight - rect.height - 4 : context.y));
-    menu.style.left = `${left}px`;
-    menu.style.top = `${top}px`;
+    showMenu();
   }
 
   function handleContextMenu(entry: FileTreeEntry | null, x: number, y: number) {
@@ -1063,6 +1563,10 @@ export function mount(
     if ((state.mainView === "http" || isActiveHttpDocument()) && view !== "http") await http.commit();
     if (disposed) return;
     state.mainView = view;
+    if (view === "git") {
+      // 每次重新进入 Git 都恢复已暂存区的默认折叠；用户上一次手动展开不跨视图复用。
+      git.resetStagedCollapse();
+    }
     if (view === "files") {
       // 离开 Git 变更视图：清空查看器状态，否则再切回时会残留上次打开的比对。
       state.gitPreview = null;
@@ -1070,8 +1574,8 @@ export function mount(
     }
     if (view === "http") http.syncWithSelection();
     render();
-    // 首次进入 Git 变更视图且尚未拉取过状态时补齐数据。
-    if (view === "git" && !state.gitStatus) await git.refreshGitViewStatus();
+    // 每次进入 Git 都刷新一次，确保 resetStagedCollapse 能按本次最新状态重建默认折叠。
+    if (view === "git") await git.refreshGitViewStatus();
     // 首次进入 HTTP 请求视图时扫一遍工作区的请求文件（同根只扫一次）。
     if (view === "http") await http.rescan();
   }
@@ -1380,6 +1884,11 @@ export function mount(
       onRevealFile: () => preview.handlePreviewRevealFile(),
       onCopyPath: () => preview.handlePreviewCopyPath(),
       onCopyRelativePath: () => preview.handlePreviewCopyRelativePath(),
+      // 右键“发送到当前会话”：查看器只发送选区正文；
+      // 文件右键的文件引用走独立的 handleSendFileToChat。
+      onSendToChat: (message: string) => {
+        void sendTextToChat(message);
+      },
       onRefresh: () => preview.handlePreviewRefresh(),
       // 运行入口：代码查看器需要完整源码 main 列表，顶栏仍使用过滤后的可见命令列表。
       runCommands: () => flattenCommands(state.projectCommands, { includeHidden: true }),
@@ -1430,10 +1939,8 @@ export function mount(
       generating: state.gitGenerating,
       commitMode: state.gitCommitMode,
       commitMenuOpen: state.gitCommitMenuOpen,
-      // collapsedStaged 的初值是 null（表示「还没按首次仓库状态建默认折叠」），
-      // 而 applyGitStatus 在有仓库状态时必先建表，renderGitPane 又只在有文件时才走折叠查询，
-      // 故组件侧（flattenGitTree 直接 .has）拿到的必是 Set；null 这一态在类型上无法表达其时序保证。
-      collapsedStaged: state.collapsedStaged!,
+      // Git 控制器在进入视图前会重置集合；状态尚未拉取时仍传空集合，组件永不消费 null。
+      collapsedStaged: state.collapsedStaged || new Set(),
       collapsedUnstaged: state.collapsedUnstaged,
       // 单击仅更新选中态（就地改样式，不重建 DOM）
       onSelectFile: (file: GitFileStatus, section: GitSection) => {
@@ -1525,6 +2032,71 @@ export function mount(
     layoutEls!.httpPreviewPane = httpPreviewPane;
   }
 
+  /**
+   * 「新建请求文件」该落在哪一层：跟着刚点的那一处——列表里当前选中的那个请求文件所在的那个目录。
+   * @returns 相对项目根的路径（正斜杠）；空串表示项目根
+   * @description 一个文件都没选中（刚打开项目、或选中的就是根下那几个）才退回项目根。
+   */
+  function selectedRequestFileDirectory(): string {
+    const selected = state.httpSelected;
+    if (!selected) return "";
+    const rel = relativePath(state.rootPath, selected);
+    if (!rel || rel === ".") return "";
+    return directoryOf(rel);
+  }
+
+  /**
+   * 「新建请求文件」两颗入口共用的流程：问名字 → 取消或空名就不建 → 剩下的整个交给控制器。
+   * @param relPath 目标目录相对项目根的路径（正斜杠）；空串表示项目根。
+   * @description 落点跟着名字一起显示在弹窗里（「文件名 · api」）：建错了当场就看得见，
+   *   不用等文件出现在列表里才发现建错了地方。
+   * @description 目录在不在项目根以内、名字合不合法、缺扩展名补什么、有没有撞名，都由
+   *   http.createRequestFile 判定并在状态条上说清，这里不重说一遍，成功也不补一句「已创建」——
+   *   文件到底建没建出来只有它知道。
+   */
+  async function createRequestFileIn(relPath: string) {
+    const answer = await askText({
+      title: t("http.newFileTitle", "新建请求文件"),
+      label: `${t("http.newFileLabel", "文件名")} · ${relPath || t("action.newFileAtRoot", "项目根")}`,
+      placeholder: t("http.newFilePlaceholder", "例如 users.http"),
+      confirmLabel: t("http.createConfirm", "创建"),
+      cancelLabel: t("action.cancel", "取消"),
+      // 名字空着、带路径字符、或写了名单外的扩展名，「创建」就一直是暗的：这一类入口只建请求文件。
+      validate: (raw: string) =>
+        newFileNameProblem(t, raw, REQUEST_FILE_EXTENSIONS, REQUEST_FILE_EXTENSION_HINT),
+    });
+    // 取消（null）与只填了空白都算「没说要建」：什么都不建，也不留任何话。
+    if (answer === null) return;
+    const name = answer.trim();
+    if (!name) return;
+    const directory = relPath ? joinPath(state.rootPath, relPath) : state.rootPath;
+    await http.createRequestFile(directory, name);
+  }
+
+  /**
+   * 文件树「新建文件」的流程：问名字 → 取消或只填空白就不建 → 剩下的整个交给树控制器。
+   * @param directoryPath 目标目录绝对路径（右键那个目录；右键文件就是它所在的那个目录；空白区就是项目根）
+   * @description 这一路不收扩展名名单：代码编辑器要建的是 `.ts` / `.json` / `Dockerfile` 这一类名字，
+   *   只有请求文件那一类才按扫描认的名单判。位置在不在项目根以内、名字合不合法、有没有撞名，
+   *   都由写文件那一层判并在状态条说清，这里不重说一遍，成功也不补一句「已创建」——
+   *   文件到底建没建出来只有那边知道。
+   */
+  async function createPlainFileIn(directoryPath: string) {
+    const rel = relativePath(state.rootPath, directoryPath);
+    const answer = await askText({
+      title: t("action.newFile", "新建文件"),
+      label: `${t("action.newFileLabel", "文件名")} · ${!rel || rel === "." ? t("action.newFileAtRoot", "项目根") : rel}`,
+      placeholder: t("action.newFilePlaceholder", "例如 config.json"),
+      confirmLabel: t("action.create", "创建"),
+      cancelLabel: t("action.cancel", "取消"),
+      validate: (raw: string) => newFileNameProblem(t, raw),
+    });
+    if (answer === null) return;
+    const name = answer.trim();
+    if (!name) return;
+    await tree.createFileIn(directoryPath, name);
+  }
+
   // 局部：请求文件列表
   function renderHttpPane() {
     if (disposed || !layoutEls || !layoutEls.httpPane) return;
@@ -1542,9 +2114,18 @@ export function mount(
       onRefresh: () => {
         void http.rescan({ force: true });
       },
+      // 工具条新建：落点跟着刚点的那一处——当前选中那个请求文件所在的目录，没选中才回项目根。
+      onCreateRequestFile: () => void createRequestFileIn(selectedRequestFileDirectory()),
       // 右键：与文件树/Git 列表同一套菜单通道（定位 + 目标），选项见 renderContextMenu 的 httpFile 分支。
       onContextMenu: (file, event) => {
         state.contextMenu = { entry: null, httpFile: file, x: event.clientX, y: event.clientY };
+        renderContextMenu();
+      },
+      // 目录行右键：菜单走同一条通道，但那一个目录记在 httpFolderMenu 里（那份状态没有放目录的字段）。
+      onFolderContextMenu: (node, event) => {
+        const menu: ContextMenuState = { entry: null, x: event.clientX, y: event.clientY };
+        state.contextMenu = menu;
+        httpFolderMenu = { owner: menu, relPath: node.relPath };
         renderContextMenu();
       },
       t,
@@ -1652,6 +2233,16 @@ export function mount(
         onSend: (index) => void http.send(index),
         onPromptChange: (index, name, value) => http.handlePromptChange(index, name, value),
         getPromptValue: (index, name) => http.promptValue(index, name),
+        environment: http.environmentSummary(),
+        onEnvironmentChange: (name) => void http.setEnvironment(name),
+        // 一颗钮管整张表：弹窗、现读、落盘都在这条路上，面板自己不算要写什么，名字与值只在弹窗里改。
+        onManageEnvironments: async () => {
+          const tables = await askEnvironmentTables();
+          if (tables) await http.saveEnvironmentTables(tables);
+        },
+        // 文件变量那一排默认收起，折叠钮在环境那一行右侧（开合只重画面板，不碰磁盘也不动缓冲）。
+        variablesCollapsed: state.httpVariablesCollapsed,
+        onToggleVariables: () => void http.toggleVariablesCollapsed(),
         t,
       });
       renderHttpViewSwitchInToolbar();
@@ -1659,7 +2250,7 @@ export function mount(
     }
     // 文本态就是这篇文件本来的代码查看器（行号、高亮、复制、右键菜单一个不少），
     // 只多了行号槽上的 ▶ 与「失焦即存盘」；重读文件之后也要停在编辑态。
-    // 右侧再分一栏摆「请求体 + 响应」（对标上游的 Exchange 预览，也像 Git 的 split 比对）：
+    // 右侧再分一栏摆「请求体 + 响应」：请求与响应要同屏对照，和 Git 的分栏比对是同一个理由。
     // 文本态没有别的地方放结果，不分栏就只能靠跳去 GUI 看，那正是之前「点了没反应」的来源。
     if (state.httpMode === "text") http.ensureEditable();
     // 代码模式：没发过请求时不给右分栏——空着摆一块「点 ▶ 发送」的占位纯属碍眼，
@@ -1846,11 +2437,12 @@ export function mount(
   // 首屏不被 585KB 的块拖死。
   void ensureIcons();
   void (async () => {
-    const [initialRoot, viewSettings, diffMode, httpMode, commitMode, toolDock] = await Promise.all([
+    const [initialRoot, viewSettings, diffMode, httpMode, httpEnvironment, commitMode, toolDock] = await Promise.all([
       resolveRoot(),
       loadViewSettings(api),
       loadDiffViewMode(api),
       loadHttpViewerMode(api),
+      loadHttpEnvironment(api),
       (async () => {
         try {
           if (api.storage && typeof api.storage.getJson === "function") {
@@ -1879,6 +2471,8 @@ export function mount(
     if (toolDock === "right") state.toolDock = "right";
     state.diffMode = diffMode;
     state.httpMode = httpMode;
+    // 上次选中的环境先落到状态里；环境表本身要等打开某个请求文件时按那个文件的目录去读。
+    http.restoreEnvironment(httpEnvironment);
     render();
     if (state.rootPath) {
       // 根目录此刻才就绪（resolveRoot 是异步 IPC，侧边栏按钮早在 renderChrome 里建好了）：

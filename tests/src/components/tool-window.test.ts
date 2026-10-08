@@ -506,7 +506,8 @@ test("工具窗口: 运行窗口无「＋新建」，但有工具栏（重跑/�
   assert.ok(bar.querySelector(".sfe-run-tb-btn.rerun"), "必须有重跑按钮");
   assert.ok(bar.querySelector(".sfe-run-tb-btn.stop"), "必须有停止按钮");
   assert.ok(bar.querySelector(".sfe-run-tb-btn.copy"), "必须有复制选中文本按钮");
-  assert.equal(bar.querySelectorAll(".sfe-run-tb-btn").length, 6, "复制选中文本/滚动到底/清空/更多共 6 个按钮");
+  assert.ok(bar.querySelector(".sfe-run-tb-btn.send"), "必须有发送到当前会话按钮");
+  assert.equal(bar.querySelectorAll(".sfe-run-tb-btn").length, 7, "复制/发送到会话/滚动到底/清空/更多共 7 个按钮");
 });
 
 test("工具窗口: 运行窗口工具栏按钮按激活 tab 的运行态启用/置灰", () => {
@@ -685,7 +686,7 @@ test("工具窗口: 右键菜单项点击后回调并关闭菜单", () => {
 // 记录粘贴 / 全选调用的假终端工厂是文件头部的 makeClipboardFactory()（其视图 hasSelection 恒为 false）。
 
 /**
- * 宿主 `window.snow` 桩：33 个方法逐个按 src/types/snow-api.ts 的真实签名给出。
+ * 宿主 `window.snow` 桩：34 个方法逐个按 src/types/snow-api.ts 的真实签名给出。
  * @description 本文件只测「内容区右键 → 读剪贴板」这一条链路，其余方法一律「被调用即抛」，
  *   这样组件一旦用到桩里没有的能力，用例会直接失败而不是静默通过（不留假桩）。
  */
@@ -701,6 +702,7 @@ const unstubbedSubscribe = (): Unsubscribe => {
 const SNOW_STUB: SnowApi = {
   readDirectoryEntries: unstubbedAsync,
   readFileContent: unstubbedAsync,
+  writeFileContent: unstubbedAsync,
   searchFiles: unstubbedAsync,
   startDirectoryWatch: unstubbedAsync,
   stopDirectoryWatch: unstubbedAsync,

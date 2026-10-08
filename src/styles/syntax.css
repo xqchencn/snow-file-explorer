@@ -199,5 +199,27 @@
   color: var(--accent-red-text, #ef4444);
 }
 
+/* 13. JSON 语义视图（components/json-view.ts 的折叠视图 / 高亮层）
+   JSON 视图按行级语义切分着色，类名用 Prism token 体系（PRISM_JSON_CLASSES），
+   容器在此加入 token 色板作用域：与 .json 文件、.http 正文、diff 里的 JSON 同一套配色，
+   曾独立存在的 sfe-json-* 色板已废（json-key 蓝 / string 绿 / number 红的旧组合不再保留）。 */
+:is(.sfe-json-view, .sfe-json-hl) .token.punctuation {
+  color: var(--text-secondary);
+}
+
+:is(.sfe-json-view, .sfe-json-hl) .token.string {
+  color: var(--accent-green-text, var(--accent-green, #10b981));
+}
+
+:is(.sfe-json-view, .sfe-json-hl) .token.number,
+:is(.sfe-json-view, .sfe-json-hl) .token.boolean,
+:is(.sfe-json-view, .sfe-json-hl) .token.null {
+  color: var(--accent-orange, #f59e0b);
+}
+
+:is(.sfe-json-view, .sfe-json-hl) .token.property {
+  color: var(--accent-blue, #3b82f6);
+}
+
 
 

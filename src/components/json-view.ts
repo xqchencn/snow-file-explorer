@@ -1,11 +1,12 @@
 /**
  * 响应正文的 JSON 折叠视图 (src/components/json-view.ts)
- * @description 把美化后的 JSON 摊成可逐块折叠的行列表。折叠区间按**缩进配对**算，
- *   与 vscode-restclient 的响应 webview 同一套思路（`getFoldingRange`）：
+ * @description 把美化后的 JSON 摊成可逐块折叠的行列表。折叠区间按**缩进配对**算：
  *   不依赖语法树，只看前导空格的增减，因此对象/数组嵌套都能正确配对。
+ *   配对的前提是正文已经美化过——缩进是唯一的配对依据，没缩进的正文折不动，只能整摊着看。
  * @description 着色是 **JSON 语义着色**（键 / 字符串 / 数字 / 布尔 / null 各一色），
- *   不走代码高亮器：Prism 的代码 token 配色只作用于 .sfe-file-viewer-code / .sfe-diff-scroll，
- *   在 JSON 视图里根本命中不到，结果是「一片没颜色的代码」。JSON 要的是结构化美化，不是代码分词。
+ *   类名用 Prism 的 token 体系（property / string / …），与 .json 文件、.http 正文、
+ *   diff 里的 JSON 同一套配色（syntax.css 的 token 色板，作用域含本视图容器）。
+ *   JSON 要的是结构化美化，不是代码分词；分词由 segmentJsonLine 的行级语义切分承担。
  */
 
 import { el } from "../utils/dom.ts";
@@ -22,15 +23,40 @@ export const MAX_FOLD_LINES = 3000;
 /** 一段 JSON 片段及其语义类别，供逐段着色。 */
 type JsonSegment = { text: string; cls: string };
 
-/** 本模块的 JSON 语义类名（`sfe-json-*`，样式见 http.css）。 */
-const JSON_CLASSES: JsonClassMap = {
-  punct: "sfe-json-punct",
-  key: "sfe-json-key",
-  string: "sfe-json-string",
-  boolean: "sfe-json-boolean",
-  null: "sfe-json-null",
-  number: "sfe-json-number",
+/**
+ * JSON 语义类别的类名映射；两处消费方各传自己那套（JSON 视图 / Prism token）。
+ */
+export type JsonClassMap = {
+  /** 结构符号 `{ } [ ] , :`。 */
+  punct: string;
+  /** 对象键（后跟冒号的那个字符串）。 */
+  key: string;
+  /** 字符串值。 */
+  string: string;
+  /** true / false。 */
+  boolean: string;
+  /** null。 */
+  null: string;
+  /** 数字。 */
+  number: string;
 };
+
+/**
+ * Prism token 体系下的 JSON 语义类名：与 `.json` 文件（Prism json 语言）、
+ * `.http` 正文（syntax-basic）、diff 共用同一套 token 色板。
+ * 本视图的容器（.sfe-json-view / .sfe-json-hl）已加入 syntax.css 的 token 作用域。
+ */
+export const PRISM_JSON_CLASSES: JsonClassMap = {
+  punct: "punctuation",
+  key: "property",
+  string: "string",
+  boolean: "boolean",
+  null: "null",
+  number: "number",
+};
+
+/** 本模块视图渲染用的类名映射（= Prism token 体系，别名保留以示「JSON 视图」身份）。 */
+const JSON_CLASSES = PRISM_JSON_CLASSES;
 
 
 /**
@@ -59,7 +85,7 @@ export function isJsonText(text: string): boolean {
  * @param lines 正文行（已美化）
  * @returns 起始行下标（0 基）→ 结束行下标（0 基，含）
  * @description 缩进变深的那一行是块的开始（它的下一行更深），缩进回落时配对结束。
- *   与上游同款：只认前导空白，空白行不参与配对。
+ *   只认前导空白：空白行量不出缩进（找不到第一个非空白字符），拿不到配对的依据，故不参与。
  */
 function foldingRanges(lines: readonly string[]): Map<number, number> {
   const leading: Array<[number, number]> = [];
@@ -91,22 +117,6 @@ function foldingRanges(lines: readonly string[]): Map<number, number> {
   return ranges;
 }
 
-/** JSON 语义类别的类名映射；两处消费方各传自己那套（JSON 视图 / Prism token）。 */
-export type JsonClassMap = {
-  /** 结构符号 `{ } [ ] , :`。 */
-  punct: string;
-  /** 对象键（后跟冒号的那个字符串）。 */
-  key: string;
-  /** 字符串值。 */
-  string: string;
-  /** true / false。 */
-  boolean: string;
-  /** null。 */
-  null: string;
-  /** 数字。 */
-  number: string;
-};
-
 /**
  * 把一行（已美化的）JSON 文本切成带语义类别的片段。
  * @param line 单行 JSON 文本
@@ -117,8 +127,9 @@ export type JsonClassMap = {
  *   - 数字、true/false、null 各成一类；
  *   - 结构符号 `{ } [ ] , :` = 标点；缩进与空格 = 原样空白。
  * @description 本函数是 JSON 语义着色的**唯一实现**：json-view 的折叠视图与
- *   syntax-basic 的 `.http` 正文着色都走这里，两边只差类名（前者 `sfe-json-*`，
- *   后者用 Prism 的 `property` / `string` 等）。曾各写一份，逐字符相同，改一处必漏另一处。
+ *   syntax-basic 的 `.http` 正文着色都走这里，两边共用 PRISM_JSON_CLASSES（Prism token 类名），
+ *   与 .json 文件、diff 里的 JSON 同一套配色。同一套切分写两份必然漂移，改一处必漏另一处，
+ *   所以这份切分逻辑只留一处。
  */
 export function segmentJsonLine(line: string, classes: JsonClassMap): JsonSegment[] {
   const out: JsonSegment[] = [];
@@ -164,7 +175,7 @@ function renderLine(text: string, collapsible: boolean, label: string): HTMLElem
   const code = el("span", "sfe-json-code");
   for (const segment of segmentJsonLine(text, JSON_CLASSES)) {
     if (!segment.cls) code.appendChild(document.createTextNode(segment.text));
-    else code.appendChild(el("span", segment.cls, segment.text));
+    else code.appendChild(el("span", "token " + segment.cls, segment.text));
   }
   row.appendChild(code);
   return row;
@@ -216,7 +227,7 @@ export function renderJsonHighlight(host: HTMLElement, text: string): void {
     const row = el("div", "sfe-json-hl-line");
     for (const segment of segmentJsonLine(line, JSON_CLASSES)) {
       if (!segment.cls) row.appendChild(document.createTextNode(segment.text));
-      else row.appendChild(el("span", segment.cls, segment.text));
+      else row.appendChild(el("span", "token " + segment.cls, segment.text));
     }
     host.appendChild(row);
   }
