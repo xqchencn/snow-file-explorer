@@ -718,6 +718,19 @@ function wrapperCommand(wrapper: string | null | undefined, prefix: string, fall
   return `${"../".repeat(depth)}${value.replace(/^\.\//, "")}`;
 }
 
+/**
+ * 拼装 Maven 的 `-D<name>=<value>` 参数，整体加双引号。
+ *
+ * @description 命令最终是写进 PTY 交给 shell 执行的，不是 exec 直接传数组。
+ *   实测 PowerShell 会把裸写的 `-Dspring-boot.run.main-class=x` 在第一个 `.`
+ *   处切成两段（`-Dspring-boot` 与 `.run.main-class=x`），Maven 只拿到残段，
+ *   于是报 `Unknown lifecycle phase ".run.main-class=..."`。整体加引号后
+ *   PowerShell 与 cmd 都按单个参数传递（cmd 会剥掉引号，实测无副作用）。
+ */
+function mavenDefineArg(name: string, value: string): string {
+  return `"-D${name}=${value}"`;
+}
+
 function jvmMainLabel(mainClass: string): string {
   const value = String(mainClass || "");
   return value.split(".").pop() || value;
@@ -746,7 +759,7 @@ function jvmCommand(
 /**
  * 生成 Maven 基础命令和源码 main 命令。调用方负责把 cwd 切到 prefix 对应模块。
  * @param opts 所属模块目录、pom 文本、main 候选、wrapper 与包管理器命令名
- * @returns Maven test / package 与（Spring Boot 或 exec:java）main 运行命令
+ * @returns Maven test / package / install 与（Spring Boot 或 exec:java）main 运行命令
  */
 export function readMavenCommands(opts: MavenCommandOptions = {}): RunCommand[] {
   const prefix = normalizeJvmPrefix(opts.prefix);
@@ -754,14 +767,17 @@ export function readMavenCommands(opts: MavenCommandOptions = {}): RunCommand[] 
   const commands = [
     jvmCommand("maven", prefix, "test", `${mvn} test`, "test", "java"),
     jvmCommand("maven", prefix, "package", `${mvn} package`, "package", "java"),
+    // install：把本模块连同依赖装进本地仓库，多模块项目最常用的构建入口（package 只出 jar，不落库）。
+    // 图标取 installation（icon-data 里已有的现成 SVG），与 package 的 Package 区分开。
+    jvmCommand("maven", prefix, "install", `${mvn} install`, "install", "installation"),
   ];
   const springBoot = opts.springBoot === true || /spring-boot-maven-plugin/.test(String(opts.pomText || ""));
   for (const candidate of Array.isArray(opts.mainCandidates) ? opts.mainCandidates : []) {
     if (!candidate || !candidate.mainClass) continue;
     const suffix = String(candidate.mainClass).replace(/[^A-Za-z0-9_$]+/g, "-");
     const cmd = springBoot
-      ? `${mvn} spring-boot:run -Dspring-boot.run.main-class=${candidate.mainClass}`
-      : `${mvn} compile exec:java -Dexec.mainClass=${candidate.mainClass}`;
+      ? `${mvn} spring-boot:run ${mavenDefineArg("spring-boot.run.main-class", candidate.mainClass)}`
+      : `${mvn} compile exec:java ${mavenDefineArg("exec.mainClass", candidate.mainClass)}`;
     commands.push(
       jvmCommand(
         "maven",

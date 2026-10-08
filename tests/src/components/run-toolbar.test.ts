@@ -274,16 +274,17 @@ test("运行控件: 多包命令按文件夹分组，组名变化处显示分组
 });
 
 
-test("运行控件: Maven 多模块只显示根 test/package 和真实模块 main，不显示模块重复构建命令", () => {
+test("运行控件: Maven 多模块只显示根 test/package/install 和真实模块 main，不显示模块重复构建命令", () => {
   const commands: FlatRunCommand[] = [
     { id: "maven:test", labelKey: null, label: "test", labelFallback: "test", cmd: "mvn test", icon: "package", ecosystem: "maven", dir: "", group: null },
     { id: "maven:package", labelKey: null, label: "package", labelFallback: "package", cmd: "mvn package", icon: "package", ecosystem: "maven", dir: "", group: null },
+    { id: "maven:install", labelKey: null, label: "install", labelFallback: "install", cmd: "mvn install", icon: "installation", ecosystem: "maven", dir: "", group: null },
     {
       id: "maven:admin:main:com-nzygyt-GytApplication",
       labelKey: null,
       label: "GytApplication",
       labelFallback: "admin/GytApplication",
-      cmd: "mvn spring-boot:run -Dspring-boot.run.main-class=com.nzygyt.GytApplication",
+      cmd: "mvn spring-boot:run \"-Dspring-boot.run.main-class=com.nzygyt.GytApplication\"",
       icon: "java",
       ecosystem: "maven",
       dir: "nzygyt-admin",
@@ -301,7 +302,7 @@ test("运行控件: Maven 多模块只显示根 test/package 和真实模块 mai
   );
   assert.deepEqual(
     [...wrap.querySelectorAll<HTMLElement>(".sfe-run-dropdown-label")].map((node) => node.textContent),
-    ["test", "package", "GytApplication"]
+    ["test", "package", "install", "GytApplication"]
   );
 });
 

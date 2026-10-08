@@ -1449,7 +1449,7 @@ test('代码预览: Java/Kotlin main sourcePath + mainLine 显示 14x14 运行�
     id: 'maven:app:main:demo-App',
     labelKey: null,
     labelFallback: 'app/run demo.App',
-    cmd: '..\\mvnw.cmd spring-boot:run -Dspring-boot.run.main-class=demo.App',
+    cmd: '..\\mvnw.cmd spring-boot:run "-Dspring-boot.run.main-class=demo.App"',
     icon: 'java',
     ecosystem: 'maven:app',
     dir: 'app',

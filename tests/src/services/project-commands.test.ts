@@ -509,7 +509,8 @@ test("JVM 生态：识别 Java main、跳过注释中的伪 main，并生成 Mav
   assert.equal(commands[0].cmd, "../mvnw.cmd test");
   const run = commands.find((command) => command.mainClass === "com.example.App");
   assert.ok(run);
-  assert.equal(run.cmd, "../mvnw.cmd spring-boot:run -Dspring-boot.run.main-class=com.example.App");
+  // -D 参数整体带引号：裸写的 -D 会被 PowerShell 在第一个 `.` 处切成两段（见 ecosystems.mavenDefineArg）。
+  assert.equal(run.cmd, "../mvnw.cmd spring-boot:run \"-Dspring-boot.run.main-class=com.example.App\"");
   assert.equal(run.runKind, "spring-boot");
   assert.equal(run.sourcePath, "D:/repo/admin/src/main/java/App.java");
 });
@@ -547,7 +548,7 @@ test("JVM 生态：识别 Kotlin 顶层和 object main，普通 Maven 使用 exe
   assert.deepEqual(objectMain, [{ mainClass: "demo.Launcher", line: 3, language: "kotlin" }]);
   const run = readMavenCommands({ prefix: "tools", mainCandidates: [{ ...top[0], sourcePath: "D:/repo/tools/Launcher.kt" }] }).find((command) => command.mainClass);
   assert.ok(run);
-  assert.equal(run.cmd, "mvn compile exec:java -Dexec.mainClass=demo.LauncherKt");
+  assert.equal(run.cmd, "mvn compile exec:java \"-Dexec.mainClass=demo.LauncherKt\"");
   assert.equal(run.runKind, "maven-exec");
 });
 
@@ -562,7 +563,8 @@ test("JVM 生态：Maven 无 wrapper 始终使用系统 mvn，不生成相对路
   assert.deepEqual(commandTexts, [
     "mvn test",
     "mvn package",
-    "mvn spring-boot:run -Dspring-boot.run.main-class=com.nzygyt.GytApplication",
+    "mvn install",
+    "mvn spring-boot:run \"-Dspring-boot.run.main-class=com.nzygyt.GytApplication\"",
   ]);
   assert.ok(commandTexts.every((command) => !command.startsWith("../mvn ")));
 });
@@ -622,7 +624,7 @@ test("detectProjectCommands：Maven/Gradle 多模块保留 dir、id 和 JVM 命�
   const flat = flattenCommands(result);
   assert.deepEqual(
     flat.map((command) => `${command.group || "root"}:${command.label}`),
-    ["root:test", "root:package", "admin:App", "app:assembleDebug", "app:testDebugUnitTest", "app:lint"]
+    ["root:test", "root:package", "root:install", "admin:App", "app:assembleDebug", "app:testDebugUnitTest", "app:lint"]
   );
   assert.ok(flat.some((command) => command.id === "maven:admin:main:demo-App" && command.dir === "admin"));
   assert.ok(flat.every((command) => command.id && command.labelFallback && command.icon));
@@ -630,7 +632,7 @@ test("detectProjectCommands：Maven/Gradle 多模块保留 dir、id 和 JVM 命�
   assert.ok(flattenCommands(result, { includeHidden: true }).some((command) => command.mainClass === "demo.Tool"));
   // RunCommand.label 在类型上可缺（见 ecosystems 的 RunCommandCore），includes 的入参类型要跟着覆盖
   // undefined；字面量与判定本身一字未改。
-  const rootCommonLabels: (string | undefined)[] = ["test", "package"];
+  const rootCommonLabels: (string | undefined)[] = ["test", "package", "install"];
   assert.ok(!flat.some((command) => command.dir === "admin" && rootCommonLabels.includes(command.label)));
 });
 
@@ -805,7 +807,7 @@ test("scanProjectCommands：Maven 根聚合器与子模块读取标准源码 mai
     const result = await scanProjectCommands(root);
     const adminRun = flattenCommands(result).find((command) => command.dir === "admin" && command.mainClass === "demo.App");
     assert.ok(adminRun);
-    assert.equal(adminRun.cmd, "../mvnw.cmd spring-boot:run -Dspring-boot.run.main-class=demo.App");
+    assert.equal(adminRun.cmd, "../mvnw.cmd spring-boot:run \"-Dspring-boot.run.main-class=demo.App\"");
     assert.equal(adminRun.sourcePath, app);
     assert.ok(result.ecosystems.some((eco) => eco.id === "maven"));
     assert.ok(result.ecosystems.some((eco) => eco.id === "maven:admin"));
