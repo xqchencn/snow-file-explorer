@@ -34,7 +34,7 @@
   },
   "styles": ["index.css"],
   "privacy": {
-    "scopes": ["filesystem", "terminal", "conversations"],
-    "note": "允许在用户明确操作后通过 filesystem scope 编辑和保存文件、重命名以及删除文件和目录；通过 terminal scope 在用户点击运行命令后启动无头终端进程并读取其输出与退出状态；通过 conversations scope 在用户点击「发送到当前会话」并确认后，把所选代码或终端文本作为用户消息发送到当前会话。"
+    "scopes": ["filesystem", "terminal", "conversations", "network"],
+    "note": "允许在用户明确操作后通过 filesystem scope 编辑和保存文件、重命名以及删除文件和目录；通过 terminal scope 在用户点击运行命令后启动无头终端进程并读取其输出与退出状态；通过 conversations scope 在用户点击「发送到当前会话」并确认后，把所选代码或终端文本作为用户消息发送到当前会话；通过 network scope 在用户于 REST 请求视图点击发送后，由宿主代发 HTTP 请求，将用户自行填写的目标地址、请求头与请求体发送至该地址，并读取返回的状态与响应内容。"
   }
 }
