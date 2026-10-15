@@ -19,7 +19,6 @@ import {
   splitGitPath,
   buildGitFileTree,
   flattenGitTree,
-  countGitTreeFiles,
   collectGitTreeFiles,
 } from "../services/git-service.ts";
 import type { GitTreeNode, GitTreeRow } from "../services/git-service.ts";
@@ -567,7 +566,7 @@ function renderFolderRow(opts: GitFolderRowOptions): HTMLDivElement {
   item.lastChild!.appendChild(createActionIcon(isExpanded ? "chevronDown" : "chevronRight", 13));
   item.appendChild(createFileIconNode(node.name, true, isExpanded));
   item.appendChild(el("span", "sfe-git-name-text", node.name));
-  item.appendChild(el("span", "sfe-git-folder-count", String(countGitTreeFiles(node))));
+  // 目录行不显示子孙文件数（对齐 IDEA 的提交窗口：目录行只有名字）。
 
   // 目录级暂存/取消暂存：对整个子树生效，按钮恒在最右（与文件行一致）。
   // 不做 busy 禁用（见 renderSection.actionBtn 注释：禁用会在列表重建后写死）。
